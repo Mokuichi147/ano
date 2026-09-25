@@ -5,7 +5,7 @@ use crate::{
     input::InputPart,
     mcp::McpPool,
     tools::{ToolContext, ToolRegistry},
-    ApprovalHandler,
+    AgentResult, ApprovalHandler, RunOutcome, TaskPlan,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -83,6 +83,8 @@ pub enum JobState {
     Queued,
     Running,
     Completed,
+    Blocked,
+    Incomplete,
     Failed,
     Cancelled,
     TimedOut,
@@ -92,7 +94,12 @@ impl JobState {
     pub fn is_finished(self) -> bool {
         matches!(
             self,
-            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut
+            Self::Completed
+                | Self::Blocked
+                | Self::Incomplete
+                | Self::Failed
+                | Self::Cancelled
+                | Self::TimedOut
         )
     }
 }
@@ -108,6 +115,7 @@ pub struct JobStatus {
     pub finished_at_unix: Option<u64>,
     pub cancellation_requested: bool,
     pub result: Option<String>,
+    pub plan: Option<TaskPlan>,
     pub error: Option<String>,
 }
 
@@ -119,7 +127,7 @@ struct JobRecord {
 }
 
 enum JobOutcome {
-    Completed(String),
+    Completed(String, TaskPlan),
     Failed(String),
     Cancelled,
     TimedOut,
@@ -313,6 +321,7 @@ async fn create_job(
                     finished_at_unix: None,
                     cancellation_requested: false,
                     result: None,
+                    plan: None,
                     error: None,
                 },
                 cancel,
@@ -442,7 +451,7 @@ async fn run_job(
             Duration::from_secs(state.config.webhook.job_timeout_secs),
             execute_job(&state, request),
         ) => match outcome {
-            Ok(Ok(text)) => JobOutcome::Completed(text),
+            Ok(Ok(result)) => JobOutcome::Completed(result.text, result.plan),
             Ok(Err(error)) => JobOutcome::Failed(format!("{error:#}")),
             Err(_) => JobOutcome::TimedOut,
         },
@@ -493,7 +502,7 @@ async fn shutdown_jobs(state: &WebhookState) {
     }
 }
 
-async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Result<String> {
+async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Result<AgentResult> {
     let environment = state.config.environment_for(&request.environment)?.clone();
     let mut settings = state.config.agent.clone();
     if let Some(model) = environment.model {
@@ -547,7 +556,7 @@ async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Resul
         format: audio.format,
     }));
 
-    Ok(agent.run(RunRequest { input, context }).await?.text)
+    agent.run(RunRequest { input, context }).await
 }
 
 async fn finish(state: &WebhookState, id: &str, outcome: JobOutcome) {
@@ -567,9 +576,14 @@ async fn finish(state: &WebhookState, id: &str, outcome: JobOutcome) {
         status.finished_at_unix = Some(unix_now());
         job.finished_at = Some(Instant::now());
         match outcome {
-            JobOutcome::Completed(text) => {
-                status.status = JobState::Completed;
+            JobOutcome::Completed(text, plan) => {
+                status.status = match plan.outcome() {
+                    RunOutcome::Completed => JobState::Completed,
+                    RunOutcome::Blocked => JobState::Blocked,
+                    RunOutcome::Incomplete => JobState::Incomplete,
+                };
                 status.result = Some(text);
+                status.plan = Some(plan);
             }
             JobOutcome::Failed(error) => {
                 status.status = JobState::Failed;
@@ -685,7 +699,7 @@ mod tests {
         shutdown_jobs, unix_now, verify_signature, HmacSha256, JobOutcome, JobRecord, JobState,
         JobStatus, WebhookState,
     };
-    use crate::{AppConfig, OpenAiClient, ToolRegistry};
+    use crate::{AppConfig, OpenAiClient, TaskPlan, ToolRegistry};
     use axum::{
         body::{to_bytes, Bytes},
         extract::{Path, State},
@@ -994,7 +1008,12 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        finish(&state, &id, JobOutcome::Completed("late result".into())).await;
+        finish(
+            &state,
+            &id,
+            JobOutcome::Completed("late result".into(), TaskPlan::default()),
+        )
+        .await;
         finish(&state, &id, JobOutcome::Failed("later error".into())).await;
         let status = &state.jobs.read().await[&id].snapshot;
         assert_eq!(status.status, JobState::Cancelled);
@@ -1010,14 +1029,56 @@ mod tests {
         let old = enqueue(&state, "first").await;
         let new = enqueue(&state, "second").await;
         let pending = enqueue(&state, "third").await;
-        finish(&state, &old, JobOutcome::Completed("old".into())).await;
+        finish(
+            &state,
+            &old,
+            JobOutcome::Completed("old".into(), TaskPlan::default()),
+        )
+        .await;
         assert_eq!(state.jobs.read().await.len(), 3);
-        finish(&state, &new, JobOutcome::Completed("new".into())).await;
+        finish(
+            &state,
+            &new,
+            JobOutcome::Completed("new".into(), TaskPlan::default()),
+        )
+        .await;
         let jobs = state.jobs.read().await;
         assert_eq!(jobs.len(), 2);
         assert!(!jobs.contains_key(&old));
         assert_eq!(jobs[&new].snapshot.result.as_deref(), Some("new"));
         assert_eq!(jobs[&pending].snapshot.status, JobState::Queued);
+    }
+
+    #[tokio::test]
+    async fn unfinished_plans_are_terminal_jobs_with_their_remaining_steps() {
+        let mut state = state();
+        state.job_slots = Arc::new(Semaphore::new(0));
+        let state = Arc::new(state);
+        for (step_status, expected) in [
+            ("pending", JobState::Incomplete),
+            ("blocked", JobState::Blocked),
+        ] {
+            let id = enqueue(&state, &format!("needs more work: {step_status}")).await;
+            let plan: TaskPlan = serde_json::from_value(json!({"revision":1,"explanation":null,
+                "steps":[{"id":"verify","description":"Run tests","status":step_status,"detail":"Test database unavailable"}]})).unwrap();
+            finish(
+                &state,
+                &id,
+                JobOutcome::Completed("Still needs verification".into(), plan),
+            )
+            .await;
+            let snapshot = state.jobs.read().await[&id].snapshot.clone();
+            assert_eq!(snapshot.status, expected);
+            assert!(snapshot.status.is_finished());
+            assert!(snapshot.finished_at_unix.is_some());
+            let json = serde_json::to_value(snapshot).unwrap();
+            assert_eq!(json["plan"]["steps"][0]["status"], step_status);
+            let signature = signed_headers(unix_now(), format!("cancel:{id}").as_bytes());
+            let response = cancel_job(State(Arc::clone(&state)), signature, Path(id.clone())).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(state.jobs.read().await[&id].snapshot.status, expected);
+        }
+        shutdown_jobs(&state).await;
     }
 
     #[test]
@@ -1080,6 +1141,7 @@ mod tests {
                     finished_at_unix: None,
                     cancellation_requested: false,
                     result: None,
+                    plan: None,
                     error: None,
                 },
                 cancel: watch::channel(false).0,
@@ -1132,6 +1194,7 @@ mod tests {
                 finished_at_unix: finished,
                 cancellation_requested: false,
                 result: None,
+                plan: None,
                 error: None,
             },
             cancel: watch::channel(false).0,

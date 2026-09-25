@@ -5,6 +5,7 @@ pub mod client;
 pub mod config;
 pub mod input;
 mod mcp;
+pub mod plan;
 pub mod policy;
 pub mod session;
 mod storage;
@@ -23,6 +24,7 @@ pub use config::{
 };
 pub use input::{build_user_input, InputPart};
 pub use mcp::McpPool;
+pub use plan::{PlanStep, RunOutcome, StepStatus, TaskPlan};
 pub use policy::UserPolicy;
 pub use session::{Session, SessionBinding, SessionData, SessionStatus};
 pub use tools::{

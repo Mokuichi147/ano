@@ -15,13 +15,14 @@ OpenAI Responses API を使う、Rust 製の自律型 AI agent です。Response
 - 名前付き実行環境を選べる署名付き Webhook と、中止・タイムアウトに対応する非同期ジョブ API
 - 実行環境に閉じたファイル一覧・分割読み取り・全文検索・書き込み
 - 保存して別プロセスから再開できる会話セッション
+- 工程と進捗を保存する作業計画、未完了工程の継続、完了・中断理由の区別
 - 競合検出付きの正確なファイル編集と、登録済み検証コマンドの実行
 - CLI からの名前付き環境選択、JSON 出力、ログ量の切り替え
 - tool / MCP は lazy discovery し、検索結果の少数だけを model request に公開
 
 ## 起動
 
-PowerShell の例です。
+Rust 1.89 以降が必要です。PowerShell の例です。
 
 ```powershell
 Copy-Item config.example.toml config.toml
@@ -58,7 +59,7 @@ cargo run --quiet -- run --environment default --json --quiet "実装の概要�
 
 `--environment` は workspace・書き込み権限・MCP承認方針・model・instructions を読み込みます。`--workspace`、`--allow-writes`、`--auto-approve-mcp` との併用はエラーです。`--model` でモデルを変更でき、`--non-interactive` で環境の自動承認も無効にできます。環境指定なしの場合は従来どおり `--workspace` と `--allow-writes` を使えます。
 
-通常の進捗ログは tool 名と状態だけを stderr に出力します。引数・ファイル内容を含む完全なログが必要なら `--verbose`、進捗を省略するなら `--quiet` を指定します。`--json` の成功時出力は `text`、`response_id`、`events` を含みます（`events` には引数と結果も含まれます）。失敗時は非ゼロ終了コードと stderr のエラーを返します。
+通常の進捗ログは tool 名・状態、モデルの途中経過、作業計画の更新を stderr に出力します。引数・ファイル内容を含む完全なログが必要なら `--verbose`、進捗を省略するなら `--quiet` を指定します。`--json` の出力は `text`、`response_id`、`events`、`outcome`、`plan` を含みます（`events` には引数と結果も含まれます）。実行エラーは非ゼロ終了コードと stderr のエラーを返します。実行が正常終了しても未完了の工程が残る場合があるため、自動処理では `outcome` も確認してください。
 
 `OPENAI_BASE_URL` を設定すると、Responses API のモックサーバーなどへ向けられます。モデルは `config.toml` または `--model` で変更できます。音声入力を使う場合は、`input_audio` をサポートするモデル（例: `gpt-audio-1.5`）を指定してください。現在の公式モデル一覧では、一般的な画像対応モデルと音声専用モデルの対応範囲が異なるため、画像と音声を同一リクエストで使う場合は、両方をサポートするモデルを選んでください。
 
@@ -72,13 +73,23 @@ cargo run -- run --environment default --session .ano/review.json "前回の調�
 cargo run -- session .ano/review.json
 ```
 
-セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。途中で失敗したセッションは、原因を確認してから `--recover-session` を付けて再開します。実行中のセッションは sidecar lock で二重起動を防ぎ、壊れたファイルは自動上書きせず `.corrupt-*` として退避します。`.ano/` は既定で Git 管理対象外です。
+セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。プロセスが中断して `running` のまま残ったセッションは、workspace の状態を確認してから `--recover-session` を付けて再開します。エラーを記録して `failed` になったセッションは通常どおり再開できます。実行中のセッションは sidecar lock で二重起動を防ぎ、壊れたファイルはそのまま残して読み込みを拒否します。`.ano/` は既定で Git 管理対象外です。
+
+並行 tool 実行では、応答が返ったものから個別に保存します。遅い tool の待機中に中断しても、保存済みの結果は復元時に維持されます。結果未記録の呼び出しだけを「結果不明」として扱い、自動再実行しません。外部操作の完了と結果保存の間に停止した場合は結果不明になるため、再試行前に実際の状態を確認します。
+
+## 作業計画と完了判定
+
+モデルは `task_plan` で工程を作り、`pending`・`in_progress`・`completed`・`blocked` を更新できます。`steps:null` で現在の計画を読み、更新時は全工程と `expected_revision`（初回は0）を送ります。同じ版に対する並行更新は一方を拒否し、変更の消失を防ぎます。工程には一意の `id`、`description`、`status`、`detail` があり、`blocked` には理由が必要です。既存工程の削除・変更には `explanation` が必要です。
+
+未完了の工程があるのにモデルが最終回答を返した場合、ランタイムは残りの `max_tool_rounds` 内で作業の継続を促します。上限までに終わらなかった工程は `outcome: "incomplete"`、残りがすべて実行不能なら `"blocked"`、全工程が完了した場合は `"completed"` として返します。計画未作成時の最終回答は従来と同じく `"completed"` です。これはモデルが記録した工程の状態であり、成果物の正しさは `workspace_check` などの検証結果で確認します。
+
+`--session` を使うと計画も保存され、`ano session PATH` で残りの工程を確認できます。既存の計画なしセッションも読み込めます。`task_plan` は `tool_search` と同じく常時利用できるランタイム機能で、allowlist への追加は不要です。`disabled_tools = ["task_plan"]` または `--disable-tool task_plan` で無効化できます。
 
 ## 修正後にビルド・テストを実行する
 
 `workspace_edit` は置換対象がファイル内にちょうど一度だけ存在することと、必要なら `expected_sha256` が一致することを確認してから原子的に書き込みます。まず `dry_run:true` で差分とハッシュを確認し、問題がなければ `dry_run:false` で適用できます。競合が起きた場合は書き込みを行いません。
 
-環境設定の `checks` に実行を許可するコマンドを名前付きで登録すると、agent は `workspace_check({"name": "test"})` のように検証できます。`name:null` は利用可能な検証名を一覧表示します。コマンドの引数は設定ファイルから固定され、workspace 内でのみ実行され、出力は上限付きで返されます。
+環境設定の `checks` に実行を許可するコマンドを名前付きで登録すると、agent は `workspace_check({"name": "test"})` のように検証できます。`name:null` は利用可能な検証名を一覧表示します。コマンドと引数は設定ファイルで固定され、workspace を作業ディレクトリとして実行し、出力は上限付きで返します。OSの権限は ano と同じなので、信頼するプロジェクトのコマンドを登録してください。検証固有の `timeout_secs` を優先し、タイムアウト時も取得済みの出力を返します。Webhook のジョブ全体の制限は引き続き適用されます。
 
 ```toml
 [environments.coding.checks.test]
@@ -149,7 +160,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/webhook/tasks' `
   -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-成功時は `202 Accepted` と `job_id`、`status_url`、`cancel_url` が返り、`GET /jobs/<job_id>` で状態と結果を取得できます。状態取得にも同じ形式の `X-Ano-Timestamp` と `X-Ano-Signature` が必要で、署名対象は `"<timestamp>.<job_id>"` です。状態は `queued`、`running`、`completed`、`failed`、`cancelled`、`timed_out` のいずれかです。`started_at_unix` と `finished_at_unix` は開始前・終了前には `null` です。
+成功時は `202 Accepted` と `job_id`、`status_url`、`cancel_url` が返り、`GET /jobs/<job_id>` で状態と結果を取得できます。状態取得にも同じ形式の `X-Ano-Timestamp` と `X-Ano-Signature` が必要で、署名対象は `"<timestamp>.<job_id>"` です。状態は `queued`、`running`、`completed`、`blocked`、`incomplete`、`failed`、`cancelled`、`timed_out` のいずれかです。`blocked` と `incomplete` も終了状態であり、`result` と `plan` から理由と残りの工程を確認できます。`started_at_unix` と `finished_at_unix` は開始前・終了前には `null` です。
 
 同時に実行するジョブは `webhook.max_concurrent_jobs`（既定 2）までで、それを超えたジョブは `queued` のまま待ちます。待機中と実行中の合計が `webhook.max_pending_jobs`（既定 64）に達すると `503` を返します。`webhook.job_timeout_secs`（既定1800秒）は、待機時間を除いた実行全体の上限で、API応答待ちやtool実行時間も含みます。上限到達時は `timed_out` になり、空いた実行枠で次のジョブを開始します。終了済みのジョブだけを `webhook.max_retained_jobs`（既定1000）件まで保持し、終了するたびに古い結果から削除します。`0` を指定すると結果を保持しません。
 
@@ -235,7 +246,7 @@ registry.register_contextual(
 
 標準の tool（`echo`、`unix_time`、`workspace_*`）は `ano::register_builtin_tools(&registry)` で登録できます。tool 名は Responses API の関数名規則に合わせて ASCII 英数字・`_`・`-` の 64 文字以内に限られ、`tool_search` と `mcp__` で始まる名前は予約されています。
 
-`Agent::run` は function call を自動で処理します。モデルが不正な JSON 引数を返した場合や tool が失敗した場合は、実行を中断せずエラー内容を tool 出力としてモデルへ返します。各 tool 呼び出しには `agent.tool_timeout_secs`（既定 120 秒）のタイムアウトがあります。
+`Agent::run` は function call を自動で処理します。モデルが不正な JSON 引数を返した場合や tool が失敗した場合は、実行を中断せずエラー内容を tool 出力としてモデルへ返します。通常の tool 呼び出しには `agent.tool_timeout_secs`（既定 120 秒）のタイムアウトがあります。登録済みの `workspace_check` は検証ごとの `timeout_secs` を使い、結果回収のために外側の制限へ5秒の猶予を設けます。
 
 `agent.max_tool_rounds` は Responses リクエスト数の上限です。最後の1回は tool を無効にして、実行済みの内容と未完了の作業を報告するために確保します。`1` を指定した場合は tool を使わず回答します。API が `incomplete`・`failed` などの未完了状態を返した場合は、その応答のローカル tool を実行せずエラーにします。回答拒否の説明文はそのまま利用者へ返します。
 
@@ -311,7 +322,7 @@ MCP server の `label` は ASCII 英数字・`_`・`-` だけが使え、重複�
 
 ## 大量の tool / MCP を登録する場合
 
-tool 定義や MCP server を登録しても、初回の Responses リクエストへ全件は送りません。最初に固定サイズの `tool_search` だけを公開し、モデルが capability を検索した後、上位 `agent.tool_discovery_limit` 件だけを次のリクエストへ追加します。これにより登録数に比例して tool schema が毎回トークンを消費することを防ぎます。
+tool 定義や MCP server を登録しても、初回の Responses リクエストへ全件は送りません。最初に固定サイズの `tool_search` と `task_plan` を公開し、モデルが capability を検索した後、上位 `agent.tool_discovery_limit` 件だけを次のリクエストへ追加します。これにより登録数に比例して tool schema が毎回トークンを消費することを防ぎます。
 
 Responses API 管理方式では検索用の軽量 `tool_catalog` を設定できます。`tool_catalog` がない場合でも、MCP の `allowed_tools` に列挙した名前は検索対象になります。サーバーの tool 全件をモデルへ公開したくない場合は、`allowed_tools` と `tool_catalog` を明示してください。直接接続方式では実サーバーからローカルで取得した一覧が検索対象になります。
 

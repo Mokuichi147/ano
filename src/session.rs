@@ -1,6 +1,6 @@
 //! Local conversation persistence. Tool calls are journaled before execution;
 //! interrupted calls are never replayed automatically.
-use crate::{storage::atomic_write, ToolContext};
+use crate::{storage::atomic_write, TaskPlan, ToolContext};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -57,6 +57,8 @@ pub struct SessionData {
     pub last_response_id: Option<String>,
     pub last_error: Option<String>,
     pub history: Vec<Value>,
+    #[serde(default)]
+    pub plan: TaskPlan,
     pending_calls: Vec<Value>,
 }
 
@@ -108,6 +110,7 @@ impl Session {
                     last_response_id: None,
                     last_error: None,
                     history: Vec::new(),
+                    plan: TaskPlan::default(),
                     pending_calls: Vec::new(),
                 }
             }
@@ -143,6 +146,7 @@ impl Session {
         if data.version != SESSION_VERSION {
             bail!("unsupported session version {}", data.version);
         }
+        data.plan.validate().context("invalid session plan")?;
         Ok(data)
     }
 
@@ -191,8 +195,28 @@ impl Session {
     }
 
     pub(crate) fn record_tool_results(&mut self, results: &[Value]) -> Result<()> {
+        for result in results {
+            self.data
+                .pending_calls
+                .retain(|call| !matches_result(call, result));
+        }
         self.data.history.extend_from_slice(results);
-        self.data.pending_calls.clear();
+        self.save()
+    }
+
+    pub(crate) fn checkpoint_tool_result(&mut self, result: &Value, plan: &TaskPlan) -> Result<()> {
+        self.data.plan = plan.clone();
+        self.record_tool_results(std::slice::from_ref(result))
+    }
+
+    pub(crate) fn record_runtime_input(&mut self, input: &Value) -> Result<()> {
+        self.data.history.extend(
+            input
+                .as_array()
+                .context("runtime input must be an array")?
+                .iter()
+                .cloned(),
+        );
         self.save()
     }
 
@@ -235,6 +259,19 @@ impl Session {
         }
         atomic_write(&self.path, &bytes, None)
     }
+}
+
+fn matches_result(call: &Value, result: &Value) -> bool {
+    let (kind, key) = match call["type"].as_str() {
+        Some("function_call") => ("function_call_output", "call_id"),
+        Some("mcp_approval_request") => ("mcp_approval_response", "approval_request_id"),
+        _ => return false,
+    };
+    result["type"] == kind
+        && call
+            .get(key)
+            .or_else(|| call.get("id"))
+            .is_some_and(|id| !id.is_null() && Some(id) == result.get(key))
 }
 
 fn now() -> u64 {
@@ -363,5 +400,24 @@ mod tests {
         );
         assert_eq!(saved.history[2]["output"], "saved");
         assert_eq!(saved.status, SessionStatus::Failed);
+    }
+
+    #[test]
+    fn sessions_from_before_task_plans_remain_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("legacy.json");
+        {
+            let mut session = Session::open(&path, binding(), false).unwrap();
+            session
+                .begin_turn(&json!([{"role":"user","content":"original task"}]))
+                .unwrap();
+            session.complete().unwrap();
+        }
+        let mut old: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("plan");
+        std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let reopened = Session::open(&path, binding(), false).unwrap();
+        assert_eq!(reopened.data.plan, TaskPlan::default());
+        assert_eq!(reopened.data.history[0]["content"], "original task");
     }
 }

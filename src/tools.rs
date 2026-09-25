@@ -225,6 +225,9 @@ pub(crate) const DIRECT_MCP_PREFIX: &str = "mcp__";
 /// `:` is rejected so local names never collide with `server:tool` policy
 /// rules for MCP tools.
 fn validate_tool_name(name: &str) -> Result<()> {
+    if name == crate::plan::TASK_PLAN_NAME {
+        bail!("tool name '{name}' is reserved for task planning");
+    }
     if name == TOOL_SEARCH_NAME {
         bail!("tool name '{TOOL_SEARCH_NAME}' is reserved for lazy discovery");
     }

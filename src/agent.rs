@@ -3,6 +3,7 @@ use crate::{
     config::{AgentSettings, McpTransport},
     input::{build_user_input, InputPart},
     mcp::{ConnectedMcpServer, DirectMcpTool, McpPool, McpRuntime},
+    plan::{task_plan_definition, RunOutcome, TaskPlan, TASK_PLAN_NAME},
     policy::UserPolicy,
     session::{Session, SessionStatus},
     tools::{ToolContext, ToolDefinition, ToolRegistry, TOOL_SEARCH_NAME},
@@ -37,6 +38,10 @@ impl RunRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    PlanUpdated {
+        round: usize,
+        plan: TaskPlan,
+    },
     AssistantProgress {
         round: usize,
         text: String,
@@ -94,6 +99,8 @@ pub struct AgentResult {
     pub text: String,
     pub response_id: String,
     pub events: Vec<AgentEvent>,
+    pub outcome: RunOutcome,
+    pub plan: TaskPlan,
 }
 
 #[derive(Debug, Clone)]
@@ -223,6 +230,7 @@ struct RoundScope<'a> {
     active: &'a ActiveTools,
     mcp_runtime: &'a McpRuntime,
     events: &'a EventLog<'a>,
+    plan: &'a Mutex<TaskPlan>,
 }
 
 /// Result of handling one output item.
@@ -300,6 +308,12 @@ impl Agent {
         let mut next_input = user_input;
         let mut previous_response_id: Option<String> = None;
         let events = EventLog::new(self.event_listener.as_ref());
+        let plan = Mutex::new(
+            session
+                .as_ref()
+                .map(|session| session.data().plan.clone())
+                .unwrap_or_default(),
+        );
         let mut active = ActiveTools::default();
 
         for round in 0..self.settings.max_tool_rounds {
@@ -351,7 +365,7 @@ impl Agent {
             previous_response_id = Some(response_id.clone());
 
             let mut items = response["output"].as_array().cloned().unwrap_or_default();
-            if items.is_empty() {
+            if !items.iter().any(|item| item["type"] == "message") {
                 if let Some(text) = response["output_text"]
                     .as_str()
                     .filter(|text| !text.trim().is_empty())
@@ -396,17 +410,23 @@ impl Agent {
                         active: &active,
                         mcp_runtime: &mcp_runtime,
                         events: &events,
+                        plan: &plan,
                     },
+                    session.as_deref_mut(),
                 )
                 .await?;
-            if let Some(session) = session.as_deref_mut() {
-                session.record_tool_results(&continuation)?;
-            }
             if let Some(selection) = selection {
                 active = selection;
             }
 
-            let output_text = extract_output_text(&response);
+            // Commentary is progress, including when it shares a response with
+            // a final message. Keep it out of the user's final answer.
+            let final_messages = items
+                .iter()
+                .filter(|item| item["type"] == "message" && item["phase"] != "commentary")
+                .cloned()
+                .collect::<Vec<_>>();
+            let output_text = extract_output_text(&json!({"output": final_messages}));
             if !continuation.is_empty() {
                 if round + 1 >= self.settings.max_tool_rounds {
                     bail!("agent reached max_tool_rounds while tools were still pending");
@@ -415,12 +435,32 @@ impl Agent {
                 continue;
             }
 
+            if only_commentary {
+                if final_round {
+                    bail!("agent exhausted its request budget with a progress update instead of a final answer");
+                }
+                next_input = json!([]);
+                continue;
+            }
+
             if !output_text.trim().is_empty() {
-                if only_commentary {
-                    if final_round {
-                        bail!("agent exhausted its request budget with a progress update instead of a final answer");
+                let plan = plan
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+                let outcome = plan.outcome();
+                if outcome == RunOutcome::Incomplete
+                    && !final_round
+                    && !self.policy.is_disabled(TASK_PLAN_NAME)
+                {
+                    next_input = json!([{"role":"user","content":[{"type":"input_text","text":"Runtime notice: your recorded task plan still has pending or in_progress steps. Continue the requested work and update task_plan before giving the final answer. If a step cannot proceed, mark it blocked with a concrete reason. Do not mark unperformed work completed just to end the run."}]}]);
+                    if let Some(session) = session.as_deref_mut() {
+                        session.record_runtime_input(&next_input)?;
                     }
-                    next_input = json!([]);
+                    events.push(AgentEvent::AssistantProgress {
+                        round,
+                        text: "Continuing unfinished plan steps.".into(),
+                    });
                     continue;
                 }
                 if let Some(session) = session.as_deref_mut() {
@@ -430,6 +470,8 @@ impl Agent {
                     text: output_text,
                     response_id,
                     events: events.into_events(),
+                    outcome,
+                    plan,
                 });
             }
 
@@ -459,21 +501,34 @@ impl Agent {
         &self,
         items: &[Value],
         scope: RoundScope<'_>,
+        mut session: Option<&mut Session>,
     ) -> Result<(Vec<Value>, Option<ActiveTools>)> {
         // Collect the futures first: a lazily mapped iterator makes the
         // spawned run future fail the higher-ranked `Send` check.
         let pending = items
             .iter()
-            .map(|item| self.handle_output_item(item, scope))
+            .enumerate()
+            .map(|(index, item)| async move { (index, self.handle_output_item(item, scope).await) })
             .collect::<Vec<_>>();
-        let outcomes = stream::iter(pending)
-            .buffered(self.settings.tool_concurrency())
-            .collect::<Vec<_>>()
-            .await;
+        let mut pending = stream::iter(pending).buffer_unordered(self.settings.tool_concurrency());
+        let mut outcomes = Vec::new();
+        while let Some((index, outcome)) = pending.next().await {
+            if let (Some(session), Ok(outcome)) = (session.as_deref_mut(), &outcome) {
+                if let Some(result) = &outcome.continuation {
+                    let plan = scope
+                        .plan
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    session.checkpoint_tool_result(result, &plan)?;
+                }
+            }
+            outcomes.push((index, outcome));
+        }
+        outcomes.sort_by_key(|(index, _)| *index);
 
         let mut continuation = Vec::new();
         let mut selection = None;
-        for outcome in outcomes {
+        for (_, outcome) in outcomes {
             let outcome = outcome?;
             continuation.extend(outcome.continuation);
             if outcome.selection.is_some() {
@@ -541,6 +596,7 @@ impl Agent {
             active,
             mcp_runtime,
             events,
+            plan,
         } = scope;
         let arguments = match parse_arguments(raw_arguments) {
             Ok(arguments) => arguments,
@@ -555,6 +611,32 @@ impl Agent {
                 ))
             }
         };
+
+        if name == TASK_PLAN_NAME {
+            if self.policy.is_disabled(TASK_PLAN_NAME) {
+                events.push(AgentEvent::LocalToolBlocked {
+                    round,
+                    name: name.into(),
+                });
+                return Ok((json!({"error":"tool_disabled","tool":name}), None));
+            }
+            let mut plan = plan.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            return Ok(match plan.apply(&arguments) {
+                Ok(changed) => {
+                    if changed {
+                        events.push(AgentEvent::PlanUpdated {
+                            round,
+                            plan: plan.clone(),
+                        });
+                    }
+                    (json!({"plan":*plan,"outcome":plan.outcome()}), None)
+                }
+                Err(error) => (
+                    json!({"error":"invalid_plan","message":format!("{error:#}"),"plan":*plan}),
+                    None,
+                ),
+            });
+        }
 
         if name == TOOL_SEARCH_NAME {
             if self.policy.is_disabled(TOOL_SEARCH_NAME) {
@@ -581,7 +663,7 @@ impl Agent {
                     (
                         json!({
                             "tools": selection.results,
-                            "message": "Only the returned tools are available from the next step. Call tool_search again when another capability is needed."
+                            "message": "The returned tools are available from the next step; tool_search and task_plan remain available unless disabled. Call tool_search again when another capability is needed."
                         }),
                         Some(selection.active),
                     )
@@ -647,10 +729,22 @@ impl Agent {
             ));
         }
 
+        // Configured checks have their own deadline and preserve partial output
+        // on timeout. Let that deadline fire before the generic tool guard.
+        let timeout_secs = if name == "workspace_check" {
+            arguments["name"]
+                .as_str()
+                .and_then(|name| tool_context.checks.get(name))
+                .map(|check| check.timeout_secs.saturating_add(5))
+                .unwrap_or(self.settings.tool_timeout_secs)
+        } else {
+            self.settings.tool_timeout_secs
+        };
         let output = match self
             .with_tool_timeout(
                 self.registry
                     .execute_with_context(name, arguments, tool_context),
+                timeout_secs,
             )
             .await
         {
@@ -675,11 +769,11 @@ impl Agent {
         self.approval_handler.approve(request).await
     }
 
-    async fn with_tool_timeout<F>(&self, future: F) -> Result<Value>
+    async fn with_tool_timeout<F>(&self, future: F, timeout_secs: u64) -> Result<Value>
     where
         F: Future<Output = Result<Value>>,
     {
-        let limit = Duration::from_secs(self.settings.tool_timeout_secs);
+        let limit = Duration::from_secs(timeout_secs);
         tokio::time::timeout(limit, future)
             .await
             .map_err(|_| anyhow::anyhow!("tool call timed out after {}s", limit.as_secs()))?
@@ -735,6 +829,9 @@ impl Agent {
         let mut tools = Vec::new();
         if !self.policy.is_disabled(TOOL_SEARCH_NAME) {
             tools.push(tool_search_definition().as_response_tool());
+        }
+        if !self.policy.is_disabled(TASK_PLAN_NAME) {
+            tools.push(task_plan_definition().as_response_tool());
         }
 
         tools.extend(
@@ -965,7 +1062,10 @@ impl Agent {
         }
 
         let output = match self
-            .with_tool_timeout(mcp_runtime.call_tool(function_name, arguments))
+            .with_tool_timeout(
+                mcp_runtime.call_tool(function_name, arguments),
+                self.settings.tool_timeout_secs,
+            )
             .await
         {
             Ok(value) => value,
@@ -1160,12 +1260,14 @@ mod tests {
         let context = ToolContext::default();
         let runtime = McpRuntime::default();
         let events = EventLog::new(None);
+        let plan = Mutex::new(crate::TaskPlan::default());
         body(RoundScope {
             round: 0,
             tool_context: &context,
             active,
             mcp_runtime: &runtime,
             events: &events,
+            plan: &plan,
         })
         .await
     }
@@ -1335,8 +1437,9 @@ mod tests {
         let tools = agent
             .response_tools(&ActiveTools::default(), &McpRuntime::default())
             .unwrap();
-        assert_eq!(tools.len(), 1);
+        assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["name"], "tool_search");
+        assert_eq!(tools[1]["name"], "task_plan");
     }
 
     #[test]
@@ -1428,7 +1531,7 @@ mod tests {
         let (continuation, _) = with_scope(&active, async |scope| {
             tokio::time::timeout(
                 Duration::from_secs(5),
-                agent.handle_output_items(&items, scope),
+                agent.handle_output_items(&items, scope, None),
             )
             .await
         })
@@ -1453,7 +1556,7 @@ mod tests {
         let result = with_scope(&active, async |scope| {
             tokio::time::timeout(
                 Duration::from_millis(300),
-                agent.handle_output_items(&items, scope),
+                agent.handle_output_items(&items, scope, None),
             )
             .await
         })
@@ -1477,7 +1580,7 @@ mod tests {
         items.extend(calls(&["send_email"]));
 
         let (continuation, selection) = with_scope(&ActiveTools::default(), async |scope| {
-            agent.handle_output_items(&items, scope).await
+            agent.handle_output_items(&items, scope, None).await
         })
         .await
         .unwrap();
@@ -1538,6 +1641,181 @@ mod tests {
             matches!(&result.events[0], super::AgentEvent::AssistantProgress { text, .. } if text == "I will inspect the files.")
         );
         assert_eq!(server.requests.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn mixed_progress_and_final_messages_return_only_the_final_answer() {
+        let server = mock_responses(vec![json!({"id":"mixed","status":"completed","output":[
+            {"type":"message","phase":"commentary","content":[{"type":"output_text","text":"Checking."}]},
+            {"type":"message","phase":"final_answer","content":[{"type":"output_text","text":"Done."}]}
+        ]})]).await;
+        let mut agent = agent(ToolRegistry::new(), vec![]);
+        agent.client = OpenAiClient::new("test", &server.url);
+        let result = agent.run(request()).await.unwrap();
+        assert_eq!(result.text, "Done.");
+        assert!(
+            matches!(&result.events[0], super::AgentEvent::AssistantProgress { text, .. } if text == "Checking.")
+        );
+    }
+
+    #[tokio::test]
+    async fn aggregate_output_text_is_preserved_alongside_non_message_items() {
+        let server = mock_responses(vec![
+            json!({"id":"aggregate","status":"completed","output_text":"Done.","output":[
+                {"type":"reasoning","summary":[]}
+            ]}),
+        ])
+        .await;
+        let mut agent = agent(ToolRegistry::new(), vec![]);
+        agent.client = OpenAiClient::new("test", &server.url);
+        assert_eq!(agent.run(request()).await.unwrap().text, "Done.");
+    }
+
+    #[tokio::test]
+    async fn disabled_task_plan_cannot_be_called_or_exposed() {
+        let mut agent = agent(ToolRegistry::new(), vec![]);
+        agent.policy = UserPolicy::new(vec!["task_plan".into()], None);
+        assert!(!agent
+            .response_tools(&ActiveTools::default(), &McpRuntime::default())
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "task_plan"));
+        let (output, _) = with_scope(&ActiveTools::default(), async |scope| {
+            let result = agent
+                .handle_function_call("task_plan", &json!({"steps":null}), scope)
+                .await
+                .unwrap();
+            assert_eq!(scope.plan.lock().unwrap().revision, 0);
+            result
+        })
+        .await;
+        assert_eq!(output["error"], "tool_disabled");
+    }
+
+    #[tokio::test]
+    async fn interrupted_parallel_run_preserves_completed_calls_only() {
+        let (registry, count) = counting_registry();
+        registry
+            .register(
+                ToolDefinition::new("slow_action", "Wait forever", json!({"type":"object"})),
+                |_| async { std::future::pending::<Result<Value>>().await },
+            )
+            .unwrap();
+        let server = mock_responses(vec![
+            search_response("discover", ""),
+            json!({"id":"actions","status":"completed","output":[
+                {"type":"function_call","call_id":"slow","name":"slow_action","arguments":"{}"},
+                {"type":"function_call","call_id":"fast","name":"record_action","arguments":"{}"}
+            ]}),
+        ])
+        .await;
+        let mut agent = agent(registry, vec![]);
+        agent.client = OpenAiClient::new("test", &server.url);
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("interrupted.json");
+        let binding = crate::SessionBinding::new(&ToolContext::default(), &server.url).unwrap();
+        let mut session = crate::Session::open(&path, binding.clone(), false).unwrap();
+        {
+            let mut run = Box::pin(agent.run_in_session(request(), &mut session));
+            let observe_checkpoint = async {
+                loop {
+                    if crate::Session::inspect(&path).is_ok_and(|data| {
+                        data.history.iter().any(|item| {
+                            item["type"] == "function_call_output" && item["call_id"] == "fast"
+                        })
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            };
+            tokio::select! {
+                result = &mut run => panic!("slow call unexpectedly finished: {result:?}"),
+                observed = tokio::time::timeout(Duration::from_secs(5), observe_checkpoint) => observed.expect("fast result was not checkpointed while slow call remained pending"),
+            }
+            // Dropping the future simulates interruption before the round ends.
+        }
+        drop(session);
+        assert!(crate::Session::open(&path, binding.clone(), false).is_err());
+        let recovered = crate::Session::open(&path, binding, true).unwrap();
+        let outputs = recovered
+            .data()
+            .history
+            .iter()
+            .filter(|item| item["type"] == "function_call_output")
+            .collect::<Vec<_>>();
+        let fast = outputs
+            .iter()
+            .filter(|item| item["call_id"] == "fast")
+            .collect::<Vec<_>>();
+        assert_eq!(fast.len(), 1);
+        assert_eq!(
+            serde_json::from_str::<Value>(fast[0]["output"].as_str().unwrap()).unwrap()["saved"],
+            true
+        );
+        let slow = outputs
+            .iter()
+            .find(|item| item["call_id"] == "slow")
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(slow["output"].as_str().unwrap()).unwrap()["error"],
+            "execution_interrupted"
+        );
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn configured_check_deadline_preserves_output_past_generic_tool_timeout() {
+        let registry = ToolRegistry::new();
+        crate::register_builtin_tools(&registry).unwrap();
+        let server = mock_responses(vec![search_response("search", "workspace_check"), json!({"id":"check","status":"completed","output":[
+            {"type":"function_call","call_id":"check1","name":"workspace_check","arguments":"{\"name\":\"slow\"}"}
+        ]}), text_response("final", "Check timed out")]).await;
+        let mut agent = agent(registry, vec![]);
+        agent.client = OpenAiClient::new("test", &server.url);
+        agent.settings.tool_timeout_secs = 1;
+        let directory = tempfile::tempdir().unwrap();
+        let mut request = request();
+        request.context.workspace = Some(directory.path().into());
+        request.context.checks.insert(
+            "slow".into(),
+            crate::CheckConfig {
+                program: std::env::current_exe()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                args: vec![
+                    "--exact".into(),
+                    "checks::tests::slow_check_fixture".into(),
+                    "--ignored".into(),
+                    "--nocapture".into(),
+                ],
+                description: String::new(),
+                timeout_secs: 2,
+            },
+        );
+        let result = tokio::time::timeout(Duration::from_secs(10), agent.run(request))
+            .await
+            .unwrap()
+            .unwrap();
+        let checked = result
+            .events
+            .iter()
+            .find_map(|event| match event {
+                super::AgentEvent::LocalToolResult { name, output, .. }
+                    if name == "workspace_check" =>
+                {
+                    Some(output)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(checked["error"], "check_timed_out");
+        assert_eq!(checked["timed_out"], true);
+        assert!(checked["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("started slow check"));
     }
 
     #[tokio::test]
@@ -1742,7 +2020,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let (continuation, _) = with_scope(&active, async |scope| {
-            agent.handle_output_items(&items, scope).await
+            agent.handle_output_items(&items, scope, None).await
         })
         .await
         .unwrap();

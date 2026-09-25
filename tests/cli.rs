@@ -86,7 +86,7 @@ async fn cli_runs_profile_reads_workspace_and_emits_json() {
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 3);
     assert_eq!(requests[0]["model"], "mock-profile");
-    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 1);
+    assert_eq!(requests[0]["tools"].as_array().unwrap().len(), 2);
     assert!(requests[1]["tools"]
         .as_array()
         .unwrap()

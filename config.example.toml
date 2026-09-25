@@ -24,9 +24,11 @@ parallel_tool_calls = true
 # Tool calls from one response that may run at the same time.
 max_parallel_tool_calls = 8
 # Timeout for one local tool or direct MCP tool call.
+# Named workspace_check commands use their own timeout_secs instead.
 tool_timeout_secs = 120
-# Omit instructions to use the built-in inspect -> edit -> verify workflow.
-# instructions = "Your additional task-agent instructions..."
+# Omit instructions to use the built-in plan -> inspect -> edit -> verify workflow.
+# Setting this replaces the built-in instructions.
+# instructions = "Your task-agent instructions..."
 
 [webhook]
 bind = "127.0.0.1:8080"

@@ -1,7 +1,8 @@
 use ano::{
     register_builtin_tools, serve_webhook, Agent, AgentEvent, AgentResult, AgentSettings,
     AlwaysApprove, AppConfig, DenyApproval, InputPart, InteractiveApproval, McpPool, OpenAiClient,
-    RunRequest, Session, SessionBinding, ToolContext, ToolRegistry, UserPolicy,
+    RunOutcome, RunRequest, Session, SessionBinding, TaskPlan, ToolContext, ToolRegistry,
+    UserPolicy,
 };
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -179,6 +180,9 @@ async fn main() -> Result<()> {
                 if let Some(error) = session.last_error {
                     println!("Last error: {error}");
                 }
+                if !session.plan.steps.is_empty() {
+                    println!("{}", format_plan(&session.plan));
+                }
             }
             Ok(())
         }
@@ -214,6 +218,9 @@ fn list_tools(
         );
     }
     println!("Local tools:");
+    if !policy.is_disabled(ano::plan::TASK_PLAN_NAME) {
+        println!("  task_plan - Read/update this run's task plan (always available)");
+    }
     for definition in registry.definitions(&policy) {
         println!("  {} - {}", definition.name, definition.description);
     }
@@ -431,10 +438,37 @@ fn format_result(result: &AgentResult, as_json: bool) -> Result<String> {
             "text": result.text,
             "response_id": result.response_id,
             "events": result.events,
+            "outcome": result.outcome,
+            "plan": result.plan,
         }))?)
     } else {
-        Ok(result.text.clone())
+        if result.outcome == RunOutcome::Completed {
+            Ok(result.text.clone())
+        } else {
+            Ok(format!("{}\n\n{}", result.text, format_plan(&result.plan)))
+        }
     }
+}
+
+fn format_plan(plan: &TaskPlan) -> String {
+    let mut lines = vec![format!(
+        "Plan: {:?} (revision {})",
+        plan.outcome(),
+        plan.revision
+    )];
+    for step in &plan.steps {
+        lines.push(format!(
+            "  [{:?}] {}: {}{}",
+            step.status,
+            step.id,
+            step.description,
+            step.detail
+                .as_ref()
+                .map(|detail| format!(" — {detail}"))
+                .unwrap_or_default()
+        ));
+    }
+    lines.join("\n")
 }
 
 fn read_stdin_prompt() -> Result<Option<String>> {
@@ -448,6 +482,7 @@ fn read_stdin_prompt() -> Result<Option<String>> {
 
 fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
+        AgentEvent::PlanUpdated { plan, .. } => eprintln!("{}", format_plan(plan)),
         AgentEvent::AssistantProgress { text, .. } => eprintln!("[agent] {text}"),
         AgentEvent::LocalToolCall {
             name, arguments, ..
@@ -596,6 +631,8 @@ mod tests {
     #[test]
     fn json_output_round_trips_text_and_events() {
         let result = AgentResult {
+            outcome: RunOutcome::Completed,
+            plan: TaskPlan::default(),
             text: "日本語の結果\n\"quoted\"".into(),
             response_id: "resp_123".into(),
             events: vec![AgentEvent::LocalToolBlocked {
