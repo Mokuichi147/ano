@@ -1,0 +1,117 @@
+[api]
+# OpenAI Responses API endpoint.
+base_url = "https://api.openai.com/v1"
+api_key_env = "OPENAI_API_KEY"
+# Per-request timeout, and retries for connection failures and 429 / 5xx.
+timeout_secs = 600
+max_retries = 2
+
+# For LM Studio, replace the two values above with:
+# base_url = "http://127.0.0.1:1234/v1"
+# api_key_env = "LM_STUDIO_API_KEY"
+# A local endpoint uses the harmless fallback key `lm-studio` when the env var
+# is absent. Start LM Studio's server and load a model before running ano.
+
+[agent]
+# This default is suitable for text/image + tool use. For native audio input,
+# choose an audio-capable Responses model (for example gpt-audio-1.5).
+# Override with `ano run --model ...` when needed.
+model = "gpt-6-astra"
+# Total Responses requests; the final request is reserved for a tool-free report.
+max_tool_rounds = 24
+tool_discovery_limit = 8
+parallel_tool_calls = true
+# Tool calls from one response that may run at the same time.
+max_parallel_tool_calls = 8
+# Timeout for one local tool or direct MCP tool call.
+tool_timeout_secs = 120
+instructions = "You are an autonomous task agent. Use tool_search to find a relevant registered tool or MCP function before attempting capabilities that are not currently listed. Use available tools when they help. Respect disabled tools, inspect tool results, and report errors honestly."
+
+[webhook]
+bind = "127.0.0.1:8080"
+path = "/webhook/tasks"
+secret_env = "ANO_WEBHOOK_SECRET"
+max_body_bytes = 1048576
+# Honoured only when bound to a loopback address.
+allow_unauthenticated = false
+# Requests must carry X-Ano-Timestamp within this many seconds; a signature is
+# accepted only once inside that window.
+signature_tolerance_secs = 300
+max_concurrent_jobs = 2
+max_pending_jobs = 64
+max_retained_jobs = 1000
+
+# Webhook callers and `ano run --environment NAME` select names declared here.
+# Relative workspace paths and MCP cwd paths resolve from this config directory.
+[environments.default]
+workspace = "."
+allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search"]
+allow_writes = false
+auto_approve_mcp = false
+
+# Example writable coding environment:
+# [environments.coding]
+# workspace = "C:/work/my-repository"
+# allowed_tools = ["workspace_*"]
+# allow_writes = true
+# auto_approve_mcp = false
+
+# By default, remote MCP servers are executed by the Responses API. You may
+# set transport = "responses" explicitly; this also supports tunnel_id.
+# Use `require_approval = "never"` only for a server you trust and want to run
+# in auto mode. An explicit allowed_tools list makes per-function blocking
+# enforceable for this server.
+# [[mcp_servers]]
+# label = "deepwiki"
+# url = "https://mcp.deepwiki.com/mcp"
+# description = "Trusted documentation MCP server"
+# allowed_tools = ["ask_question", "read_wiki_structure"]
+# require_approval = "always"
+# Optional metadata lets lazy discovery find MCP functions without loading the
+# whole server tool list into every model request.
+# [[mcp_servers.tool_catalog]]
+# name = "ask_question"
+# description = "Ask a question against the documentation corpus"
+
+# For a private MCP server connected through Secure MCP Tunnel, use tunnel_id
+# instead of url.
+# [[mcp_servers]]
+# label = "private_tools"
+# tunnel_id = "mcp_tunnel_id"
+# authorization_env = "PRIVATE_MCP_TOKEN"
+# require_approval = "never"
+
+# Connect directly to an MCP server over Streamable HTTP from ano.
+# [[mcp_servers]]
+# label = "docs_http"
+# transport = "streamable_http"
+# url = "https://mcp.example.com/mcp"
+# authorization_env = "DOCS_MCP_TOKEN"
+# allowed_tools = ["search_docs", "read_page"]
+# require_approval = "always"
+
+# Launch a local MCP server over stdio. env_vars maps the child-process
+# variable name to the name of an environment variable available to ano.
+# [[mcp_servers]]
+# label = "local_files"
+# transport = "stdio"
+# command = "node"
+# args = ["./server.js"]
+# cwd = "./mcp-servers/files"
+# env_vars = { FILES_API_TOKEN = "FILES_API_TOKEN" }
+# allowed_tools = ["read_file", "list_files"]
+# require_approval = "always"
+# The connection (and process) is shared by every run. Set to false for a
+# stateful server that must not share state between tasks.
+# reuse_connection = true
+
+[users.default]
+# Local names are matched directly. MCP functions can be addressed as
+# `mcp:server_label:tool_name`, `server_label:tool_name`, or `server_label:*`.
+# A bare deny rule such as `delete_*` also blocks MCP tools on every server;
+# allow rules must be server-qualified to match an MCP tool.
+disabled_tools = ["shell_exec", "mcp:deepwiki:delete_issue"]
+# allowed_tools = ["workspace_*", "mcp:deepwiki:read_*"]
+
+[users.restricted]
+disabled_tools = ["echo", "unix_time", "mcp:deepwiki:*"]
