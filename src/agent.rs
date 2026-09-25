@@ -4,6 +4,7 @@ use crate::{
     input::{build_user_input, InputPart},
     mcp::{ConnectedMcpServer, DirectMcpTool, McpPool, McpRuntime},
     policy::UserPolicy,
+    session::{Session, SessionStatus},
     tools::{ToolContext, ToolDefinition, ToolRegistry, TOOL_SEARCH_NAME},
 };
 use anyhow::{bail, Context, Result};
@@ -36,6 +37,10 @@ impl RunRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    AssistantProgress {
+        round: usize,
+        text: String,
+    },
     LocalToolCall {
         round: usize,
         name: String,
@@ -258,9 +263,39 @@ impl Agent {
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<AgentResult> {
+        self.run_inner(request, None).await
+    }
+
+    /// Continue a locally persisted conversation. Current tool policy is
+    /// applied again; past tool calls are history, never scheduled for replay.
+    pub async fn run_in_session(
+        &self,
+        request: RunRequest,
+        session: &mut Session,
+    ) -> Result<AgentResult> {
+        session.verify_context(&request.context, self.client.base_url())?;
+        let result = self.run_inner(request, Some(&mut *session)).await;
+        if let Err(error) = &result {
+            if session.data().status == SessionStatus::Running {
+                session
+                    .fail(&format!("{error:#}"))
+                    .context("run failed and session checkpoint could not be saved")?;
+            }
+        }
+        result
+    }
+
+    async fn run_inner(
+        &self,
+        request: RunRequest,
+        mut session: Option<&mut Session>,
+    ) -> Result<AgentResult> {
         self.settings.validate()?;
 
         let user_input = build_user_input(&request.input).await?;
+        if let Some(session) = session.as_deref_mut() {
+            session.begin_turn(&user_input)?;
+        }
         let mcp_runtime = self.mcp.runtime(&self.policy).await?;
         let mut next_input = user_input;
         let mut previous_response_id: Option<String> = None;
@@ -287,7 +322,7 @@ impl Agent {
             let mut payload = json!({
                 "model": self.settings.model,
                 "instructions": instructions,
-                "input": next_input,
+                "input": match &session { Some(session) => Value::Array(session.data().history.clone()), None => next_input.clone() },
                 "tools": tools,
                 "tool_choice": if final_round { "none" } else { "auto" },
                 "parallel_tool_calls": self.settings.parallel_tool_calls,
@@ -295,7 +330,10 @@ impl Agent {
             if let Some(max_output_tokens) = self.settings.max_output_tokens {
                 payload["max_output_tokens"] = json!(max_output_tokens);
             }
-            if let Some(previous_response_id) = &previous_response_id {
+            if session.is_some() {
+                payload["store"] = json!(false);
+                payload["include"] = json!(["reasoning.encrypted_content"]);
+            } else if let Some(previous_response_id) = &previous_response_id {
                 payload["previous_response_id"] = json!(previous_response_id);
             }
 
@@ -312,7 +350,15 @@ impl Agent {
                 .to_string();
             previous_response_id = Some(response_id.clone());
 
-            let items = response["output"].as_array().cloned().unwrap_or_default();
+            let mut items = response["output"].as_array().cloned().unwrap_or_default();
+            if items.is_empty() {
+                if let Some(text) = response["output_text"]
+                    .as_str()
+                    .filter(|text| !text.trim().is_empty())
+                {
+                    items.push(json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":text}]}));
+                }
+            }
             if final_round
                 && items.iter().any(|item| {
                     matches!(
@@ -326,6 +372,21 @@ impl Agent {
             let has_mcp_call = items
                 .iter()
                 .any(|item| item["type"].as_str() == Some("mcp_call"));
+            let messages = items
+                .iter()
+                .filter(|item| item["type"] == "message")
+                .collect::<Vec<_>>();
+            let only_commentary =
+                !messages.is_empty() && messages.iter().all(|item| item["phase"] == "commentary");
+            for message in messages.iter().filter(|item| item["phase"] == "commentary") {
+                let text = extract_output_text(&json!({"output":[message]}));
+                if !text.trim().is_empty() {
+                    events.push(AgentEvent::AssistantProgress { round, text });
+                }
+            }
+            if let Some(session) = session.as_deref_mut() {
+                session.record_response(&response_id, &items)?;
+            }
             let (continuation, selection) = self
                 .handle_output_items(
                     &items,
@@ -338,6 +399,9 @@ impl Agent {
                     },
                 )
                 .await?;
+            if let Some(session) = session.as_deref_mut() {
+                session.record_tool_results(&continuation)?;
+            }
             if let Some(selection) = selection {
                 active = selection;
             }
@@ -352,6 +416,16 @@ impl Agent {
             }
 
             if !output_text.trim().is_empty() {
+                if only_commentary {
+                    if final_round {
+                        bail!("agent exhausted its request budget with a progress update instead of a final answer");
+                    }
+                    next_input = json!([]);
+                    continue;
+                }
+                if let Some(session) = session.as_deref_mut() {
+                    session.complete()?;
+                }
                 return Ok(AgentResult {
                     text: output_text,
                     response_id,
@@ -1447,6 +1521,23 @@ mod tests {
         let saved: Value =
             serde_json::from_str(requests[3]["input"][0]["output"].as_str().unwrap()).unwrap();
         assert_eq!(saved["saved"], true);
+    }
+
+    #[tokio::test]
+    async fn progress_messages_do_not_end_the_task() {
+        let server = mock_responses(vec![
+            json!({"id":"progress","status":"completed","output":[{"type":"message","phase":"commentary","role":"assistant","content":[{"type":"output_text","text":"I will inspect the files."}]}]}),
+            text_response("done", "Inspection complete"),
+        ]).await;
+        let mut agent = agent(ToolRegistry::new(), Vec::new());
+        agent.client = OpenAiClient::new("test", &server.url);
+        agent.settings.max_tool_rounds = 2;
+        let result = agent.run(request()).await.unwrap();
+        assert_eq!(result.text, "Inspection complete");
+        assert!(
+            matches!(&result.events[0], super::AgentEvent::AssistantProgress { text, .. } if text == "I will inspect the files.")
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
     }
 
     #[tokio::test]

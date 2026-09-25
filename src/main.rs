@@ -1,7 +1,7 @@
 use ano::{
     register_builtin_tools, serve_webhook, Agent, AgentEvent, AgentResult, AgentSettings,
     AlwaysApprove, AppConfig, DenyApproval, InputPart, InteractiveApproval, McpPool, OpenAiClient,
-    RunRequest, ToolContext, ToolRegistry, UserPolicy,
+    RunRequest, Session, SessionBinding, ToolContext, ToolRegistry, UserPolicy,
 };
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -37,10 +37,26 @@ enum Command {
     Run(RunArgs),
     Tools(ToolsArgs),
     Serve(ServeArgs),
+    /// Inspect saved conversation state without contacting the model.
+    Session(SessionArgs),
 }
 
 #[derive(Debug, Args)]
 struct RunArgs {
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Save and continue a local conversation"
+    )]
+    session: Option<PathBuf>,
+
+    #[arg(
+        long,
+        requires = "session",
+        help = "Recover an interrupted session without replaying pending tool calls"
+    )]
+    recover_session: bool,
+
     #[arg(value_name = "PROMPT")]
     prompt: Option<String>,
 
@@ -73,7 +89,7 @@ struct RunArgs {
     #[arg(
         long,
         conflicts_with = "environment",
-        help = "Allow workspace_write to modify files"
+        help = "Allow workspace_write and workspace_edit to modify files"
     )]
     allow_writes: bool,
 
@@ -101,6 +117,13 @@ struct RunArgs {
         help = "Include tool arguments and full results in progress logs"
     )]
     verbose: bool,
+}
+
+#[derive(Debug, Args)]
+struct SessionArgs {
+    path: PathBuf,
+    #[arg(long, help = "Print the full saved conversation as JSON")]
+    json: bool,
 }
 
 #[derive(Debug, Args)]
@@ -146,6 +169,19 @@ async fn main() -> Result<()> {
     register_builtin_tools(&registry)?;
 
     match cli.command {
+        Command::Session(args) => {
+            let session = Session::inspect(args.path)?;
+            if args.json {
+                println!("{}", serde_json::to_string_pretty(&session)?);
+            } else {
+                println!("Status: {:?}\nCompleted turns: {}\nHistory items: {}\nUser: {}\nEnvironment: {}",
+                    session.status, session.completed_turns, session.history.len(), session.binding.user_id, session.binding.environment);
+                if let Some(error) = session.last_error {
+                    println!("Last error: {error}");
+                }
+            }
+            Ok(())
+        }
         Command::Tools(args) => list_tools(&config, &cli.user, &args, &registry),
         Command::Run(args) => run_agent(config, cli.user, args, registry).await,
         Command::Serve(args) => {
@@ -281,6 +317,17 @@ async fn run_agent(
         Arc::new(InteractiveApproval)
     };
     let client = OpenAiClient::from_api_settings(&config.api)?;
+    let mut session = args
+        .session
+        .as_ref()
+        .map(|path| {
+            Session::open(
+                path,
+                SessionBinding::new(&context, client.base_url())?,
+                args.recover_session,
+            )
+        })
+        .transpose()?;
     let mcp = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let mut agent = Agent::new(
         client,
@@ -295,7 +342,11 @@ async fn run_agent(
         agent = agent.with_event_listener(Arc::new(move |event| print_event(event, verbose)));
     }
 
-    let result = agent.run(RunRequest { input, context }).await;
+    let request = RunRequest { input, context };
+    let result = match &mut session {
+        Some(session) => agent.run_in_session(request, session).await,
+        None => agent.run(request).await,
+    };
     // Stop stdio MCP server processes before exiting, even on failure.
     mcp.shutdown().await;
     let result = result?;
@@ -310,8 +361,10 @@ fn resolve_run_context(
 ) -> Result<(AgentSettings, UserPolicy, ToolContext, bool)> {
     let mut settings = config.agent.clone();
     let mut policy = config.policy_for(user_id, &args.disabled_tools);
+    let mut checks = Default::default();
     let (workspace, allow_writes, auto_approve_mcp) = if let Some(name) = &args.environment {
         let environment = config.environment_for(name)?;
+        checks = environment.checks.clone();
         if let Some(model) = &environment.model {
             settings.model.clone_from(model);
         }
@@ -366,6 +419,7 @@ fn resolve_run_context(
                 .unwrap_or_else(|| "cli".to_string()),
             workspace,
             allow_writes,
+            checks,
         },
         auto_approve_mcp,
     ))
@@ -394,6 +448,7 @@ fn read_stdin_prompt() -> Result<Option<String>> {
 
 fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
+        AgentEvent::AssistantProgress { text, .. } => eprintln!("[agent] {text}"),
         AgentEvent::LocalToolCall {
             name, arguments, ..
         } => {

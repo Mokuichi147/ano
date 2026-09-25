@@ -530,6 +530,7 @@ async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Resul
         environment: request.environment,
         workspace: environment.workspace,
         allow_writes: environment.allow_writes,
+        checks: environment.checks,
     };
     let mut input = vec![InputPart::Text(request.task)];
     input.extend(

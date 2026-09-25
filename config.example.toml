@@ -25,7 +25,8 @@ parallel_tool_calls = true
 max_parallel_tool_calls = 8
 # Timeout for one local tool or direct MCP tool call.
 tool_timeout_secs = 120
-instructions = "You are an autonomous task agent. Use tool_search to find a relevant registered tool or MCP function before attempting capabilities that are not currently listed. Use available tools when they help. Respect disabled tools, inspect tool results, and report errors honestly."
+# Omit instructions to use the built-in inspect -> edit -> verify workflow.
+# instructions = "Your additional task-agent instructions..."
 
 [webhook]
 bind = "127.0.0.1:8080"
@@ -47,7 +48,7 @@ job_timeout_secs = 1800
 # Relative workspace paths and MCP cwd paths resolve from this config directory.
 [environments.default]
 workspace = "."
-allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search"]
+allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_check"]
 allow_writes = false
 auto_approve_mcp = false
 
@@ -57,6 +58,18 @@ auto_approve_mcp = false
 # allowed_tools = ["workspace_*"]
 # allow_writes = true
 # auto_approve_mcp = false
+# Explicit opt-in: configured checks execute with ano's OS permissions and
+# may run project code. Register only commands for workspaces you trust.
+# [environments.coding.checks.test]
+# program = "cargo"
+# args = ["test", "--locked"]
+# description = "Run the project's tests"
+# timeout_secs = 90
+# [environments.coding.checks.format]
+# program = "cargo"
+# args = ["fmt", "--check"]
+# description = "Check Rust formatting"
+# timeout_secs = 30
 
 # By default, remote MCP servers are executed by the Responses API. You may
 # set transport = "responses" explicitly; this also supports tunnel_id.

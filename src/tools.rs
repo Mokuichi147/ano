@@ -58,6 +58,7 @@ pub struct ToolContext {
     pub environment: String,
     pub workspace: Option<PathBuf>,
     pub allow_writes: bool,
+    pub checks: BTreeMap<String, crate::config::CheckConfig>,
 }
 
 #[async_trait]

@@ -14,6 +14,8 @@ OpenAI Responses API を使う、Rust 製の自律型 AI agent です。Response
 - LM Studio の OpenAI 互換 `/v1/responses` endpoint
 - 名前付き実行環境を選べる署名付き Webhook と、中止・タイムアウトに対応する非同期ジョブ API
 - 実行環境に閉じたファイル一覧・分割読み取り・全文検索・書き込み
+- 保存して別プロセスから再開できる会話セッション
+- 競合検出付きの正確なファイル編集と、登録済み検証コマンドの実行
 - CLI からの名前付き環境選択、JSON 出力、ログ量の切り替え
 - tool / MCP は lazy discovery し、検索結果の少数だけを model request に公開
 
@@ -59,6 +61,31 @@ cargo run --quiet -- run --environment default --json --quiet "実装の概要�
 通常の進捗ログは tool 名と状態だけを stderr に出力します。引数・ファイル内容を含む完全なログが必要なら `--verbose`、進捗を省略するなら `--quiet` を指定します。`--json` の成功時出力は `text`、`response_id`、`events` を含みます（`events` には引数と結果も含まれます）。失敗時は非ゼロ終了コードと stderr のエラーを返します。
 
 `OPENAI_BASE_URL` を設定すると、Responses API のモックサーバーなどへ向けられます。モデルは `config.toml` または `--model` で変更できます。音声入力を使う場合は、`input_audio` をサポートするモデル（例: `gpt-audio-1.5`）を指定してください。現在の公式モデル一覧では、一般的な画像対応モデルと音声専用モデルの対応範囲が異なるため、画像と音声を同一リクエストで使う場合は、両方をサポートするモデルを選んでください。
+
+## 会話を保存して作業を続ける
+
+長い調査や複数回の修正は、セッションファイルを指定するとプロセスをまたいで続けられます。
+
+```powershell
+cargo run -- run --environment default --session .ano/review.json "リポジトリを調査して問題点を整理して"
+cargo run -- run --environment default --session .ano/review.json "前回の調査結果を使って修正して"
+cargo run -- session .ano/review.json
+```
+
+セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。途中で失敗したセッションは、原因を確認してから `--recover-session` を付けて再開します。実行中のセッションは sidecar lock で二重起動を防ぎ、壊れたファイルは自動上書きせず `.corrupt-*` として退避します。`.ano/` は既定で Git 管理対象外です。
+
+## 修正後にビルド・テストを実行する
+
+`workspace_edit` は置換対象がファイル内にちょうど一度だけ存在することと、必要なら `expected_sha256` が一致することを確認してから原子的に書き込みます。まず `dry_run:true` で差分とハッシュを確認し、問題がなければ `dry_run:false` で適用できます。競合が起きた場合は書き込みを行いません。
+
+環境設定の `checks` に実行を許可するコマンドを名前付きで登録すると、agent は `workspace_check({"name": "test"})` のように検証できます。`name:null` は利用可能な検証名を一覧表示します。コマンドの引数は設定ファイルから固定され、workspace 内でのみ実行され、出力は上限付きで返されます。
+
+```toml
+[environments.coding.checks.test]
+program = "cargo"
+args = ["test", "--locked"]
+timeout_secs = 900
+```
 
 ## LM Studio
 

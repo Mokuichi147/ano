@@ -7,11 +7,13 @@
 use crate::tools::{ToolContext, ToolDefinition, ToolRegistry};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     ffi::OsString,
     io::ErrorKind,
     path::{Component, Path, PathBuf},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -25,6 +27,8 @@ const MAX_SEARCH_LINE_BYTES: usize = 2000;
 
 /// Register the built-in tools into `registry`.
 pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
+    crate::checks::register_workspace_check(registry)?;
+    let mutations = Arc::new(tokio::sync::Mutex::new(()));
     registry.register(
         non_strict_definition(
             "echo",
@@ -114,6 +118,32 @@ pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
         |arguments, context| async move { workspace_search(arguments, &context).await },
     )?;
     registry.register_contextual(
+        non_strict_definition(
+            "workspace_edit",
+            "Apply exact text replacements to one workspace file. Read it first. Every old_text must match exactly once; all edits are validated before saving. Optional expected_sha256 detects stale reads; dry_run previews without writing.",
+            json!({
+                "type":"object", "properties": {
+                    "path":{"type":"string"},
+                    "edits":{"type":"array","minItems":1,"maxItems":100,"items":{
+                        "type":"object","properties":{"old_text":{"type":"string","minLength":1},"new_text":{"type":"string"}},
+                        "required":["old_text","new_text"],"additionalProperties":false}},
+                    "expected_sha256":{"type":"string","description":"Full-file SHA-256 returned by a complete workspace_read or workspace_edit"},
+                    "dry_run":{"type":"boolean","description":"Preview edits without saving; defaults to false"}
+                }, "required":["path","edits"],"additionalProperties":false
+            }),
+        ),
+        {
+            let mutations = Arc::clone(&mutations);
+            move |arguments, context| {
+                let mutations = Arc::clone(&mutations);
+                async move {
+                    let guard = mutations.lock_owned().await;
+                    workspace_edit(arguments, &context, guard).await
+                }
+            }
+        },
+    )?;
+    registry.register_contextual(
         ToolDefinition::new(
             "workspace_write",
             "Write UTF-8 text to a file under the selected workspace. Requires the environment to allow writes.",
@@ -127,7 +157,13 @@ pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
                 "additionalProperties": false
             }),
         ),
-        |arguments, context| async move { workspace_write(arguments, &context).await },
+        move |arguments, context| {
+            let mutations = Arc::clone(&mutations);
+            async move {
+                let guard = mutations.lock_owned().await;
+                workspace_write(arguments, &context, guard).await
+            }
+        },
     )?;
     Ok(())
 }
@@ -275,10 +311,11 @@ async fn workspace_read(arguments: Value, context: &ToolContext) -> Result<Value
     bytes.truncate(valid_length);
     let content = String::from_utf8(bytes).context("workspace file is not valid UTF-8")?;
     let next_offset = truncated.then_some(offset + content.len() as u64);
+    let sha256 = (offset == 0 && !truncated).then(|| digest(content.as_bytes()));
     Ok(json!({
         "path": relative, "bytes": content.len(), "content": content,
         "offset": offset, "total_bytes": metadata.len(), "truncated": truncated,
-        "next_offset": next_offset
+        "next_offset": next_offset, "sha256": sha256
     }))
 }
 
@@ -359,7 +396,7 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
                     || (kind.is_dir()
                         && matches!(
                             name.to_str(),
-                            Some(".git" | "target" | "node_modules" | ".venv")
+                            Some(".git" | ".ano" | "target" | "node_modules" | ".venv")
                         ))
                 {
                     continue;
@@ -443,7 +480,122 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
     }))
 }
 
-async fn workspace_write(arguments: Value, context: &ToolContext) -> Result<Value> {
+fn digest(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+async fn workspace_edit(
+    arguments: Value,
+    context: &ToolContext,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<Value> {
+    if !context.allow_writes {
+        bail!("workspace_edit requires allow_writes for this environment");
+    }
+    let relative = relative_path(
+        arguments["path"]
+            .as_str()
+            .context("workspace_edit.path must be a string")?,
+    )?;
+    let edits = arguments["edits"]
+        .as_array()
+        .context("workspace_edit.edits must be an array")?;
+    if edits.is_empty() || edits.len() > 100 {
+        bail!("workspace_edit requires 1 to 100 edits");
+    }
+    let dry_run = match arguments.get("dry_run") {
+        None => false,
+        Some(value) => value.as_bool().context("dry_run must be a boolean")?,
+    };
+    // Resolve for reading before the write resolver, so an invalid edit never
+    // creates directories as a side effect.
+    let existing = existing_workspace_path(context, &relative).await?;
+    let metadata = tokio::fs::metadata(&existing).await?;
+    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES {
+        bail!("workspace_edit requires a regular UTF-8 file up to 10 MiB");
+    }
+    let file = writable_workspace_path(context, &relative).await?;
+    let mut bytes = Vec::new();
+    tokio::fs::File::open(&file)
+        .await?
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        bail!("workspace_edit file exceeds 10 MiB");
+    }
+    let before_hash = digest(&bytes);
+    if let Some(expected) = arguments.get("expected_sha256") {
+        let expected = expected
+            .as_str()
+            .context("expected_sha256 must be a string")?;
+        if expected.len() != 64 || !expected.bytes().all(|c| c.is_ascii_hexdigit()) {
+            bail!("expected_sha256 must contain 64 hexadecimal characters");
+        }
+        if !expected.eq_ignore_ascii_case(&before_hash) {
+            bail!("edit conflict: file changed since it was read; read it again");
+        }
+    }
+    let mut content =
+        String::from_utf8(bytes.clone()).context("workspace file is not valid UTF-8")?;
+    let mut preview = Vec::new();
+    for (index, edit) in edits.iter().enumerate() {
+        let old = edit["old_text"]
+            .as_str()
+            .filter(|old| !old.is_empty())
+            .context("old_text must be a non-empty string")?;
+        let new = edit["new_text"]
+            .as_str()
+            .context("new_text must be a string")?;
+        // Check overlapping occurrences too, e.g. 'aa' in 'aaa'.
+        let Some(position) = content.find(old) else {
+            bail!(
+                "edit {}: old_text was not found; read the file again",
+                index + 1
+            )
+        };
+        let following = position + content[position..].chars().next().unwrap().len_utf8();
+        if content[following..].contains(old) {
+            bail!(
+                "edit {}: old_text matches more than once; include more surrounding context",
+                index + 1
+            );
+        }
+        let size = content.len() - old.len() + new.len();
+        if size as u64 > MAX_FILE_BYTES {
+            bail!("edited file would exceed 10 MiB");
+        }
+        preview.push(json!({"line":content[..position].bytes().filter(|b| *b == b'\n').count() + 1,
+            "old_text": old.chars().take(500).collect::<String>(), "new_text": new.chars().take(500).collect::<String>(),
+            "preview_truncated":old.chars().count() > 500 || new.chars().count() > 500}));
+        content.replace_range(position..position + old.len(), new);
+    }
+    let after_hash = digest(content.as_bytes());
+    let changed = before_hash != after_hash;
+    let size = content.len();
+    if !dry_run && changed {
+        commit_workspace_file(
+            file,
+            workspace_root(context).await?,
+            content.into_bytes(),
+            Some(bytes),
+            Some(metadata.permissions()),
+            guard,
+        )
+        .await?;
+    }
+    Ok(
+        json!({"path":relative, "changed":changed,"written":!dry_run && changed,"dry_run":dry_run,
+        "bytes":size,"before_sha256":before_hash,"after_sha256":after_hash,
+        "sha256":if dry_run { &before_hash } else { &after_hash },"edits":preview}),
+    )
+}
+
+async fn workspace_write(
+    arguments: Value,
+    context: &ToolContext,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<Value> {
     if !context.allow_writes {
         bail!(
             "workspace_write is disabled for environment '{}'; enable allow_writes",
@@ -463,8 +615,62 @@ async fn workspace_write(arguments: Value, context: &ToolContext) -> Result<Valu
         bail!("workspace_write content exceeds the 10 MiB limit");
     }
     let file = writable_workspace_path(context, &relative).await?;
-    tokio::fs::write(&file, content).await?;
-    Ok(json!({"path": relative, "bytes": content.len(), "written": true}))
+    let permissions = tokio::fs::metadata(&file)
+        .await
+        .ok()
+        .map(|metadata| metadata.permissions());
+    commit_workspace_file(
+        file,
+        workspace_root(context).await?,
+        content.as_bytes().to_vec(),
+        None,
+        permissions,
+        guard,
+    )
+    .await?;
+    Ok(
+        json!({"path": relative, "bytes": content.len(), "written": true, "sha256":digest(content.as_bytes())}),
+    )
+}
+
+async fn commit_workspace_file(
+    file: PathBuf,
+    root: PathBuf,
+    content: Vec<u8>,
+    original: Option<Vec<u8>>,
+    permissions: Option<std::fs::Permissions>,
+    guard: tokio::sync::OwnedMutexGuard<()>,
+) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        // Retain serialization even if the caller is cancelled while the
+        // blocking filesystem operation is finishing.
+        let _guard = guard;
+        let parent = std::fs::canonicalize(file.parent().context("file has no parent")?)?;
+        if !parent.starts_with(&root) {
+            bail!("path escapes the configured workspace");
+        }
+        if let Ok(metadata) = std::fs::symlink_metadata(&file) {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                bail!("write target is not a regular file");
+            }
+            if metadata.permissions().readonly() {
+                bail!("write target is read-only");
+            }
+        }
+        if let Some(original) = original {
+            use std::io::Read;
+            let mut current = Vec::new();
+            std::fs::File::open(&file)?
+                .take(MAX_FILE_BYTES + 1)
+                .read_to_end(&mut current)?;
+            if current != original {
+                bail!("edit conflict: file changed before save; read it again");
+            }
+        }
+        crate::storage::atomic_write(&file, &content, permissions)
+    })
+    .await
+    .context("workspace save task failed")?
 }
 
 fn relative_path(raw_path: &str) -> Result<PathBuf> {
@@ -575,6 +781,93 @@ mod tests {
         let registry = ToolRegistry::new();
         register_builtin_tools(&registry).unwrap();
         registry
+    }
+
+    #[tokio::test]
+    async fn edit_previews_then_applies_exact_changes_with_hash_check() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("note.txt");
+        std::fs::write(&path, "first\r\n日本語\r\nlast\r\n").unwrap();
+        let registry = registry();
+        let context = context(workspace.path(), true);
+        let read = registry
+            .execute_with_context("workspace_read", json!({"path":"note.txt"}), &context)
+            .await
+            .unwrap();
+        let mut edit = json!({"path":"note.txt","expected_sha256":read["sha256"],"dry_run":true,
+            "edits":[{"old_text":"日本語","new_text":"修正済み"}]});
+        let preview = registry
+            .execute_with_context("workspace_edit", edit.clone(), &context)
+            .await
+            .unwrap();
+        assert_eq!(preview["written"], false);
+        assert_eq!(preview["edits"][0]["line"], 2);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("日本語"));
+        edit["dry_run"] = json!(false);
+        let written = registry
+            .execute_with_context("workspace_edit", edit.clone(), &context)
+            .await
+            .unwrap();
+        assert_eq!(written["written"], true);
+        assert_eq!(written["sha256"], preview["after_sha256"]);
+        assert_eq!(preview["sha256"], read["sha256"]);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "first\r\n修正済み\r\nlast\r\n"
+        );
+        assert!(registry
+            .execute_with_context("workspace_edit", edit, &context)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("conflict"));
+    }
+
+    #[tokio::test]
+    async fn invalid_or_ambiguous_edits_leave_file_unchanged() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("note.txt");
+        std::fs::write(&path, "aaa\nunique\n").unwrap();
+        let registry = registry();
+        let context = context(workspace.path(), true);
+        for edits in [
+            json!([{"old_text":"aa","new_text":"x"}]),
+            json!([{"old_text":"unique","new_text":"changed"},{"old_text":"missing","new_text":"x"}]),
+            json!([{"old_text":"","new_text":"x"}]),
+            json!([]),
+        ] {
+            assert!(registry
+                .execute_with_context(
+                    "workspace_edit",
+                    json!({"path":"note.txt","edits":edits}),
+                    &context
+                )
+                .await
+                .is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "aaa\nunique\n");
+        }
+        let mut read_only = context.clone();
+        read_only.allow_writes = false;
+        assert!(registry.execute_with_context("workspace_edit", json!({"path":"note.txt","dry_run":true,"edits":[{"old_text":"unique","new_text":"x"}]}), &read_only).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_reject_stale_content_instead_of_losing_changes() {
+        let workspace = tempfile::tempdir().unwrap();
+        let path = workspace.path().join("note.txt");
+        std::fs::write(&path, "original").unwrap();
+        let registry = registry();
+        let context = context(workspace.path(), true);
+        let args = |replacement| json!({"path":"note.txt","edits":[{"old_text":"original","new_text":replacement}]});
+        let (first, second) = tokio::join!(
+            registry.execute_with_context("workspace_edit", args("one"), &context),
+            registry.execute_with_context("workspace_edit", args("two"), &context)
+        );
+        assert_ne!(first.is_ok(), second.is_ok());
+        assert!(matches!(
+            std::fs::read_to_string(&path).unwrap().as_str(),
+            "one" | "two"
+        ));
     }
 
     #[test]
