@@ -40,6 +40,8 @@ signature_tolerance_secs = 300
 max_concurrent_jobs = 2
 max_pending_jobs = 64
 max_retained_jobs = 1000
+# Wall-clock limit per running job, excluding time spent in the queue.
+job_timeout_secs = 1800
 
 # Webhook callers and `ano run --environment NAME` select names declared here.
 # Relative workspace paths and MCP cwd paths resolve from this config directory.

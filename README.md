@@ -12,7 +12,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI agent です。Response
 - 音声は Responses API の native `input_audio` としてそのままモデルへ渡す（文字起こし前処理なし）
 - MCP の承認フロー（`always` / `never`、CLI では対話確認も可能）
 - LM Studio の OpenAI 互換 `/v1/responses` endpoint
-- 名前付き実行環境を選べる署名付き Webhook と非同期ジョブ API
+- 名前付き実行環境を選べる署名付き Webhook と、中止・タイムアウトに対応する非同期ジョブ API
 - 実行環境に閉じたファイル一覧・分割読み取り・全文検索・書き込み
 - CLI からの名前付き環境選択、JSON 出力、ログ量の切り替え
 - tool / MCP は lazy discovery し、検索結果の少数だけを model request に公開
@@ -122,11 +122,32 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/webhook/tasks' `
   -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($body))
 ```
 
-成功時は `202 Accepted` と `job_id` が返り、`GET /jobs/<job_id>` で `queued`、`running`、`completed`、`failed` の状態と結果を取得できます。状態取得にも同じ形式の `X-Ano-Timestamp` と `X-Ano-Signature` が必要で、署名対象は `"<timestamp>.<job_id>"` です。
+成功時は `202 Accepted` と `job_id`、`status_url`、`cancel_url` が返り、`GET /jobs/<job_id>` で状態と結果を取得できます。状態取得にも同じ形式の `X-Ano-Timestamp` と `X-Ano-Signature` が必要で、署名対象は `"<timestamp>.<job_id>"` です。状態は `queued`、`running`、`completed`、`failed`、`cancelled`、`timed_out` のいずれかです。`started_at_unix` と `finished_at_unix` は開始前・終了前には `null` です。
 
-同時に実行するジョブは `webhook.max_concurrent_jobs`（既定 2）までで、それを超えたジョブは `queued` のまま待ちます。待機中と実行中の合計が `webhook.max_pending_jobs`（既定 64）に達すると `503` を返します。完了したジョブは `webhook.max_retained_jobs`（既定 1000）件を超えた分から古い順に削除されます。secret を設定せずに起動する `--allow-unauthenticated` は loopback アドレスへの bind でだけ使え、secret の環境変数が空文字の場合は起動を拒否します。Ctrl+C で graceful shutdown します。Webhook 実行は対話端末を持たないため、MCP の承認はデフォルトで拒否されます。信頼済み環境だけ `auto_approve_mcp = true` にしてください。
+同時に実行するジョブは `webhook.max_concurrent_jobs`（既定 2）までで、それを超えたジョブは `queued` のまま待ちます。待機中と実行中の合計が `webhook.max_pending_jobs`（既定 64）に達すると `503` を返します。`webhook.job_timeout_secs`（既定1800秒）は、待機時間を除いた実行全体の上限で、API応答待ちやtool実行時間も含みます。上限到達時は `timed_out` になり、空いた実行枠で次のジョブを開始します。終了済みのジョブだけを `webhook.max_retained_jobs`（既定1000）件まで保持し、終了するたびに古い結果から削除します。`0` を指定すると結果を保持しません。
+
+Ctrl+C では新しいジョブの受付を止め、待機中・実行中のジョブへ中止を通知し、ジョブ終了を最大5秒待ってから残ったタスクを中止します。その後MCP接続を閉じます。toolのpanicもジョブの `failed` として記録し、次のジョブに実行枠を返します（プロセス全体をabortするpanic設定を除きます）。
+
+secret を設定せずに起動する `--allow-unauthenticated` は loopback アドレスへの bind でだけ使え、secret の環境変数が空文字の場合は起動を拒否します。Webhook 実行は対話端末を持たないため、MCP の承認はデフォルトで拒否されます。信頼済み環境だけ `auto_approve_mcp = true` にしてください。`webhook.path` は固定パスを指定し、管理用の `/jobs` 以下と `/healthz` は使えません。
 
 混雑による `503` や入力不備による `400` では署名を消費しません。署名の有効期限内なら同じ要求を再送できます。同時に同じ署名を送ってもジョブは一度しか登録されません。ジョブと結果はメモリ内に保持するため、サーバー再起動をまたいだ復元には対応していません。
+
+### ジョブの中止
+
+`POST /jobs/<job_id>/cancel` は待機中・実行中のジョブを中止します。署名対象は `"<timestamp>.cancel:<job_id>"` です。状態取得用の署名では中止できません。未終了なら `202` と `cancellation_requested: true` を返し、その後 `GET /jobs/<job_id>` で `cancelled` への遷移を確認できます。すでに終了済みなら `200` で既存の結果を返すため、中止要求は再送できます。未知・削除済みのジョブは `404` です。
+
+```powershell
+$jobId = '<job_id>'
+$timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
+$key = [Text.Encoding]::UTF8.GetBytes($env:ANO_WEBHOOK_SECRET)
+$hmac = [Security.Cryptography.HMACSHA256]::new($key)
+$payload = [Text.Encoding]::UTF8.GetBytes("$timestamp.cancel:$jobId")
+$signature = [Convert]::ToHexString($hmac.ComputeHash($payload)).ToLowerInvariant()
+Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/jobs/$jobId/cancel" `
+  -Headers @{ 'X-Ano-Timestamp' = $timestamp; 'X-Ano-Signature' = "sha256=$signature" }
+```
+
+中止・タイムアウトは処理の待機を打ち切ります。すでに完了したファイル書き込みや外部操作は巻き戻さず、送信済みの外部操作が相手側で継続する場合もあります。独自toolは非同期の待機を使い、同期ブロックや別途起動した処理の停止が必要ならtool自身でも中止を扱ってください。
 
 `workspace_write` は `allow_writes = true` の環境だけで動作し、設定された workspace の外へ出る絶対パスや `..` を拒否します。親ディレクトリは 1 階層ずつ正規化して workspace 内であることを確かめてから作成し、シンボリックリンクを経由した書き込みも拒否します。shell 実行 tool は標準登録していません。必要な場合はアプリケーション側で、さらに狭い権限の tool を登録してください。
 

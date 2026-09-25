@@ -158,6 +158,8 @@ pub struct WebhookSettings {
     pub max_pending_jobs: usize,
     /// Finished jobs kept for `GET /jobs/<id>`; the oldest are evicted.
     pub max_retained_jobs: usize,
+    /// Wall-clock limit for a running job, excluding queue time.
+    pub job_timeout_secs: u64,
 }
 
 impl Default for WebhookSettings {
@@ -172,6 +174,7 @@ impl Default for WebhookSettings {
             max_concurrent_jobs: 2,
             max_pending_jobs: 64,
             max_retained_jobs: 1000,
+            job_timeout_secs: 1800,
         }
     }
 }
@@ -181,11 +184,21 @@ impl WebhookSettings {
         if !self.path.starts_with('/') {
             bail!("webhook.path must start with '/'");
         }
+        if self.path.contains(['{', '}', ':', '*', '?', '#'])
+            || self.path == "/healthz"
+            || self.path == "/jobs"
+            || self.path.starts_with("/jobs/")
+        {
+            bail!("webhook.path must be a literal path outside the reserved /jobs and /healthz routes");
+        }
         if self.max_concurrent_jobs == 0 || self.max_pending_jobs == 0 {
             bail!("webhook.max_concurrent_jobs and webhook.max_pending_jobs must be greater than zero");
         }
         if self.signature_tolerance_secs == 0 {
             bail!("webhook.signature_tolerance_secs must be greater than zero");
+        }
+        if self.job_timeout_secs == 0 {
+            bail!("webhook.job_timeout_secs must be greater than zero");
         }
         Ok(())
     }
@@ -642,9 +655,26 @@ mod tests {
             "[agent]\nmodel = '  '",
             "[agent]\nmax_output_tokens = 0",
             "[api]\ntimeout_secs = 0",
+            "[webhook]\njob_timeout_secs = 0",
             "[environments.project]\nmodel = ''",
         ] {
             assert!(AppConfig::parse(text).is_err(), "accepted {text}");
         }
+    }
+
+    #[test]
+    fn rejects_webhook_paths_that_conflict_with_management_routes() {
+        for path in [
+            "/jobs",
+            "/jobs/task/cancel",
+            "/healthz",
+            "/tasks/{id}",
+            "/:id",
+            "/tasks?q=1",
+        ] {
+            let text = format!("[webhook]\npath = '{path}'");
+            assert!(AppConfig::parse(&text).is_err(), "accepted {path}");
+        }
+        assert!(AppConfig::parse("[webhook]\npath = '/hooks/tasks'").is_ok());
     }
 }

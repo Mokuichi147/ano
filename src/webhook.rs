@@ -16,18 +16,21 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use futures::FutureExt;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
 use std::{
     collections::HashMap,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::{
     net::TcpListener,
-    sync::{RwLock, Semaphore},
+    sync::{watch, RwLock, Semaphore},
+    task::JoinSet,
 };
 use uuid::Uuid;
 
@@ -36,6 +39,7 @@ type HmacSha256 = Hmac<Sha256>;
 const SIGNATURE_HEADER: &str = "x-ano-signature";
 const TIMESTAMP_HEADER: &str = "x-ano-timestamp";
 const MAX_TASK_BYTES: usize = 100_000;
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -80,11 +84,16 @@ pub enum JobState {
     Running,
     Completed,
     Failed,
+    Cancelled,
+    TimedOut,
 }
 
 impl JobState {
     pub fn is_finished(self) -> bool {
-        matches!(self, Self::Completed | Self::Failed)
+        matches!(
+            self,
+            Self::Completed | Self::Failed | Self::Cancelled | Self::TimedOut
+        )
     }
 }
 
@@ -95,9 +104,25 @@ pub struct JobStatus {
     pub user: String,
     pub environment: String,
     pub created_at_unix: u64,
+    pub started_at_unix: Option<u64>,
     pub finished_at_unix: Option<u64>,
+    pub cancellation_requested: bool,
     pub result: Option<String>,
     pub error: Option<String>,
+}
+
+struct JobRecord {
+    snapshot: JobStatus,
+    cancel: watch::Sender<bool>,
+    /// Monotonic completion order, including jobs finished in the same second.
+    finished_at: Option<Instant>,
+}
+
+enum JobOutcome {
+    Completed(String),
+    Failed(String),
+    Cancelled,
+    TimedOut,
 }
 
 struct WebhookState {
@@ -106,8 +131,10 @@ struct WebhookState {
     registry: ToolRegistry,
     /// MCP connections shared by every job.
     mcp: Arc<McpPool>,
-    jobs: RwLock<HashMap<String, JobStatus>>,
+    jobs: RwLock<HashMap<String, JobRecord>>,
     job_slots: Arc<Semaphore>,
+    shutdown: watch::Sender<bool>,
+    tasks: Mutex<JoinSet<()>>,
     secret: Option<Vec<u8>>,
     /// Signatures of accepted task requests -> expiry, to reject replays.
     seen_signatures: Mutex<HashMap<Vec<u8>, u64>>,
@@ -172,28 +199,38 @@ pub async fn serve(
         client,
         registry,
         jobs: RwLock::new(HashMap::new()),
+        shutdown: watch::channel(false).0,
+        tasks: Mutex::new(JoinSet::new()),
         secret,
         seen_signatures: Mutex::new(HashMap::new()),
     });
-    let app = Router::new()
-        .route(&webhook.path, post(create_job))
-        .route("/jobs/{id}", get(get_job))
-        .route("/healthz", get(healthz))
-        .with_state(state)
-        .layer(DefaultBodyLimit::max(webhook.max_body_bytes));
+    let app = router(Arc::clone(&state));
 
     println!(
         "ano webhook listening on http://{local_addr}{}",
         webhook.path
     );
+    let shutdown_state = Arc::clone(&state);
     let served = axum::serve(listener, app)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             tokio::signal::ctrl_c().await.ok();
+            signal_shutdown(&shutdown_state).await;
         })
         .await
         .context("webhook server stopped unexpectedly");
+    shutdown_jobs(&state).await;
     mcp.shutdown().await;
     served
+}
+
+fn router(state: Arc<WebhookState>) -> Router {
+    Router::new()
+        .route(&state.config.webhook.path, post(create_job))
+        .route("/jobs/{id}", get(get_job))
+        .route("/jobs/{id}/cancel", post(cancel_job))
+        .route("/healthz", get(healthz))
+        .layer(DefaultBodyLimit::max(state.config.webhook.max_body_bytes))
+        .with_state(state)
 }
 
 async fn create_job(
@@ -228,6 +265,12 @@ async fn create_job(
     let id = Uuid::new_v4().to_string();
     {
         let mut jobs = state.jobs.write().await;
+        if *state.shutdown.borrow() {
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "webhook server is shutting down",
+            );
+        }
         // An already accepted request remains a replay even when capacity is
         // exhausted. Inspect without consuming a new signature on overload.
         if signature.as_ref().is_some_and(|signature| {
@@ -242,7 +285,7 @@ async fn create_job(
         }
         let pending = jobs
             .values()
-            .filter(|job| !job.status.is_finished())
+            .filter(|job| !job.snapshot.status.is_finished())
             .count();
         if pending >= state.config.webhook.max_pending_jobs {
             return error_response(StatusCode::SERVICE_UNAVAILABLE, "too many pending jobs");
@@ -256,26 +299,52 @@ async fn create_job(
             }
         }
         evict_finished_jobs(&mut jobs, state.config.webhook.max_retained_jobs);
+        let (cancel, cancellation) = watch::channel(false);
         jobs.insert(
             id.clone(),
-            JobStatus {
-                id: id.clone(),
-                status: JobState::Queued,
-                user: request.user.clone(),
-                environment: request.environment.clone(),
-                created_at_unix: unix_now(),
-                finished_at_unix: None,
-                result: None,
-                error: None,
+            JobRecord {
+                snapshot: JobStatus {
+                    id: id.clone(),
+                    status: JobState::Queued,
+                    user: request.user.clone(),
+                    environment: request.environment.clone(),
+                    created_at_unix: unix_now(),
+                    started_at_unix: None,
+                    finished_at_unix: None,
+                    cancellation_requested: false,
+                    result: None,
+                    error: None,
+                },
+                cancel,
+                finished_at: None,
             },
         );
+        // Register the task before releasing the admission lock. Shutdown
+        // takes the same lock, so no accepted task escapes supervision.
+        let task_state = Arc::clone(&state);
+        let task_id = id.clone();
+        let mut tasks = state
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
+            let run = run_job(
+                Arc::clone(&task_state),
+                task_id.clone(),
+                request,
+                cancellation,
+            );
+            if AssertUnwindSafe(run).catch_unwind().await.is_err() {
+                finish(
+                    &task_state,
+                    &task_id,
+                    JobOutcome::Failed("job execution panicked".into()),
+                )
+                .await;
+            }
+        });
     }
-
-    let task_state = Arc::clone(&state);
-    let task_id = id.clone();
-    tokio::spawn(async move {
-        run_job(task_state, task_id, request).await;
-    });
 
     (
         StatusCode::ACCEPTED,
@@ -283,6 +352,7 @@ async fn create_job(
             "job_id": id,
             "status": JobState::Queued,
             "status_url": format!("/jobs/{id}"),
+            "cancel_url": format!("/jobs/{id}/cancel"),
         })),
     )
         .into_response()
@@ -296,28 +366,131 @@ async fn get_job(
     if let Err(message) = verify_signature(&state, &headers, id.as_bytes(), unix_now()) {
         return error_response(StatusCode::UNAUTHORIZED, message);
     }
-    match state.jobs.read().await.get(&id).cloned() {
+    match state
+        .jobs
+        .read()
+        .await
+        .get(&id)
+        .map(|job| job.snapshot.clone())
+    {
         Some(status) => (StatusCode::OK, Json(status)).into_response(),
         None => error_response(StatusCode::NOT_FOUND, "job not found"),
     }
+}
+
+async fn cancel_job(
+    State(state): State<Arc<WebhookState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    // Domain-separate cancellation from read-only status signatures.
+    let payload = format!("cancel:{id}");
+    if let Err(message) = verify_signature(&state, &headers, payload.as_bytes(), unix_now()) {
+        return error_response(StatusCode::UNAUTHORIZED, message);
+    }
+    let mut jobs = state.jobs.write().await;
+    let Some(job) = jobs.get_mut(&id) else {
+        return error_response(StatusCode::NOT_FOUND, "job not found");
+    };
+    if job.snapshot.status.is_finished() {
+        return (StatusCode::OK, Json(job.snapshot.clone())).into_response();
+    }
+    job.snapshot.cancellation_requested = true;
+    job.cancel.send_replace(true);
+    (StatusCode::ACCEPTED, Json(job.snapshot.clone())).into_response()
 }
 
 async fn healthz() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({ "status": "ok" })))
 }
 
-async fn run_job(state: Arc<WebhookState>, id: String, request: WebhookTaskRequest) {
+async fn cancellation_requested(mut signal: watch::Receiver<bool>) {
+    let _ = signal.wait_for(|cancelled| *cancelled).await;
+}
+
+async fn run_job(
+    state: Arc<WebhookState>,
+    id: String,
+    request: WebhookTaskRequest,
+    cancellation: watch::Receiver<bool>,
+) {
+    let shutdown = state.shutdown.subscribe();
     // Wait for a free slot while the job stays `queued`.
-    let Ok(_permit) = Arc::clone(&state.job_slots).acquire_owned().await else {
-        finish(&state, &id, Err("webhook server is shutting down".into())).await;
+    let permit = tokio::select! {
+        biased;
+        _ = cancellation_requested(cancellation.clone()) => None,
+        _ = cancellation_requested(shutdown.clone()) => None,
+        permit = Arc::clone(&state.job_slots).acquire_owned() => permit.ok(),
+    };
+    let Some(_permit) = permit else {
+        finish(&state, &id, JobOutcome::Cancelled).await;
         return;
     };
-    update_status(&state, &id, |status| status.status = JobState::Running).await;
-
-    let outcome = execute_job(&state, request)
-        .await
-        .map_err(|error| format!("{error:#}"));
+    {
+        let mut jobs = state.jobs.write().await;
+        let Some(job) = jobs.get_mut(&id) else { return };
+        if !job.snapshot.cancellation_requested && !*state.shutdown.borrow() {
+            job.snapshot.status = JobState::Running;
+            job.snapshot.started_at_unix = Some(unix_now());
+        }
+    }
+    let outcome = tokio::select! {
+        biased;
+        _ = cancellation_requested(cancellation) => JobOutcome::Cancelled,
+        _ = cancellation_requested(shutdown) => JobOutcome::Cancelled,
+        outcome = tokio::time::timeout(
+            Duration::from_secs(state.config.webhook.job_timeout_secs),
+            execute_job(&state, request),
+        ) => match outcome {
+            Ok(Ok(text)) => JobOutcome::Completed(text),
+            Ok(Err(error)) => JobOutcome::Failed(format!("{error:#}")),
+            Err(_) => JobOutcome::TimedOut,
+        },
+    };
     finish(&state, &id, outcome).await;
+}
+
+async fn signal_shutdown(state: &WebhookState) {
+    let mut jobs = state.jobs.write().await;
+    state.shutdown.send_replace(true);
+    state.job_slots.close();
+    for job in jobs
+        .values_mut()
+        .filter(|job| !job.snapshot.status.is_finished())
+    {
+        job.snapshot.cancellation_requested = true;
+        job.cancel.send_replace(true);
+    }
+}
+
+async fn shutdown_jobs(state: &WebhookState) {
+    signal_shutdown(state).await;
+    let mut tasks = std::mem::take(
+        &mut *state
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    );
+    if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
+        while tasks.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        tasks.abort_all();
+        // Do not await non-cooperative application code indefinitely.
+        let mut jobs = state.jobs.write().await;
+        for job in jobs
+            .values_mut()
+            .filter(|job| !job.snapshot.status.is_finished())
+        {
+            job.snapshot.status = JobState::Cancelled;
+            job.snapshot.finished_at_unix = Some(unix_now());
+            job.finished_at = Some(Instant::now());
+            job.snapshot.error = Some("job cancelled during server shutdown".into());
+        }
+        evict_finished_jobs(&mut jobs, state.config.webhook.max_retained_jobs);
+    }
 }
 
 async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Result<String> {
@@ -376,44 +549,58 @@ async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Resul
     Ok(agent.run(RunRequest { input, context }).await?.text)
 }
 
-async fn update_status<F>(state: &WebhookState, id: &str, update: F)
-where
-    F: FnOnce(&mut JobStatus),
-{
-    if let Some(status) = state.jobs.write().await.get_mut(id) {
-        update(status);
-    }
-}
-
-async fn finish(state: &WebhookState, id: &str, outcome: std::result::Result<String, String>) {
-    update_status(state, id, |status| {
+async fn finish(state: &WebhookState, id: &str, outcome: JobOutcome) {
+    let mut jobs = state.jobs.write().await;
+    if let Some(job) = jobs.get_mut(id) {
+        let status = &mut job.snapshot;
+        if status.status.is_finished() {
+            return;
+        }
+        // A cancellation acknowledged before completion wins a simultaneous
+        // success. Finished jobs are immutable and repeated cancellation is safe.
+        let outcome = if status.cancellation_requested {
+            JobOutcome::Cancelled
+        } else {
+            outcome
+        };
         status.finished_at_unix = Some(unix_now());
+        job.finished_at = Some(Instant::now());
         match outcome {
-            Ok(text) => {
+            JobOutcome::Completed(text) => {
                 status.status = JobState::Completed;
                 status.result = Some(text);
             }
-            Err(error) => {
+            JobOutcome::Failed(error) => {
                 status.status = JobState::Failed;
                 status.error = Some(error);
             }
+            JobOutcome::Cancelled => {
+                status.status = JobState::Cancelled;
+                status.cancellation_requested = true;
+                status.error =
+                    Some("job cancelled; previously completed actions are not undone".into());
+            }
+            JobOutcome::TimedOut => {
+                status.status = JobState::TimedOut;
+                status.error = Some(format!(
+                    "job exceeded webhook.job_timeout_secs ({} seconds)",
+                    state.config.webhook.job_timeout_secs
+                ));
+            }
         }
-    })
-    .await;
+    }
+    evict_finished_jobs(&mut jobs, state.config.webhook.max_retained_jobs);
 }
 
 /// Drop the oldest finished jobs so at most `max_retained` remain.
-fn evict_finished_jobs(jobs: &mut HashMap<String, JobStatus>, max_retained: usize) {
-    if jobs.len() < max_retained.max(1) {
-        return;
-    }
+fn evict_finished_jobs(jobs: &mut HashMap<String, JobRecord>, max_retained: usize) {
     let mut finished = jobs
         .values()
-        .filter(|job| job.status.is_finished())
-        .map(|job| (job.finished_at_unix.unwrap_or_default(), job.id.clone()))
+        .filter(|job| job.snapshot.status.is_finished())
+        .map(|job| (job.finished_at, job.snapshot.id.clone()))
         .collect::<Vec<_>>();
+    let excess = finished.len().saturating_sub(max_retained);
     finished.sort();
-    let excess = jobs.len() + 1 - max_retained.max(1);
     for (_, id) in finished.into_iter().take(excess) {
         jobs.remove(&id);
     }
@@ -464,7 +651,13 @@ fn verify_signature(
 fn remember_signature(state: &WebhookState, signature: Vec<u8>) -> bool {
     let now = unix_now();
     // Expire after the widest window in which the timestamp is still valid.
-    let expires_at = now + 2 * state.config.webhook.signature_tolerance_secs;
+    let expires_at = now.saturating_add(
+        state
+            .config
+            .webhook
+            .signature_tolerance_secs
+            .saturating_mul(2),
+    );
     let mut seen = state
         .seen_signatures
         .lock()
@@ -487,21 +680,29 @@ fn error_response(status: StatusCode, message: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_job, evict_finished_jobs, remember_signature, unix_now, verify_signature,
-        HmacSha256, JobState, JobStatus, WebhookState,
+        cancel_job, create_job, evict_finished_jobs, finish, remember_signature, router,
+        shutdown_jobs, unix_now, verify_signature, HmacSha256, JobOutcome, JobRecord, JobState,
+        JobStatus, WebhookState,
     };
     use crate::{AppConfig, OpenAiClient, ToolRegistry};
     use axum::{
-        body::Bytes,
-        extract::State,
+        body::{to_bytes, Bytes},
+        extract::{Path, State},
         http::{HeaderMap, HeaderValue, StatusCode},
+        routing::post,
+        Json, Router,
     };
     use hmac::Mac;
+    use serde_json::{json, Value};
     use std::{
         collections::HashMap,
         sync::{Arc, Mutex},
+        time::{Duration, Instant},
     };
-    use tokio::sync::{RwLock, Semaphore};
+    use tokio::{
+        sync::{watch, Notify, RwLock, Semaphore},
+        task::{JoinHandle, JoinSet},
+    };
 
     fn state() -> WebhookState {
         let mut config = AppConfig::default();
@@ -515,6 +716,8 @@ mod tests {
             mcp: Arc::new(crate::McpPool::new(Vec::new())),
             jobs: RwLock::new(HashMap::new()),
             job_slots: Arc::new(Semaphore::new(1)),
+            shutdown: watch::channel(false).0,
+            tasks: Mutex::new(JoinSet::new()),
             secret: Some(b"secret".to_vec()),
             seen_signatures: Mutex::new(HashMap::new()),
         }
@@ -535,6 +738,285 @@ mod tests {
             HeaderValue::from_str(&timestamp.to_string()).unwrap(),
         );
         headers
+    }
+
+    async fn enqueue(state: &Arc<WebhookState>, task: &str) -> String {
+        let payload = Bytes::from(serde_json::to_vec(&json!({"task": task})).unwrap());
+        let response = create_job(
+            State(Arc::clone(state)),
+            signed_headers(unix_now(), &payload),
+            payload,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let bytes = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap();
+        value["job_id"].as_str().unwrap().to_string()
+    }
+
+    async fn wait_for_job(state: &WebhookState, id: &str, expected: JobState) -> JobStatus {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let status = state.jobs.read().await[id].snapshot.clone();
+                if status.status == expected {
+                    return status;
+                }
+                assert!(
+                    !status.status.is_finished(),
+                    "unexpected terminal state: {status:?}"
+                );
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("job did not reach expected state")
+    }
+
+    async fn api_fixture() -> (OpenAiClient, Arc<Notify>, JoinHandle<()>) {
+        let started = Arc::new(Notify::new());
+        let observed = Arc::clone(&started);
+        let app = Router::new().route("/v1/responses", post(move |Json(payload): Json<Value>| {
+            let observed = Arc::clone(&observed);
+            async move {
+                if payload["input"][0]["content"][0]["text"] == "hang" {
+                    observed.notify_one();
+                    return std::future::pending::<Json<Value>>().await;
+                }
+                let output = if payload["input"][0]["content"][0]["text"] == "panic" {
+                    json!([{"type":"function_call", "call_id":"search", "name":"tool_search", "arguments":"{\"query\":\"panic_tool\"}"}])
+                } else if payload["input"][0]["call_id"] == "search" {
+                    json!([{"type":"function_call", "call_id":"panic", "name":"panic_tool", "arguments":"{}"}])
+                } else {
+                    json!([{"type":"message", "content":[{"type":"output_text", "text":"done"}]}])
+                };
+                Json(json!({"id":"test-response", "status":"completed", "output":output}))
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = OpenAiClient::new(
+            "test",
+            format!("http://{}/v1", listener.local_addr().unwrap()),
+        );
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (client, started, server)
+    }
+
+    #[tokio::test]
+    async fn queued_cancellation_requires_its_own_signature_and_is_idempotent() {
+        let state = Arc::new(state());
+        let _permit = state.job_slots.acquire().await.unwrap();
+        let id = enqueue(&state, "queued").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/jobs/{id}/cancel", listener.local_addr().unwrap());
+        let app = router(Arc::clone(&state));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = reqwest::Client::new();
+        let denied = client
+            .post(&url)
+            .headers(signed_headers(unix_now(), id.as_bytes()))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+        assert!(!state.jobs.read().await[&id].snapshot.cancellation_requested);
+
+        let signature = signed_headers(unix_now(), format!("cancel:{id}").as_bytes());
+        let accepted = client
+            .post(&url)
+            .headers(signature.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(accepted.status(), StatusCode::ACCEPTED);
+        assert_eq!(
+            accepted.json::<Value>().await.unwrap()["cancellation_requested"],
+            true
+        );
+        let cancelled = wait_for_job(&state, &id, JobState::Cancelled).await;
+        assert!(cancelled.started_at_unix.is_none());
+        assert!(cancelled.finished_at_unix.is_some());
+        let repeated = client.post(&url).headers(signature).send().await.unwrap();
+        assert_eq!(repeated.status(), StatusCode::OK);
+        assert_eq!(
+            repeated.json::<Value>().await.unwrap()["status"],
+            "cancelled"
+        );
+        shutdown_jobs(&state).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_running_job_releases_slot_and_preserves_completed_results() {
+        let (client, started, server) = api_fixture().await;
+        let mut state = state();
+        state.client = client;
+        let state = Arc::new(state);
+        let id = enqueue(&state, "hang").await;
+        tokio::time::timeout(Duration::from_secs(3), started.notified())
+            .await
+            .unwrap();
+        let response = cancel_job(
+            State(Arc::clone(&state)),
+            signed_headers(unix_now(), format!("cancel:{id}").as_bytes()),
+            Path(id.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let cancelled = wait_for_job(&state, &id, JobState::Cancelled).await;
+        assert!(cancelled.started_at_unix.is_some());
+        let next = enqueue(&state, "fast").await;
+        let completed = wait_for_job(&state, &next, JobState::Completed).await;
+        assert_eq!(completed.result.as_deref(), Some("done"));
+        let response = cancel_job(
+            State(Arc::clone(&state)),
+            signed_headers(unix_now(), format!("cancel:{next}").as_bytes()),
+            Path(next.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            state.jobs.read().await[&next].snapshot.status,
+            JobState::Completed
+        );
+        assert!(
+            !state.jobs.read().await[&next]
+                .snapshot
+                .cancellation_requested
+        );
+        shutdown_jobs(&state).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn job_timeout_releases_capacity_for_queued_work() {
+        let (client, started, server) = api_fixture().await;
+        let mut state = state();
+        state.client = client;
+        state.config.webhook.job_timeout_secs = 1;
+        let state = Arc::new(state);
+        let first = enqueue(&state, "hang").await;
+        tokio::time::timeout(Duration::from_secs(3), started.notified())
+            .await
+            .unwrap();
+        let next = enqueue(&state, "fast").await;
+        assert_eq!(
+            state.jobs.read().await[&next].snapshot.status,
+            JobState::Queued
+        );
+        let timed_out = wait_for_job(&state, &first, JobState::TimedOut).await;
+        assert!(timed_out.error.unwrap().contains("1 seconds"));
+        assert!(timed_out.started_at_unix.is_some());
+        assert!(timed_out.finished_at_unix.is_some());
+        assert!(!timed_out.cancellation_requested);
+        wait_for_job(&state, &next, JobState::Completed).await;
+        shutdown_jobs(&state).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_running_and_queued_jobs_and_stops_admission() {
+        let (client, started, server) = api_fixture().await;
+        let mut state = state();
+        state.client = client;
+        let state = Arc::new(state);
+        let running = enqueue(&state, "hang").await;
+        tokio::time::timeout(Duration::from_secs(3), started.notified())
+            .await
+            .unwrap();
+        let queued = enqueue(&state, "queued").await;
+        tokio::time::timeout(Duration::from_secs(2), shutdown_jobs(&state))
+            .await
+            .unwrap();
+        assert_eq!(
+            state.jobs.read().await[&running].snapshot.status,
+            JobState::Cancelled
+        );
+        assert_eq!(
+            state.jobs.read().await[&queued].snapshot.status,
+            JobState::Cancelled
+        );
+        assert!(state.jobs.read().await[&queued]
+            .snapshot
+            .started_at_unix
+            .is_none());
+        assert!(state.tasks.lock().unwrap().is_empty());
+        let payload = Bytes::from_static(b"{\"task\":\"after shutdown\"}");
+        let response = create_job(
+            State(Arc::clone(&state)),
+            signed_headers(unix_now(), &payload),
+            payload,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(state.seen_signatures.lock().unwrap().len(), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tool_panic_finishes_job_and_next_job_can_run() {
+        async fn panic_tool(_: Value) -> anyhow::Result<Value> {
+            panic!("test tool panic")
+        }
+        let (client, _, server) = api_fixture().await;
+        let mut state = state();
+        state.client = client;
+        state
+            .registry
+            .register(
+                crate::ToolDefinition::new(
+                    "panic_tool",
+                    "A test tool",
+                    json!({"type":"object","properties":{},"additionalProperties":false}),
+                ),
+                panic_tool,
+            )
+            .unwrap();
+        let state = Arc::new(state);
+        let first = enqueue(&state, "panic").await;
+        let failed = wait_for_job(&state, &first, JobState::Failed).await;
+        assert_eq!(failed.error.as_deref(), Some("job execution panicked"));
+        let next = enqueue(&state, "fast").await;
+        wait_for_job(&state, &next, JobState::Completed).await;
+        shutdown_jobs(&state).await;
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn acknowledged_cancellation_wins_completion_race() {
+        let state = Arc::new(state());
+        let _permit = state.job_slots.acquire().await.unwrap();
+        let id = enqueue(&state, "queued").await;
+        let response = cancel_job(
+            State(Arc::clone(&state)),
+            signed_headers(unix_now(), format!("cancel:{id}").as_bytes()),
+            Path(id.clone()),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        finish(&state, &id, JobOutcome::Completed("late result".into())).await;
+        finish(&state, &id, JobOutcome::Failed("later error".into())).await;
+        let status = &state.jobs.read().await[&id].snapshot;
+        assert_eq!(status.status, JobState::Cancelled);
+        assert!(status.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn retention_is_enforced_at_completion_without_evicting_pending_jobs() {
+        let mut state = state();
+        state.config.webhook.max_retained_jobs = 1;
+        let state = Arc::new(state);
+        let _permit = state.job_slots.acquire().await.unwrap();
+        let old = enqueue(&state, "first").await;
+        let new = enqueue(&state, "second").await;
+        let pending = enqueue(&state, "third").await;
+        finish(&state, &old, JobOutcome::Completed("old".into())).await;
+        assert_eq!(state.jobs.read().await.len(), 3);
+        finish(&state, &new, JobOutcome::Completed("new".into())).await;
+        let jobs = state.jobs.read().await;
+        assert_eq!(jobs.len(), 2);
+        assert!(!jobs.contains_key(&old));
+        assert_eq!(jobs[&new].snapshot.result.as_deref(), Some("new"));
+        assert_eq!(jobs[&pending].snapshot.status, JobState::Queued);
     }
 
     #[test]
@@ -586,15 +1068,21 @@ mod tests {
         let headers = signed_headers(unix_now(), &payload);
         state.jobs.write().await.insert(
             "existing".into(),
-            JobStatus {
-                id: "existing".into(),
-                status: JobState::Queued,
-                user: "default".into(),
-                environment: "default".into(),
-                created_at_unix: unix_now(),
-                finished_at_unix: None,
-                result: None,
-                error: None,
+            JobRecord {
+                snapshot: JobStatus {
+                    id: "existing".into(),
+                    status: JobState::Queued,
+                    user: "default".into(),
+                    environment: "default".into(),
+                    created_at_unix: unix_now(),
+                    started_at_unix: None,
+                    finished_at_unix: None,
+                    cancellation_requested: false,
+                    result: None,
+                    error: None,
+                },
+                cancel: watch::channel(false).0,
+                finished_at: None,
             },
         );
 
@@ -632,15 +1120,21 @@ mod tests {
 
     #[test]
     fn evicts_oldest_finished_jobs_only() {
-        let job = |id: &str, status: JobState, finished: Option<u64>| JobStatus {
-            id: id.into(),
-            status,
-            user: "default".into(),
-            environment: "default".into(),
-            created_at_unix: 0,
-            finished_at_unix: finished,
-            result: None,
-            error: None,
+        let job = |id: &str, status: JobState, finished: Option<u64>| JobRecord {
+            snapshot: JobStatus {
+                id: id.into(),
+                status,
+                user: "default".into(),
+                environment: "default".into(),
+                created_at_unix: 0,
+                started_at_unix: None,
+                finished_at_unix: finished,
+                cancellation_requested: false,
+                result: None,
+                error: None,
+            },
+            cancel: watch::channel(false).0,
+            finished_at: finished.map(|_| Instant::now()),
         };
         let mut jobs = HashMap::new();
         for job in [
@@ -648,12 +1142,18 @@ mod tests {
             job("new", JobState::Failed, Some(2)),
             job("running", JobState::Running, None),
         ] {
-            jobs.insert(job.id.clone(), job);
+            jobs.insert(job.snapshot.id.clone(), job);
         }
 
-        evict_finished_jobs(&mut jobs, 3);
+        evict_finished_jobs(&mut jobs, 2);
+        assert!(jobs.contains_key("old"));
+        assert_eq!(jobs.len(), 3);
+        evict_finished_jobs(&mut jobs, 1);
         assert!(!jobs.contains_key("old"));
         assert!(jobs.contains_key("new"));
+        assert!(jobs.contains_key("running"));
+        evict_finished_jobs(&mut jobs, 0);
+        assert_eq!(jobs.len(), 1);
         assert!(jobs.contains_key("running"));
     }
 }
