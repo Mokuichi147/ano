@@ -25,7 +25,7 @@ use rmcp::{
     RoleClient, ServiceExt,
 };
 use serde_json::{json, Map, Value};
-use std::{process::Stdio, sync::Arc, time::Duration};
+use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     process::Command,
     sync::{watch, Mutex},
@@ -265,6 +265,7 @@ impl ConnectedMcpServer {
                 format!("failed to list tools from MCP server '{}'", config.label)
             })?;
         let mut tools = Vec::new();
+        let mut function_names = HashSet::new();
         for (tool_index, tool) in listed_tools.into_iter().enumerate() {
             let name = tool.name.to_string();
             if !config.is_tool_allowed(&UserPolicy::default(), &name) {
@@ -283,8 +284,12 @@ impl ConnectedMcpServer {
                 });
             }
             tools.push(DirectMcpTool {
-                function_name: format!(
-                    "{DIRECT_MCP_PREFIX}server_{server_index}__tool_{tool_index}"
+                function_name: function_name(
+                    &config.label,
+                    &name,
+                    server_index,
+                    tool_index,
+                    &mut function_names,
                 ),
                 name,
                 description,
@@ -311,6 +316,37 @@ impl ConnectedMcpServer {
             Err(shared) => shared.service.cancellation_token().cancel(),
         }
     }
+}
+
+/// The function name the model calls a tool by: `mcp__<label>__<tool>`, so
+/// that the model can tell tools apart by name. Characters that function
+/// names cannot contain become `_`. A name that is too long or already taken
+/// falls back to one made of the server and tool positions.
+fn function_name(
+    label: &str,
+    tool_name: &str,
+    server_index: usize,
+    tool_index: usize,
+    used: &mut HashSet<String>,
+) -> String {
+    let tool_name: String = tool_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let readable = format!("{DIRECT_MCP_PREFIX}{label}__{tool_name}");
+    let name = if readable.len() <= 64 && !used.contains(&readable) {
+        readable
+    } else {
+        format!("{DIRECT_MCP_PREFIX}server_{server_index}__tool_{tool_index}")
+    };
+    used.insert(name.clone());
+    name
 }
 
 #[async_trait]
@@ -358,7 +394,7 @@ impl McpGateway for McpPool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectedMcpServer, McpPool};
+    use super::{function_name, ConnectedMcpServer, McpPool};
     use crate::{
         domain::{
             mcp::{McpApprovalMode, McpServerConfig, McpTransport},
@@ -366,7 +402,7 @@ mod tests {
         },
         infrastructure::mcp_oauth::OAuthStore,
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{collections::HashSet, sync::Arc, time::Duration};
     use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
     fn stdio_server(label: &str) -> McpServerConfig {
@@ -388,6 +424,19 @@ mod tests {
             require_approval: McpApprovalMode::Always,
             reuse_connection: true,
         }
+    }
+
+    #[test]
+    fn function_names_are_readable_and_unique() {
+        let mut used = HashSet::new();
+        let mut name = |tool: &str, index| function_name("annict", tool, 2, index, &mut used);
+        assert_eq!(
+            name("annict_update_status", 0),
+            "mcp__annict__annict_update_status"
+        );
+        assert_eq!(name("search.works", 1), "mcp__annict__search_works");
+        assert_eq!(name("search_works", 2), "mcp__server_2__tool_2");
+        assert_eq!(name(&"x".repeat(60), 3), "mcp__server_2__tool_3");
     }
 
     #[tokio::test]

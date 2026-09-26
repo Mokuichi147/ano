@@ -157,6 +157,9 @@ Responses API 側から届いた承認要求も、ユーザーポリシーと直
 
 Responses API 管理方式では、`tool_search` の検索対象として軽量な `tool_catalog` を設定できます。`tool_catalog` がない場合は、`allowed_tools` に列挙した名前が説明なしで検索対象になります。サーバーの tool 全件をモデルへ公開したくない場合は、`allowed_tools` と `tool_catalog` を明示してください。直接接続方式では、実サーバーから取得した一覧が検索対象になります。
 
+- 検索は主に tool 名と説明に一致するかで判定します。server の `label` や `description` だけに一致した tool は、検索語がすべて server に一致する場合（例: `annict` で検索）を除いて候補にしません。server の説明にある一般的な語で、その server の tool が一括で選ばれるのを防ぐためです。
+- 直接接続の tool は `mcp__<label>__<tool 名>` という関数名でモデルに渡します（関数名に使えない文字は `_` に置き換え）。64文字を超える場合や重複する場合は `mcp__server_<番号>__tool_<番号>` になります。
+
 ```toml
 [agent]
 tool_discovery_limit = 12

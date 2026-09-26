@@ -449,10 +449,11 @@ impl Agent {
                 reason: decision.reason.clone(),
             });
             if !decision.approved {
-                let message = match decision.reason {
+                let denial = match decision.reason {
                     Some(reason) => format!("This MCP tool call was denied: {reason}"),
                     None => "The user denied this MCP tool call.".to_string(),
                 };
+                let message = format!("{denial} Do not retry the same call; continue without it, or tell the user what you need.");
                 let output = json!({
                     "error": "mcp_approval_denied",
                     "message": message

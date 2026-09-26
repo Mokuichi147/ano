@@ -118,13 +118,11 @@ impl Agent {
                 let description = catalog.description.unwrap_or_else(|| {
                     format!("MCP tool '{}' on server '{}'.", catalog.name, server.label)
                 });
-                let fields = vec![
-                    catalog.name.clone(),
-                    description.clone(),
-                    server.label.clone(),
-                    server.description.clone().unwrap_or_default(),
-                ];
-                if let Some(score) = score_candidate(&terms, &fields) {
+                if let Some(score) = score_mcp_candidate(
+                    &terms,
+                    &[catalog.name.clone(), description.clone()],
+                    server,
+                ) {
                     candidates.push(SearchCandidate {
                         kind: "mcp",
                         server_label: Some(server.label.clone()),
@@ -138,13 +136,11 @@ impl Agent {
         }
 
         for (server, tool) in mcp_runtime.tools() {
-            let fields = vec![
-                tool.name.clone(),
-                tool.description.clone(),
-                server.config().label.clone(),
-                server.config().description.clone().unwrap_or_default(),
-            ];
-            if let Some(score) = score_candidate(&terms, &fields) {
+            if let Some(score) = score_mcp_candidate(
+                &terms,
+                &[tool.name.clone(), tool.description.clone()],
+                server.config(),
+            ) {
                 candidates.push(SearchCandidate {
                     kind: "mcp",
                     server_label: Some(server.config().label.clone()),
@@ -217,7 +213,7 @@ pub(super) struct ToolSearchSelection {
 fn tool_search_definition() -> ToolDefinition {
     ToolDefinition::new(
         TOOL_SEARCH_NAME,
-        "Search the registered local tools and MCP tools by capability. Use this before attempting a tool that is not currently available; only the returned tools are loaded for the next step.",
+        "Search the registered local tools and MCP tools by capability. Use this before attempting a tool that is not currently available; only the returned tools are loaded for the next step. Use short keywords; tool names and descriptions are usually in English.",
         json!({
             "type": "object",
             "properties": {
@@ -249,6 +245,38 @@ fn score_candidate(terms: &[String], fields: &[String]) -> Option<usize> {
         })
         .sum::<usize>();
     (score > 0).then_some(score)
+}
+
+/// Score an MCP tool by its own name and description. The server's label
+/// and description describe every tool on the server, so they only add to
+/// the score of a tool that matches by itself, unless every term matches the
+/// server (a query that names the server). Otherwise a word shared with the
+/// server description would fill the results with all of its tools.
+fn score_mcp_candidate(
+    terms: &[String],
+    tool_fields: &[String],
+    server: &McpServerConfig,
+) -> Option<usize> {
+    let server_fields = [
+        server.label.to_lowercase(),
+        server
+            .description
+            .clone()
+            .unwrap_or_default()
+            .to_lowercase(),
+    ];
+    let server_matches = |term: &String| {
+        server_fields
+            .iter()
+            .filter(|field| field.contains(term.as_str()))
+            .count()
+    };
+    let server_score = terms.iter().map(server_matches).sum::<usize>();
+    match score_candidate(terms, tool_fields) {
+        Some(score) => Some(score + server_score),
+        None if terms.iter().all(|term| server_matches(term) > 0) => Some(server_score),
+        None => None,
+    }
 }
 
 fn truncate_description(description: &str) -> String {

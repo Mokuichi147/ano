@@ -261,6 +261,43 @@ fn search_returns_up_to_the_discovery_limit() {
     assert_eq!(selection.results.len(), 3);
 }
 
+#[test]
+fn server_description_alone_does_not_select_every_tool_on_the_server() {
+    let server = McpServerConfig {
+        description: Some("アニメ情報を確認できます".into()),
+        tool_catalog: Some(vec![
+            McpToolCatalog {
+                name: "search_works".into(),
+                description: Some("Search anime works".into()),
+            },
+            McpToolCatalog {
+                name: "update_status".into(),
+                description: Some("Update the watch status".into()),
+            },
+        ]),
+        ..remote_server("annict")
+    };
+    let agent = agent(
+        registry_with(&[("unix_time", "Return the current time")]),
+        vec![server],
+    );
+    let search = |query: &str| {
+        let selection = agent
+            .search_tools(&json!({ "query": query }), &McpRuntime::default())
+            .unwrap();
+        selection
+            .results
+            .iter()
+            .map(|result| result["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(search("時刻 確認"), Vec::<String>::new());
+    assert_eq!(search("time 確認"), vec!["unix_time"]);
+    assert_eq!(search("works 確認"), vec!["search_works"]);
+    assert_eq!(search("annict"), vec!["search_works", "update_status"]);
+}
+
 #[tokio::test]
 async fn invalid_arguments_are_returned_to_the_model() {
     let agent = agent(registry_with(&[("echo_tool", "Echo")]), Vec::new());
