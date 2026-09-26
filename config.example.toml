@@ -135,6 +135,10 @@ allow_writes = false
 # authorization_env = "DOCS_MCP_TOKEN"
 # allowed_tools = ["search_docs", "read_page"]
 # require_approval = "always"
+# Tools the server offers can be listed with `ano mcp tools docs_http` and
+# turned on or off with `ano mcp edit docs_http` (or `ano mcp enable/disable`),
+# which rewrite allowed_tools, or disabled_tools when there is no allowlist.
+# disabled_tools = ["delete_page"]
 
 # A Streamable HTTP server that requires OAuth. Run `ano mcp login docs_oauth`
 # once; the tokens are saved under ~/.ano/oauth and refreshed automatically.

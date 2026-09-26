@@ -289,6 +289,7 @@ mod tests {
             oauth: true,
             oauth_scopes: None,
             allowed_tools: None,
+            disabled_tools: vec![],
             tool_catalog: None,
             require_approval: McpApprovalMode::Always,
             reuse_connection: true,

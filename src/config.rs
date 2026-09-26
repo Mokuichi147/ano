@@ -13,8 +13,10 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
+    io::Write,
     path::{Component, Path, PathBuf},
 };
+use toml_edit::{Array, DocumentMut, Item, TableLike, Value};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -154,6 +156,68 @@ impl AppConfig {
     }
 }
 
+/// Save `server`'s `allowed_tools` and `disabled_tools` to its
+/// `[[mcp_servers]]` entry in the config file at `path`. The rest of the
+/// file, including comments and formatting, is kept as it is, and the file is
+/// replaced only when the result is still a valid config.
+pub fn save_mcp_tool_filters(path: &Path, server: &McpServerConfig) -> Result<()> {
+    let path = std::fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve config file {}", path.display()))?;
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read config file {}", path.display()))?;
+    let updated = with_mcp_tool_filters(&text, server)?;
+    AppConfig::parse(&updated).context("the updated config would be invalid")?;
+
+    let directory = path
+        .parent()
+        .context("config file has no parent directory")?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)
+        .with_context(|| format!("failed to write config file {}", path.display()))?;
+    file.write_all(updated.as_bytes())?;
+    std::fs::set_permissions(file.path(), std::fs::metadata(&path)?.permissions())?;
+    file.persist(&path)
+        .with_context(|| format!("failed to replace config file {}", path.display()))?;
+    Ok(())
+}
+
+fn with_mcp_tool_filters(text: &str, server: &McpServerConfig) -> Result<String> {
+    let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+    let label = server.label.as_str();
+    let has_label =
+        |entry: &dyn TableLike| entry.get("label").and_then(Item::as_str) == Some(label);
+    let entry: Option<&mut dyn TableLike> = match document.get_mut("mcp_servers") {
+        Some(Item::ArrayOfTables(tables)) => tables
+            .iter_mut()
+            .map(|table| table as &mut dyn TableLike)
+            .find(|entry| has_label(&**entry)),
+        Some(Item::Value(Value::Array(array))) => array
+            .iter_mut()
+            .filter_map(|value| value.as_inline_table_mut())
+            .map(|table| table as &mut dyn TableLike)
+            .find(|entry| has_label(&**entry)),
+        _ => None,
+    };
+    let entry = entry.with_context(|| format!("MCP server '{label}' is not in the config file"))?;
+    set_string_list(entry, "allowed_tools", server.allowed_tools.as_deref());
+    let disabled = Some(server.disabled_tools.as_slice()).filter(|names| !names.is_empty());
+    set_string_list(entry, "disabled_tools", disabled);
+    Ok(document.to_string())
+}
+
+/// Set `key` to `names`, or remove it for `None`. A replaced value keeps its
+/// place and surrounding comments.
+fn set_string_list(entry: &mut dyn TableLike, key: &str, names: Option<&[String]>) {
+    let Some(names) = names else {
+        entry.remove(key);
+        return;
+    };
+    let mut array: Array = names.iter().map(String::as_str).collect();
+    if let Some(Item::Value(existing)) = entry.get(key) {
+        *array.decor_mut() = existing.decor().clone();
+    }
+    entry.insert(key, Item::Value(Value::Array(array)));
+}
+
 fn resolve_path(path: &Path, directory: &Path, home: Option<&Path>) -> Result<PathBuf> {
     Ok(match expand_home(path, home)? {
         Some(expanded) => expanded,
@@ -175,8 +239,57 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_home, AppConfig};
+    use super::{expand_home, save_mcp_tool_filters, with_mcp_tool_filters, AppConfig};
     use std::path::Path;
+
+    #[test]
+    fn saves_mcp_tool_filters_keeping_comments_and_other_servers() {
+        let text = "# servers\n[[mcp_servers]]\nlabel = 'docs'\ntransport = 'stdio'\ncommand = 'node'\n\n[[mcp_servers]]\n# keep this\nlabel = 'files'\ntransport = 'stdio'\ncommand = 'node'\nallowed_tools = ['read', 'write'] # trusted\n\n[users.alice]\ndisabled_tools = ['files:write']\n";
+        let mut config = AppConfig::parse(text).unwrap();
+        let files = &mut config.mcp_servers[1];
+        files.set_tools_enabled(["write"], false);
+        files.disabled_tools.push("delete".into());
+
+        let updated = with_mcp_tool_filters(text, files).unwrap();
+        assert_eq!(
+            updated,
+            text.replace(
+                "allowed_tools = ['read', 'write'] # trusted\n",
+                "allowed_tools = [\"read\"] # trusted\ndisabled_tools = [\"delete\"]\n"
+            )
+        );
+
+        files.disabled_tools.clear();
+        let restored = with_mcp_tool_filters(&updated, files).unwrap();
+        assert!(!restored.contains("disabled_tools = [\""));
+        assert!(restored.contains("[users.alice]\ndisabled_tools = ['files:write']"));
+    }
+
+    #[test]
+    fn saves_mcp_tool_filters_of_inline_tables() {
+        let text = "mcp_servers = [{ label = 'files', transport = 'stdio', command = 'node' }]\n";
+        let mut config = AppConfig::parse(text).unwrap();
+        config.mcp_servers[0].set_tools_enabled(["delete"], false);
+        let updated = with_mcp_tool_filters(text, &config.mcp_servers[0]).unwrap();
+        let reloaded = AppConfig::parse(&updated).unwrap();
+        assert_eq!(reloaded.mcp_servers[0].disabled_tools, ["delete"]);
+    }
+
+    #[test]
+    fn saving_mcp_tool_filters_needs_the_server_in_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        let text = "[[mcp_servers]]\nlabel = 'files'\ntransport = 'stdio'\ncommand = 'node'\n";
+        std::fs::write(&path, text).unwrap();
+        let mut server = AppConfig::parse(text).unwrap().mcp_servers.remove(0);
+        server.set_tools_enabled(["delete"], false);
+        save_mcp_tool_filters(&path, &server).unwrap();
+        let saved = AppConfig::load(&path).unwrap();
+        assert_eq!(saved.mcp_servers[0].disabled_tools, ["delete"]);
+
+        server.label = "missing".into();
+        assert!(save_mcp_tool_filters(&path, &server).is_err());
+    }
 
     #[test]
     fn default_config_is_valid() {

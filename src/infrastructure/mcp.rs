@@ -7,7 +7,7 @@
 use crate::{
     application::ports::{DirectMcpServer, DirectMcpTool, McpGateway},
     domain::{
-        mcp::{McpServerConfig, McpTransport},
+        mcp::{McpServerConfig, McpToolCatalog, McpTransport},
         policy::UserPolicy,
         tool::DIRECT_MCP_PREFIX,
     },
@@ -191,75 +191,7 @@ impl ConnectedMcpServer {
         config: &McpServerConfig,
         oauth: &OAuthStore,
     ) -> Result<Self> {
-        config.validate()?;
-        let service = match config.transport {
-            McpTransport::Responses => {
-                anyhow::bail!(
-                    "MCP server '{}' is managed by the Responses API",
-                    config.label
-                )
-            }
-            McpTransport::Stdio => {
-                let command_name = config.command.as_deref().unwrap_or_default();
-                let mut command = Command::new(command_name);
-                command
-                    .args(&config.args)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped());
-                if let Some(cwd) = &config.cwd {
-                    command.current_dir(cwd);
-                }
-                for (child_name, source_name) in &config.env_vars {
-                    let value = std::env::var(source_name).with_context(|| {
-                        format!(
-                            "MCP server '{}' requires environment variable '{}'",
-                            config.label, source_name
-                        )
-                    })?;
-                    command.env(child_name, value);
-                }
-                let transport = TokioChildProcess::new(command).with_context(|| {
-                    format!("failed to start stdio MCP server '{}'", config.label)
-                })?;
-                ().serve(transport).await.with_context(|| {
-                    format!("failed to initialize MCP server '{}'", config.label)
-                })?
-            }
-            McpTransport::StreamableHttp => {
-                let url = config.url.as_deref().unwrap_or_default();
-                let mut transport_config =
-                    StreamableHttpClientTransportConfig::with_uri(url.to_string());
-                if let Some(authorization_env) = &config.authorization_env {
-                    let token = std::env::var(authorization_env).with_context(|| {
-                        format!(
-                            "MCP server '{}' requires environment variable '{}'",
-                            config.label, authorization_env
-                        )
-                    })?;
-                    transport_config = transport_config.auth_header(token);
-                }
-                let initialized = if config.oauth {
-                    let client = oauth.authorized_client(config).await?;
-                    ().serve(StreamableHttpClientTransport::with_client(
-                        client,
-                        transport_config,
-                    ))
-                    .await
-                } else {
-                    ().serve(StreamableHttpClientTransport::from_config(transport_config))
-                        .await
-                };
-                initialized.with_context(|| {
-                    let label = &config.label;
-                    if config.oauth {
-                        format!("failed to initialize MCP server '{label}' (if its authorization expired, run `ano mcp login {label}`)")
-                    } else {
-                        format!("failed to initialize MCP server '{label}'")
-                    }
-                })?
-            }
-        };
-
+        let service = open_service(config, oauth).await?;
         let listed_tools =
             service.peer().list_all_tools().await.with_context(|| {
                 format!("failed to list tools from MCP server '{}'", config.label)
@@ -268,7 +200,7 @@ impl ConnectedMcpServer {
         let mut function_names = HashSet::new();
         for (tool_index, tool) in listed_tools.into_iter().enumerate() {
             let name = tool.name.to_string();
-            if !config.is_tool_allowed(&UserPolicy::default(), &name) {
+            if !config.is_tool_enabled(&name) {
                 continue;
             }
             let description = tool
@@ -316,6 +248,122 @@ impl ConnectedMcpServer {
             Err(shared) => shared.service.cancellation_token().cancel(),
         }
     }
+}
+
+/// Start and initialize an MCP session with a directly connected server.
+async fn open_service(config: &McpServerConfig, oauth: &OAuthStore) -> Result<McpClient> {
+    config.validate()?;
+    let service = match config.transport {
+        McpTransport::Responses => {
+            anyhow::bail!(
+                "MCP server '{}' is managed by the Responses API",
+                config.label
+            )
+        }
+        McpTransport::Stdio => {
+            let command_name = config.command.as_deref().unwrap_or_default();
+            let mut command = Command::new(command_name);
+            command
+                .args(&config.args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped());
+            if let Some(cwd) = &config.cwd {
+                command.current_dir(cwd);
+            }
+            for (child_name, source_name) in &config.env_vars {
+                let value = std::env::var(source_name).with_context(|| {
+                    format!(
+                        "MCP server '{}' requires environment variable '{}'",
+                        config.label, source_name
+                    )
+                })?;
+                command.env(child_name, value);
+            }
+            let transport = TokioChildProcess::new(command)
+                .with_context(|| format!("failed to start stdio MCP server '{}'", config.label))?;
+            ().serve(transport)
+                .await
+                .with_context(|| format!("failed to initialize MCP server '{}'", config.label))?
+        }
+        McpTransport::StreamableHttp => {
+            let url = config.url.as_deref().unwrap_or_default();
+            let mut transport_config =
+                StreamableHttpClientTransportConfig::with_uri(url.to_string());
+            if let Some(authorization_env) = &config.authorization_env {
+                let token = std::env::var(authorization_env).with_context(|| {
+                    format!(
+                        "MCP server '{}' requires environment variable '{}'",
+                        config.label, authorization_env
+                    )
+                })?;
+                transport_config = transport_config.auth_header(token);
+            }
+            let initialized = if config.oauth {
+                let client = oauth.authorized_client(config).await?;
+                ().serve(StreamableHttpClientTransport::with_client(
+                    client,
+                    transport_config,
+                ))
+                .await
+            } else {
+                ().serve(StreamableHttpClientTransport::from_config(transport_config))
+                    .await
+            };
+            initialized.with_context(|| {
+                    let label = &config.label;
+                    if config.oauth {
+                        format!("failed to initialize MCP server '{label}' (if its authorization expired, run `ano mcp login {label}`)")
+                    } else {
+                        format!("failed to initialize MCP server '{label}'")
+                    }
+                })?
+        }
+    };
+    Ok(service)
+}
+
+/// Connect to `config` once and list every tool the server offers, including
+/// tools that `allowed_tools` or `disabled_tools` turn off. A Responses-managed
+/// server with a `url` is reached over Streamable HTTP, as the provider would.
+pub async fn list_server_tools(
+    config: &McpServerConfig,
+    oauth: &OAuthStore,
+) -> Result<Vec<McpToolCatalog>> {
+    let mut config = config.clone();
+    if config.transport == McpTransport::Responses {
+        if config.url.is_none() {
+            anyhow::bail!(
+                "MCP server '{}' is reached through a tunnel that only the Responses API can use",
+                config.label
+            );
+        }
+        config.transport = McpTransport::StreamableHttp;
+    }
+    let list = async {
+        let mut service = open_service(&config, oauth).await?;
+        let listed =
+            service.peer().list_all_tools().await.with_context(|| {
+                format!("failed to list tools from MCP server '{}'", config.label)
+            });
+        service.close_with_timeout(CLOSE_TIMEOUT).await.ok();
+        listed
+    };
+    let listed = tokio::time::timeout(CONNECTION_TIMEOUT, list)
+        .await
+        .with_context(|| {
+            format!(
+                "MCP server '{}' connection and tool discovery timed out after {} seconds",
+                config.label,
+                CONNECTION_TIMEOUT.as_secs()
+            )
+        })??;
+    Ok(listed
+        .into_iter()
+        .map(|tool| McpToolCatalog {
+            name: tool.name.to_string(),
+            description: tool.description.map(|description| description.to_string()),
+        })
+        .collect())
 }
 
 /// The function name the model calls a tool by: `mcp__<label>__<tool>`, so
@@ -420,6 +468,7 @@ mod tests {
             oauth: false,
             oauth_scopes: None,
             allowed_tools: None,
+            disabled_tools: vec![],
             tool_catalog: None,
             require_approval: McpApprovalMode::Always,
             reuse_connection: true,

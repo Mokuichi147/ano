@@ -61,6 +61,8 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
 | `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
+| `ano mcp tools [LABEL]` | MCP server に接続して提供される tool をすべて表示し、設定で有効なものに印を付けます（[tool の確認と有効化](docs/mcp.md#tool-の確認と有効化)） |
+| `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |
 | `ano mcp login LABEL` | OAuth が必要な MCP server を認可し、トークンを保存します（`ano mcp logout LABEL` で削除。[OAuth 認証](docs/mcp.md#oauth-認証)） |
 
 共通オプションは `--config PATH`（設定ファイル）と `--user NAME`（`[users]` のユーザー、既定 `default`）です。
@@ -290,7 +292,7 @@ registry.register(
 | ドキュメント | 内容 |
 | --- | --- |
 | [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント |
-| [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、承認、ポリシーの名前空間、検索カタログ |
+| [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、tool の確認と有効化、承認、ポリシーの名前空間、検索カタログ |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
 

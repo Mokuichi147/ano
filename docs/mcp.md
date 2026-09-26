@@ -52,7 +52,7 @@ allowed_tools = ["read_file", "list_files"]
 - 子プロセスは ano の環境変数を継承します。`env_vars` は「子プロセスへ渡す環境変数名 = ano 側で値を読む環境変数名」の対応表で、値を追加・上書きします。
 - stdio プロセスは ano と同じ OS ユーザー権限で実行され、継承した環境変数にもアクセスできます。信頼できる MCP server だけを登録してください。
 
-直接接続では、接続時に MCP server から tool 名・説明・schema を取得しますが、モデルへは検索カタログの名前と説明だけを使います。`tool_search` が選んだ関数の schema だけを次の Responses 要求に含めます。`allowed_tools` とユーザー別 `disabled_tools` の両方を適用し、Webhook ジョブも同じ制限・承認フローを使います。
+直接接続では、接続時に MCP server から tool 名・説明・schema を取得しますが、モデルへは検索カタログの名前と説明だけを使います。`tool_search` が選んだ関数の schema だけを次の Responses 要求に含めます。server の `allowed_tools`・`disabled_tools` とユーザー別 `disabled_tools` のすべてを適用し、Webhook ジョブも同じ制限・承認フローを使います。
 
 ### OAuth 認証
 
@@ -90,6 +90,41 @@ ano mcp logout annict    # 保存したトークンを削除
 - CLI の終了時と `ano serve` の graceful shutdown 時には接続を閉じ、stdio のプロセスを停止します。
 
 server がタスク間で状態を持ち、別のユーザーやジョブと共有したくない場合は `reuse_connection = false` を指定します。その server だけ実行ごとに接続し、実行の終了時に閉じます（Responses API 管理方式の server には指定できません）。
+
+## tool の確認と有効化
+
+`allowed_tools` や `disabled_tools` に書く tool 名は、MCP server に接続して確認できます。
+
+```sh
+ano mcp tools            # 設定したすべての server の tool を表示
+ano mcp tools annict     # 1つの server だけ表示
+ano mcp edit annict      # チェックリストで有効・無効を選び、設定ファイルに保存
+ano mcp disable annict annict_record_episode annict_update_status
+ano mcp enable annict annict_update_status
+```
+
+```text
+annict (streamable_http, OAuth): 11 tools, 9 enabled
+  [x] annict_get_viewer      Get the authenticated Annict user's profile and watch-status counts.
+  [ ] annict_record_episode  Mark an episode as watched by creating a record, with an optional comment.
+  ...
+```
+
+- `ano mcp tools` は server が提供する tool をすべて表示し、設定で有効なものに `[x]` を付けます。`--user` で指定したユーザーのポリシーで使えない tool には `(disabled for user '...')` と表示します。設定に書かれているのに server が提供していない名前（書き間違いや廃止された tool）もまとめて表示します。
+- `ano mcp edit` は端末でチェックリストを開きます。スペースで切り替え、文字を入力すると絞り込み、Enter で保存、Esc で保存せずに終了します。
+- `ano mcp enable` / `ano mcp disable` は指定した tool を切り替えます。書き間違いを防ぐため、保存前に server へ接続して tool 名を確認します。接続できない server（Secure MCP Tunnel など）では `--no-verify` を付けてください。
+- 保存先は `--config` の設定ファイル（既定 `./config.toml`）の該当する `[[mcp_servers]]` です。コメントや他の設定はそのまま残し、変更後の設定が不正になる場合は保存しません。
+
+保存の方式は server の設定によって変わります。
+
+| server の設定 | 無効化 | 有効化 | server が後から追加した tool |
+| --- | --- | --- | --- |
+| `allowed_tools` あり | `allowed_tools` から削除 | `allowed_tools` に追加 | 無効 |
+| `allowed_tools` なし | `disabled_tools` に追加 | `disabled_tools` から削除 | 有効 |
+
+`disabled_tools` は server 単位の拒否リストで、`allowed_tools` の後に適用します。ユーザー別の `disabled_tools` と違い、tool 名は完全一致だけです。
+
+Responses API 管理方式の server は、`url` へ Streamable HTTP で接続して一覧を取得します（`authorization_env` があればそのトークンを送ります）。`tunnel_id` の server は ano から接続できないため一覧を表示できません。Responses API 管理方式では `tool_catalog`（なければ `allowed_tools`）に載った tool だけがモデルから見えるため、`tool_catalog` がない server で tool を有効化すると `allowed_tools` に追加します。`tool_catalog` がある server で catalog にない tool を有効化した場合は、catalog への追加を促す警告を表示します。
 
 ## 承認（require_approval）
 

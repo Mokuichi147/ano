@@ -69,6 +69,9 @@ pub struct McpServerConfig {
     /// Scopes requested at login. Defaults to the scopes the server advertises.
     pub oauth_scopes: Option<Vec<String>>,
     pub allowed_tools: Option<Vec<String>>,
+    /// Tools of this server that are never used, applied after `allowed_tools`.
+    #[serde(default)]
+    pub disabled_tools: Vec<String>,
     /// Optional lightweight metadata used by lazy tool discovery. When this
     /// is omitted, names from `allowed_tools` are used without descriptions.
     pub tool_catalog: Option<Vec<McpToolCatalog>>,
@@ -152,11 +155,62 @@ impl McpServerConfig {
         Ok(())
     }
 
-    pub fn is_tool_allowed(&self, policy: &UserPolicy, tool_name: &str) -> bool {
+    /// Whether the server's own `allowed_tools` and `disabled_tools` permit
+    /// `tool_name`, before any user policy.
+    pub fn is_tool_enabled(&self, tool_name: &str) -> bool {
         self.allowed_tools
             .as_ref()
-            .map(|names| names.iter().any(|name| name == tool_name))
-            .unwrap_or(true)
+            .is_none_or(|names| names.iter().any(|name| name == tool_name))
+            && !self.disabled_tools.iter().any(|name| name == tool_name)
+    }
+
+    /// Whether the model can find `tool_name` on this server, before any user
+    /// policy. A Responses-managed server offers only the tools named in its
+    /// `tool_catalog`, or in `allowed_tools` when it has no catalog.
+    pub fn offers_tool(&self, tool_name: &str) -> bool {
+        self.is_tool_enabled(tool_name)
+            && (self.transport != McpTransport::Responses
+                || match &self.tool_catalog {
+                    Some(catalog) => catalog.iter().any(|tool| tool.name == tool_name),
+                    None => self.allowed_tools.is_some(),
+                })
+    }
+
+    /// Enable or disable tools by editing `allowed_tools` and
+    /// `disabled_tools`. A server with an allowlist keeps using it, so tools
+    /// the server adds later stay disabled; otherwise disabled tools are
+    /// listed in `disabled_tools` and new tools are enabled.
+    pub fn set_tools_enabled<'a>(
+        &mut self,
+        tool_names: impl IntoIterator<Item = &'a str>,
+        enabled: bool,
+    ) {
+        for tool_name in tool_names {
+            if enabled {
+                self.disabled_tools.retain(|name| name != tool_name);
+                // A Responses-managed server without a catalog offers only
+                // the tools named in `allowed_tools`, so enabling one needs
+                // an allowlist.
+                let needs_allowlist =
+                    self.transport == McpTransport::Responses && self.tool_catalog.is_none();
+                if self.allowed_tools.is_none() && needs_allowlist {
+                    self.allowed_tools = Some(Vec::new());
+                }
+                if let Some(allowed) = &mut self.allowed_tools {
+                    if !allowed.iter().any(|name| name == tool_name) {
+                        allowed.push(tool_name.to_string());
+                    }
+                }
+            } else if let Some(allowed) = &mut self.allowed_tools {
+                allowed.retain(|name| name != tool_name);
+            } else if !self.disabled_tools.iter().any(|name| name == tool_name) {
+                self.disabled_tools.push(tool_name.to_string());
+            }
+        }
+    }
+
+    pub fn is_tool_allowed(&self, policy: &UserPolicy, tool_name: &str) -> bool {
+        self.is_tool_enabled(tool_name)
             && !policy.is_mcp_tool_disabled(&self.label, tool_name)
             && policy.is_mcp_tool_allowed(&self.label, tool_name)
     }
@@ -186,5 +240,69 @@ impl McpServerConfig {
             .into_iter()
             .filter(|candidate| self.is_tool_allowed(policy, &candidate.name))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{McpServerConfig, McpTransport};
+
+    fn server(extra: &str) -> McpServerConfig {
+        let text = format!("label = 'files'\ntransport = 'stdio'\ncommand = 'node'\n{extra}");
+        toml::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn disabling_without_an_allowlist_uses_disabled_tools() {
+        let mut server = server("");
+        server.set_tools_enabled(["delete", "move"], false);
+        assert_eq!(server.allowed_tools, None);
+        assert_eq!(server.disabled_tools, ["delete", "move"]);
+        assert!(!server.is_tool_enabled("delete"));
+        assert!(server.is_tool_enabled("read"));
+
+        server.set_tools_enabled(["delete"], true);
+        assert_eq!(server.disabled_tools, ["move"]);
+        assert!(server.offers_tool("delete"));
+    }
+
+    #[test]
+    fn an_allowlist_is_kept_when_toggling() {
+        let mut server = server("allowed_tools = ['read']\ndisabled_tools = ['write']");
+        server.set_tools_enabled(["write", "list"], true);
+        assert_eq!(
+            server.allowed_tools.as_deref().unwrap(),
+            ["read", "write", "list"]
+        );
+        assert!(server.disabled_tools.is_empty());
+
+        server.set_tools_enabled(["read"], false);
+        assert_eq!(server.allowed_tools.as_deref().unwrap(), ["write", "list"]);
+        assert!(server.disabled_tools.is_empty());
+        assert!(!server.offers_tool("read"));
+    }
+
+    #[test]
+    fn responses_servers_offer_only_catalog_or_allowlisted_tools() {
+        let mut remote = server("");
+        remote.transport = McpTransport::Responses;
+        remote.command = None;
+        remote.url = Some("https://example.test/mcp".into());
+        assert!(!remote.offers_tool("search"));
+
+        remote.set_tools_enabled(["search"], true);
+        assert_eq!(remote.allowed_tools.as_deref().unwrap(), ["search"]);
+        assert!(remote.offers_tool("search"));
+        assert!(!remote.offers_tool("delete"));
+
+        let mut catalog: McpServerConfig = toml::from_str(
+            "label = 'docs'\nurl = 'https://example.test/mcp'\ntool_catalog = [{ name = 'search' }]",
+        )
+        .unwrap();
+        assert!(catalog.offers_tool("search"));
+        assert!(!catalog.offers_tool("read"));
+        catalog.set_tools_enabled(["search"], false);
+        assert_eq!(catalog.disabled_tools, ["search"]);
+        assert!(!catalog.offers_tool("search"));
     }
 }

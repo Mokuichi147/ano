@@ -71,7 +71,7 @@ enum Command {
     Serve(ServeArgs),
     /// Inspect saved conversation state without contacting the model.
     Session(SessionArgs),
-    /// Manage the authorization of MCP servers.
+    /// Manage the authorization and the enabled tools of MCP servers.
     Mcp(mcp::McpArgs),
 }
 
@@ -243,9 +243,13 @@ struct ServeArgs {
 pub async fn run() -> Result<()> {
     dotenvy::dotenv().ok();
     let cli = Cli::parse();
+    let config_path = cli
+        .config
+        .clone()
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
     let config = match &cli.config {
         Some(path) => AppConfig::load(path)?,
-        None => AppConfig::load_or_default(DEFAULT_CONFIG_PATH)?,
+        None => AppConfig::load_or_default(&config_path)?,
     };
     if !config.has_user(&cli.user) {
         bail!(
@@ -283,7 +287,7 @@ pub async fn run() -> Result<()> {
         Command::Run(args) => run_agent(config, cli.user, args, registry).await,
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
-        Command::Mcp(args) => mcp::run(&config, args).await,
+        Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
     }
 }
 
@@ -384,7 +388,10 @@ fn list_tools(
                 );
             }
         } else {
-            println!("    tool list not fetched; user and environment policies apply at runtime");
+            println!(
+                "    tool list not fetched (see `ano mcp tools {}`); user and environment policies apply at runtime",
+                server.label
+            );
         }
     }
     Ok(())
