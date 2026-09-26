@@ -225,7 +225,10 @@ pub(super) async fn run(
                 _ = tokio::signal::ctrl_c() => None,
             };
             match outcome {
-                Some(Ok(result)) => println!("{}\n", output::format_result(&result, false)?),
+                Some(Ok(result)) => {
+                    let format = output::TextFormat::for_stdout(options.raw);
+                    println!("{}\n", output::format_result(&result, false, format)?)
+                }
                 // The failure is recorded in the conversation; the next turn
                 // can continue from it.
                 Some(Err(error)) => eprintln!("error: {error:#}"),

@@ -165,6 +165,12 @@ struct AgentOptions {
         help = "Include tool arguments and full results in progress logs"
     )]
     verbose: bool,
+
+    #[arg(
+        long,
+        help = "Print answers as Markdown without formatting them for the terminal"
+    )]
+    raw: bool,
 }
 
 #[derive(Debug, Args)]
@@ -468,7 +474,8 @@ async fn run_agent(
     // Stop stdio MCP server processes before exiting, even on failure.
     mcp.shutdown().await;
     let result = result?;
-    println!("{}", output::format_result(&result, args.json)?);
+    let format = output::TextFormat::for_stdout(args.agent.raw);
+    println!("{}", output::format_result(&result, args.json, format)?);
     Ok(())
 }
 

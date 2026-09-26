@@ -79,6 +79,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |
 | `--quiet` / `--verbose` | 進捗ログを省略 / 引数と結果を含めて詳しく表示 |
+| `--raw` | 回答の Markdown を整形せずにそのまま出力。stdout が端末のときは、既定で見出し・太字・リスト・表を端末向けに整形して表示します（パイプ先や `--json` では常にそのまま。`NO_COLOR` を設定すると色と文字装飾を省略） |
 
 ```sh
 ano run "この画像を説明して" --image ./diagram.png

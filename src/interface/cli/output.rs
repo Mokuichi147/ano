@@ -5,8 +5,126 @@ use crate::{
     domain::plan::{RunOutcome, TaskPlan},
 };
 use anyhow::Result;
+use termimad::{Alignment, MadSkin};
 
-pub(super) fn format_result(result: &AgentResult, as_json: bool) -> Result<String> {
+/// How the answer text is printed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TextFormat {
+    /// The Markdown as the model wrote it, e.g. for a pipe.
+    Raw,
+    /// Markdown formatted for a terminal `width` columns wide.
+    Terminal { width: usize, color: bool },
+}
+
+impl TextFormat {
+    /// Format for the terminal when stdout is one, unless `raw` is requested.
+    /// `NO_COLOR` keeps the layout but drops colors and text styles.
+    pub fn for_stdout(raw: bool) -> Self {
+        use std::io::IsTerminal;
+        if raw || !std::io::stdout().is_terminal() {
+            return Self::Raw;
+        }
+        Self::Terminal {
+            width: usize::from(termimad::terminal_size().0),
+            color: std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
+        }
+    }
+
+    fn apply(self, markdown: &str) -> String {
+        match self {
+            Self::Raw => markdown.to_string(),
+            Self::Terminal { width, color } => {
+                let mut skin = if color {
+                    MadSkin::default()
+                } else {
+                    MadSkin::no_style()
+                };
+                for header in &mut skin.headers {
+                    header.align = Alignment::Left;
+                }
+                skin.text(&close_tables(markdown), Some(width))
+                    .to_string()
+                    .trim_end()
+                    .to_string()
+            }
+        }
+    }
+}
+
+/// Rewrite GitHub-style tables into the form termimad draws in full: rows
+/// get pipes at both ends, and the delimiter row is repeated above and below
+/// the table, which termimad needs to draw its top and bottom borders.
+/// Fenced code blocks are left as they are.
+fn close_tables(markdown: &str) -> String {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let mut output = Vec::with_capacity(lines.len());
+    let mut fence: Option<&str> = None;
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim_start();
+        if let Some(marker) = fence {
+            if trimmed.starts_with(marker) {
+                fence = None;
+            }
+        } else if let Some(marker) = ["```", "~~~"]
+            .into_iter()
+            .find(|marker| trimmed.starts_with(marker))
+        {
+            fence = Some(marker);
+        } else if line.contains('|')
+            && lines
+                .get(index + 1)
+                .is_some_and(|next| is_delimiter_row(next))
+        {
+            let delimiter = with_outer_pipes(lines[index + 1]);
+            output.push(delimiter.clone());
+            output.push(with_outer_pipes(line));
+            output.push(delimiter.clone());
+            index += 2;
+            while let Some(row) = lines
+                .get(index)
+                .filter(|row| row.contains('|') && !row.trim().is_empty())
+            {
+                output.push(with_outer_pipes(row));
+                index += 1;
+            }
+            output.push(delimiter);
+            continue;
+        }
+        output.push(line.to_string());
+        index += 1;
+    }
+    output.join("\n")
+}
+
+/// A row such as `|---|:-:|` or `--- | ---` below a table header.
+fn is_delimiter_row(line: &str) -> bool {
+    let cells: Vec<&str> = line.trim().trim_matches('|').split('|').collect();
+    line.contains('-')
+        && (line.contains('|') || cells.len() > 1)
+        && cells.iter().all(|cell| {
+            let cell = cell.trim().trim_start_matches(':').trim_end_matches(':');
+            !cell.is_empty() && cell.chars().all(|character| character == '-')
+        })
+}
+
+fn with_outer_pipes(row: &str) -> String {
+    let row = row.trim();
+    let start = if row.starts_with('|') { "" } else { "| " };
+    let end = if row.ends_with('|') && !row.ends_with("\\|") {
+        ""
+    } else {
+        " |"
+    };
+    format!("{start}{row}{end}")
+}
+
+pub(super) fn format_result(
+    result: &AgentResult,
+    as_json: bool,
+    format: TextFormat,
+) -> Result<String> {
     if as_json {
         Ok(serde_json::to_string(&serde_json::json!({
             "text": result.text,
@@ -18,10 +136,11 @@ pub(super) fn format_result(result: &AgentResult, as_json: bool) -> Result<Strin
             "stop_reason": result.stop_reason,
         }))?)
     } else {
+        let text = format.apply(&result.text);
         if result.outcome == RunOutcome::Completed {
-            Ok(result.text.clone())
+            Ok(text)
         } else {
-            Ok(format!("{}\n\n{}", result.text, format_plan(&result.plan)))
+            Ok(format!("{text}\n\n{}", format_plan(&result.plan)))
         }
     }
 }
@@ -159,10 +278,42 @@ mod tests {
             }],
         };
         let output: serde_json::Value =
-            serde_json::from_str(&format_result(&result, true).unwrap()).unwrap();
+            serde_json::from_str(&format_result(&result, true, TextFormat::Raw).unwrap()).unwrap();
         assert_eq!(output["text"], result.text);
         assert_eq!(output["response_id"], "resp_123");
         assert_eq!(output["events"][0]["type"], "local_tool_blocked");
-        assert_eq!(format_result(&result, false).unwrap(), result.text);
+        assert_eq!(
+            format_result(&result, false, TextFormat::Raw).unwrap(),
+            result.text
+        );
+    }
+
+    #[test]
+    fn terminal_format_renders_markdown_markers() {
+        let format = TextFormat::Terminal {
+            width: 40,
+            color: false,
+        };
+        let text =
+            format.apply("## 見出し\n\n- **太字**の項目\n\n| 作品 | 理由 |\n|---|---|\n| A | B |");
+        assert!(!text.contains("##"));
+        assert!(!text.contains("**"));
+        assert!(text.contains("見出し"));
+        assert!(text.contains("• 太字の項目"));
+        assert!(text.contains("│"));
+        assert!(text.contains("┌"));
+        assert!(text.contains("└"));
+    }
+
+    #[test]
+    fn tables_get_outer_pipes_and_closing_rules_outside_code_blocks() {
+        let markdown = "前置き\n作品 | 理由\n:--- | ---\nA | B\n\n```\n| a | b |\n|---|---|\n```";
+        assert_eq!(
+            close_tables(markdown),
+            "前置き\n| :--- | --- |\n| 作品 | 理由 |\n| :--- | --- |\n| A | B |\n| :--- | --- |\n\n```\n| a | b |\n|---|---|\n```"
+        );
+        assert!(!is_delimiter_row("---"));
+        assert!(!is_delimiter_row("| a | b |"));
+        assert!(is_delimiter_row("|:-:|"));
     }
 }
