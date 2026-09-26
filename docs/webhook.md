@@ -132,12 +132,14 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/webhook/tasks' `
 | フィールド | 内容 |
 | --- | --- |
 | `status` | `queued`・`running`・`completed`・`blocked`・`incomplete`・`failed`・`cancelled`・`timed_out` |
-| `result` / `plan` / `usage` / `stop_reason` | 実行が終了した場合の回答・作業計画・使用量・停止理由 |
+| `result` / `stop_reason` | 実行が終了した場合の回答・停止理由 |
+| `plan` / `usage` | 作業計画と使用量。実行中も最新の値を返し、終了後は最終結果の値になる |
+| `recent_events` | 直近50件のイベント（tool 呼び出し・結果・計画の更新・推論の要約など）。1,000 文字を超える値は `{"truncated": true, "preview": ...}` に短縮 |
 | `error` | 失敗・中止・タイムアウトの理由 |
 | `created_at_unix` / `started_at_unix` / `finished_at_unix` | 各時刻。開始前・終了前は `null` |
 | `cancellation_requested` | 中止が要求されたか |
 
-`blocked` と `incomplete` も終了状態です。`result` と `plan` から理由と残りの工程を確認してください（[作業計画と完了判定](agent-runtime.md#作業計画と完了判定)）。
+長いジョブは `GET /jobs/<job_id>` を定期的に呼ぶと、`plan` と `recent_events` で進み具合を確認できます。`blocked` と `incomplete` も終了状態です。`result` と `plan` から理由と残りの工程を確認してください（[作業計画と完了判定](agent-runtime.md#作業計画と完了判定)）。
 
 ## ジョブの中止
 

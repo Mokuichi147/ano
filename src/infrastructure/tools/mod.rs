@@ -1,7 +1,10 @@
-//! Built-in local tools: `echo`, `unix_time`, workspace file access, and
-//! configured validation checks.
+//! Built-in local tools: `echo`, `unix_time`, workspace file access and
+//! management, and configured validation checks.
 
 mod checks;
+mod glob;
+mod manage;
+mod walk;
 mod workspace;
 
 use crate::{application::registry::ToolRegistry, domain::tool::ToolDefinition};

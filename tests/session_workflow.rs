@@ -65,7 +65,7 @@ async fn workflow(fail_after_check: bool) {
                 return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":{"message":"fixture unavailable"}}))).into_response();
             }
             let output = match round {
-                1 => vec![call("search", "tool_search", json!({"query":"workspace"}))],
+                1 => vec![call("search", "tool_search", json!({"query":"workspace read edit check"}))],
                 2 => vec![call("read", "workspace_read", json!({"path":"note.txt"}))],
                 3 => {
                     let last = payload["input"].as_array().unwrap().last().unwrap();

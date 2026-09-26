@@ -45,7 +45,9 @@ impl Default for ApiSettings {
 #[derive(Clone)]
 pub struct OpenAiClient {
     http: Client,
-    api_key: String,
+    /// Sent as a bearer token when present. Local and self-hosted servers
+    /// usually run without authentication.
+    api_key: Option<String>,
     base_url: String,
     max_retries: u32,
 }
@@ -59,20 +61,11 @@ impl OpenAiClient {
     pub fn from_api_settings(settings: &ApiSettings) -> Result<Self> {
         let base_url =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| settings.base_url.clone());
-        let api_key = match std::env::var(&settings.api_key_env) {
-            Ok(value) => value,
-            Err(_) if is_local_endpoint(&base_url) => {
-                // LM Studio accepts an arbitrary bearer value when auth is not
-                // enabled. This keeps a local setup free of a fake secret in
-                // the shell while still sending an OpenAI-compatible header.
-                "lm-studio".to_string()
-            }
-            Err(_) => bail!(
-                "{} is not set; export it before using endpoint {}",
-                settings.api_key_env,
-                base_url
-            ),
-        };
+        let api_key = resolve_api_key(
+            &base_url,
+            &settings.api_key_env,
+            std::env::var(&settings.api_key_env).ok(),
+        )?;
         let http = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(Duration::from_secs(settings.timeout_secs.max(1)))
@@ -89,7 +82,7 @@ impl OpenAiClient {
     pub fn new(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
             http: Client::new(),
-            api_key: api_key.into(),
+            api_key: Some(api_key.into()).filter(|key| !key.is_empty()),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             max_retries: 0,
         }
@@ -111,13 +104,11 @@ impl OpenAiClient {
         let url = format!("{}/{}", self.base_url, endpoint);
         let mut attempt = 0;
         loop {
-            let sent = self
-                .http
-                .post(&url)
-                .bearer_auth(&self.api_key)
-                .json(payload)
-                .send()
-                .await;
+            let mut request = self.http.post(&url).json(payload);
+            if let Some(api_key) = &self.api_key {
+                request = request.bearer_auth(api_key);
+            }
+            let sent = request.send().await;
             let response = match sent {
                 Ok(response) => response,
                 Err(error) if error.is_connect() && attempt < self.max_retries => {
@@ -191,19 +182,29 @@ fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
         .min(MAX_RETRY_DELAY)
 }
 
-fn is_local_endpoint(base_url: &str) -> bool {
-    let Ok(url) = Url::parse(base_url) else {
-        return false;
-    };
-    let Some(host) = url.host_str() else {
-        return false;
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .map(|address| address.is_loopback())
-            .unwrap_or(false)
+/// The API key to send. Only the official OpenAI endpoint requires one;
+/// other endpoints (LM Studio, Ollama, vLLM, llama.cpp, and so on, whether on
+/// this machine or elsewhere on the network) are called without an
+/// `Authorization` header when no key is configured. A server that does
+/// require a key reports its own authentication error.
+fn resolve_api_key(base_url: &str, key_env: &str, value: Option<String>) -> Result<Option<String>> {
+    match value.filter(|value| !value.trim().is_empty()) {
+        Some(value) => Ok(Some(value)),
+        None if is_openai_endpoint(base_url) => bail!(
+            "{key_env} is not set; it is required for {base_url}. To use a local or self-hosted model instead, set base_url in the [api] section of config.toml (for example http://127.0.0.1:1234/v1) or the OPENAI_BASE_URL environment variable; config.toml is read from the current directory unless --config is given"
+        ),
+        None => Ok(None),
+    }
+}
+
+fn is_openai_endpoint(base_url: &str) -> bool {
+    Url::parse(base_url)
+        .ok()
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.eq_ignore_ascii_case("api.openai.com"))
+        })
+        .unwrap_or(false)
 }
 
 fn error_text(value: &Value) -> String {
@@ -224,15 +225,77 @@ fn truncate(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_local_endpoint;
+    use super::{resolve_api_key, OpenAiClient};
+    use axum::{http::HeaderMap, routing::post, Json, Router};
+    use serde_json::{json, Value};
+    use std::sync::{Arc, Mutex};
 
     #[test]
-    fn detects_loopback_endpoints_by_host() {
-        assert!(is_local_endpoint("http://127.0.0.1:1234/v1"));
-        assert!(is_local_endpoint("http://localhost:1234/v1"));
-        assert!(is_local_endpoint("http://[::1]:1234/v1"));
-        assert!(!is_local_endpoint("https://api.openai.com/v1"));
-        assert!(!is_local_endpoint("https://evil.test/?x=://localhost"));
-        assert!(!is_local_endpoint("https://localhost.evil.test/v1"));
+    fn only_the_openai_endpoint_requires_a_key() {
+        let error = resolve_api_key("https://api.openai.com/v1", "OPENAI_API_KEY", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("OPENAI_API_KEY is not set"));
+        assert!(error.contains("base_url"));
+        assert!(resolve_api_key(
+            "https://API.OPENAI.COM/v1",
+            "OPENAI_API_KEY",
+            Some(" ".into())
+        )
+        .is_err());
+        for endpoint in [
+            "http://127.0.0.1:1234/v1",
+            "http://localhost:11434/v1",
+            "http://192.168.1.20:8000/v1",
+            "http://ollama.local:11434/v1",
+            "http://host.docker.internal:1234/v1",
+            "https://api.openai.com.example.test/v1",
+        ] {
+            assert_eq!(
+                resolve_api_key(endpoint, "OPENAI_API_KEY", None).unwrap(),
+                None,
+                "{endpoint}"
+            );
+        }
+        assert_eq!(
+            resolve_api_key("http://192.168.1.20:8000/v1", "K", Some("secret".into())).unwrap(),
+            Some("secret".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn sends_authorization_only_when_a_key_is_configured() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&seen);
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |headers: HeaderMap| {
+                let captured = Arc::clone(&captured);
+                async move {
+                    captured.lock().unwrap().push(
+                        headers
+                            .get("authorization")
+                            .map(|value| value.to_str().unwrap().to_string()),
+                    );
+                    Json(json!({"id": "r", "status": "completed", "output": []}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let payload: Value = json!({});
+        for key in ["", "secret"] {
+            OpenAiClient::new(key, &endpoint)
+                .create_response(&payload)
+                .await
+                .unwrap();
+        }
+        server.abort();
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![None, Some("Bearer secret".to_string())]
+        );
     }
 }

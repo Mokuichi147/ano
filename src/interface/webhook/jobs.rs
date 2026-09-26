@@ -1,15 +1,25 @@
 //! Job states and the in-memory job table.
 
 use crate::{
-    application::agent::AgentResult,
+    application::agent::{AgentEvent, AgentResult},
     domain::{
         plan::TaskPlan,
         usage::{StopReason, UsageSummary},
     },
 };
 use serde::Serialize;
-use std::{collections::HashMap, time::Instant};
+use serde_json::{json, Value};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 use tokio::sync::watch;
+
+/// Events kept per job for `GET /jobs/<id>`.
+const MAX_RECENT_EVENTS: usize = 50;
+/// Longer event fields (tool arguments and outputs) are cut to a preview.
+const MAX_EVENT_FIELD_CHARS: usize = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +63,50 @@ pub struct JobStatus {
     pub usage: Option<UsageSummary>,
     pub stop_reason: Option<StopReason>,
     pub error: Option<String>,
+    /// The latest agent events, oldest first, with large fields shortened.
+    /// Available while the job runs, so progress is visible before it ends.
+    pub recent_events: Vec<Value>,
+}
+
+/// Progress reported by the agent while a job runs. Updated from the event
+/// listener, which cannot wait for the async job table lock.
+#[derive(Default)]
+pub(super) struct JobProgress {
+    events: VecDeque<Value>,
+    plan: Option<TaskPlan>,
+    usage: Option<UsageSummary>,
+}
+
+impl JobProgress {
+    pub fn record(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::PlanUpdated { plan, .. } => self.plan = Some(plan.clone()),
+            AgentEvent::UsageUpdated { usage, .. } | AgentEvent::ExecutionStopped { usage, .. } => {
+                self.usage = Some(usage.clone())
+            }
+            _ => {}
+        }
+        self.events.push_back(summarize_event(event));
+        if self.events.len() > MAX_RECENT_EVENTS {
+            self.events.pop_front();
+        }
+    }
+}
+
+fn summarize_event(event: &AgentEvent) -> Value {
+    let mut value = serde_json::to_value(event).unwrap_or_else(|_| json!({"type": "unknown"}));
+    if let Some(fields) = value.as_object_mut() {
+        for field in fields.values_mut() {
+            let text = field.to_string();
+            if text.chars().count() > MAX_EVENT_FIELD_CHARS {
+                *field = json!({
+                    "truncated": true,
+                    "preview": text.chars().take(MAX_EVENT_FIELD_CHARS).collect::<String>(),
+                });
+            }
+        }
+    }
+    value
 }
 
 pub(super) struct JobRecord {
@@ -60,6 +114,27 @@ pub(super) struct JobRecord {
     pub cancel: watch::Sender<bool>,
     /// Monotonic completion order, including jobs finished in the same second.
     pub finished_at: Option<Instant>,
+    pub progress: Arc<Mutex<JobProgress>>,
+}
+
+impl JobRecord {
+    /// The status returned to clients, including live progress. The final
+    /// result's plan and usage take precedence over progress snapshots.
+    pub fn status(&self) -> JobStatus {
+        let mut status = self.snapshot.clone();
+        let progress = self
+            .progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        status.recent_events = progress.events.iter().cloned().collect();
+        if status.plan.is_none() {
+            status.plan.clone_from(&progress.plan);
+        }
+        if status.usage.is_none() {
+            status.usage.clone_from(&progress.usage);
+        }
+        status
+    }
 }
 
 pub(super) enum JobOutcome {

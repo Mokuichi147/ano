@@ -65,6 +65,21 @@ pub(super) fn extract_output_text(response: &Value) -> String {
         .join("")
 }
 
+/// The readable summary of a `reasoning` output item, if the provider sent one.
+pub(super) fn reasoning_summary_text(item: &Value) -> Option<String> {
+    if item["type"] != "reasoning" {
+        return None;
+    }
+    let text = item["summary"]
+        .as_array()?
+        .iter()
+        .filter(|part| part["type"] == "summary_text")
+        .filter_map(|part| part["text"].as_str())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!text.trim().is_empty()).then_some(text)
+}
+
 pub(super) fn parse_mcp_approval(item: &Value) -> Result<McpApprovalRequest> {
     let approval_request_id = item["approval_request_id"]
         .as_str()

@@ -119,9 +119,21 @@ async fn api_fixture() -> (OpenAiClient, Arc<Notify>, JoinHandle<()>) {
     let app = Router::new().route("/v1/responses", post(move |Json(payload): Json<Value>| {
         let observed = Arc::clone(&observed);
         async move {
-            if payload["input"][0]["content"][0]["text"] == "hang" {
+            let continues_progress = payload["input"]
+                .as_array()
+                .is_some_and(|items| items.iter().any(|item| item["call_id"] == "progress_search"));
+            if payload["input"][0]["content"][0]["text"] == "hang" || continues_progress {
                 observed.notify_one();
                 return std::future::pending::<Json<Value>>().await;
+            }
+            if payload["input"][0]["content"][0]["text"] == "progress" {
+                let plan = json!({"expected_revision":0,"explanation":null,"steps":[
+                    {"id":"inspect","description":"Inspect the repository","status":"in_progress","detail":null}]});
+                return Json(json!({"id":"progress-response", "status":"completed", "output":[
+                    {"type":"function_call", "call_id":"progress_plan", "name":"task_plan", "arguments":plan.to_string()},
+                    {"type":"function_call", "call_id":"progress_search", "name":"tool_search",
+                     "arguments":json!({"query":"x".repeat(3000)}).to_string()}
+                ]}));
             }
             let output = if payload["input"][0]["content"][0]["text"] == "panic" {
                 json!([{"type":"function_call", "call_id":"search", "name":"tool_search", "arguments":"{\"query\":\"panic_tool\"}"}])
@@ -224,6 +236,38 @@ async fn cancelling_running_job_releases_slot_and_preserves_completed_results() 
             .snapshot
             .cancellation_requested
     );
+    shutdown_jobs(&state).await;
+    server.abort();
+}
+
+#[tokio::test]
+async fn running_jobs_report_plan_and_recent_events() {
+    let (client, started, server) = api_fixture().await;
+    let mut state = state();
+    state.client = Arc::new(client);
+    let state = Arc::new(state);
+    let id = enqueue(&state, "progress").await;
+    tokio::time::timeout(Duration::from_secs(3), started.notified())
+        .await
+        .unwrap();
+
+    let status = state.jobs.read().await[&id].status();
+    assert_eq!(status.status, JobState::Running);
+    assert_eq!(status.plan.unwrap().steps[0].id, "inspect");
+    let mut kinds = status
+        .recent_events
+        .iter()
+        .map(|event| event["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    kinds.sort();
+    assert_eq!(kinds, vec!["plan_updated", "tool_search"]);
+    // A long query is kept as a bounded preview.
+    let search = status
+        .recent_events
+        .iter()
+        .find(|event| event["type"] == "tool_search")
+        .unwrap();
+    assert_eq!(search["query"]["truncated"], true);
     shutdown_jobs(&state).await;
     server.abort();
 }
@@ -478,9 +522,11 @@ async fn overload_does_not_consume_request_signature() {
                 usage: None,
                 stop_reason: None,
                 error: None,
+                recent_events: Vec::new(),
             },
             cancel: watch::channel(false).0,
             finished_at: None,
+            progress: Default::default(),
         },
     );
 
@@ -531,8 +577,10 @@ fn evicts_oldest_finished_jobs_only() {
             usage: None,
             stop_reason: None,
             error: None,
+            recent_events: Vec::new(),
         },
         cancel: watch::channel(false).0,
+        progress: Default::default(),
         finished_at: finished.map(|_| Instant::now()),
     };
     let mut jobs = HashMap::new();

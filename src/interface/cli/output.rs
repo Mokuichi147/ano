@@ -61,6 +61,7 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
         AgentEvent::ExecutionStopped { reason, .. } => eprintln!("[execution stopped] {reason:?}"),
         AgentEvent::PlanUpdated { plan, .. } => eprintln!("{}", format_plan(plan)),
         AgentEvent::AssistantProgress { text, .. } => eprintln!("[agent] {text}"),
+        AgentEvent::ReasoningSummary { text, .. } => eprintln!("[reasoning] {text}"),
         AgentEvent::LocalToolCall {
             name, arguments, ..
         } => {

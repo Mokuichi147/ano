@@ -3,6 +3,7 @@
 //! application layer.
 
 mod approval;
+mod chat;
 mod output;
 
 pub use approval::InteractiveApproval;
@@ -19,7 +20,8 @@ use crate::{
     config::AppConfig,
     domain::{mcp::McpTransport, plan::TASK_PLAN_NAME, session::SessionBinding, tool::ToolContext},
     infrastructure::{
-        mcp::McpPool, openai::OpenAiClient, session_store::Session, tools::register_builtin_tools,
+        mcp::McpPool, openai::OpenAiClient, project::read_project_instructions,
+        session_store::Session, tools::register_builtin_tools,
     },
     interface::webhook,
 };
@@ -54,15 +56,20 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run one task and print the result.
     Run(RunArgs),
+    /// Talk with the agent over several turns in one conversation.
+    Chat(ChatArgs),
     Tools(ToolsArgs),
     Serve(ServeArgs),
     /// Inspect saved conversation state without contacting the model.
     Session(SessionArgs),
 }
 
+/// Options shared by `run` and `chat`: environment, permissions, model, and
+/// conversation persistence.
 #[derive(Debug, Args)]
-struct RunArgs {
+struct AgentOptions {
     #[arg(
         long,
         value_name = "PATH",
@@ -89,20 +96,18 @@ struct RunArgs {
     )]
     max_total_tokens: Option<u64>,
 
-    #[arg(value_name = "PROMPT")]
-    prompt: Option<String>,
-
-    #[arg(long = "image", short = 'i', value_name = "PATH")]
-    images: Vec<PathBuf>,
-
-    #[arg(long = "audio", short = 'a', value_name = "PATH")]
-    audio: Vec<PathBuf>,
-
     #[arg(long = "disable-tool", value_name = "NAME")]
     disabled_tools: Vec<String>,
 
     #[arg(long)]
     model: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "LEVEL",
+        help = "Reasoning effort: none, minimal, low, medium, high, or xhigh"
+    )]
+    reasoning_effort: Option<String>,
 
     #[arg(long, conflicts_with_all = ["non_interactive", "environment"], help = "Approve remote MCP calls automatically")]
     auto_approve_mcp: bool,
@@ -121,7 +126,7 @@ struct RunArgs {
     #[arg(
         long,
         conflicts_with = "environment",
-        help = "Allow workspace_write and workspace_edit to modify files"
+        help = "Allow workspace_write, workspace_edit, workspace_move, and workspace_delete to modify files"
     )]
     allow_writes: bool,
 
@@ -131,9 +136,6 @@ struct RunArgs {
         help = "Use a configured environment and its tool restrictions"
     )]
     environment: Option<String>,
-
-    #[arg(long, help = "Print the result, response ID, and events as JSON")]
-    json: bool,
 
     #[arg(
         long,
@@ -149,6 +151,30 @@ struct RunArgs {
         help = "Include tool arguments and full results in progress logs"
     )]
     verbose: bool,
+}
+
+#[derive(Debug, Args)]
+struct RunArgs {
+    #[command(flatten)]
+    agent: AgentOptions,
+
+    #[arg(value_name = "PROMPT")]
+    prompt: Option<String>,
+
+    #[arg(long = "image", short = 'i', value_name = "PATH")]
+    images: Vec<PathBuf>,
+
+    #[arg(long = "audio", short = 'a', value_name = "PATH")]
+    audio: Vec<PathBuf>,
+
+    #[arg(long, help = "Print the result, response ID, and events as JSON")]
+    json: bool,
+}
+
+#[derive(Debug, Args)]
+struct ChatArgs {
+    #[command(flatten)]
+    agent: AgentOptions,
 }
 
 #[derive(Debug, Args)]
@@ -225,6 +251,7 @@ pub async fn run() -> Result<()> {
         }
         Command::Tools(args) => list_tools(&config, &cli.user, &args, &registry),
         Command::Run(args) => run_agent(config, cli.user, args, registry).await,
+        Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
     }
 }
@@ -306,64 +333,35 @@ fn list_tools(
     Ok(())
 }
 
-async fn run_agent(
-    config: AppConfig,
-    user_id: String,
-    args: RunArgs,
+/// An agent wired to its adapters for one CLI invocation.
+struct PreparedAgent {
+    agent: Agent,
+    context: ToolContext,
+    /// Identifies the conversation's user, environment, and endpoint.
+    binding: SessionBinding,
+    session: Option<Session>,
+    mcp: Arc<dyn McpGateway>,
+}
+
+fn prepare_agent(
+    config: &AppConfig,
+    user_id: &str,
+    options: &AgentOptions,
     registry: ToolRegistry,
-) -> Result<()> {
+    approval: Arc<dyn ApprovalHandler>,
+) -> Result<PreparedAgent> {
     let ExecutionProfile {
         settings,
         policy,
         context,
-        auto_approve_mcp,
-    } = resolve_run_context(&config, &user_id, &args)?;
-
-    let stdin_is_terminal = std::io::stdin().is_terminal();
-    let prompt = match args.prompt {
-        Some(prompt) => Some(prompt),
-        // Only read a piped prompt; never block waiting on an interactive
-        // terminal when the user supplied only --image or --audio.
-        None if !stdin_is_terminal => read_stdin_prompt()?,
-        None => None,
-    };
-    if prompt.is_none() && args.images.is_empty() && args.audio.is_empty() {
-        anyhow::bail!("provide a prompt, --image, or --audio");
-    }
-
-    let mut input = Vec::new();
-    if let Some(prompt) = prompt {
-        input.push(InputPart::Text(prompt));
-    }
-    input.extend(args.images.into_iter().map(InputPart::Image));
-    input.extend(args.audio.into_iter().map(InputPart::Audio));
-
-    let approval: Arc<dyn ApprovalHandler> = if args.non_interactive {
-        Arc::new(DenyApproval)
-    } else if auto_approve_mcp {
-        Arc::new(AlwaysApprove)
-    } else if args.environment.is_some() {
-        // Named environments have the same approval behavior as webhook jobs.
-        Arc::new(DenyApproval)
-    } else if !stdin_is_terminal {
-        eprintln!(
-            "warning: stdin is not a terminal; MCP approval requests will be denied (use --auto-approve-mcp to allow them)"
-        );
-        Arc::new(DenyApproval)
-    } else {
-        Arc::new(InteractiveApproval)
-    };
+        ..
+    } = resolve_run_context(config, user_id, options)?;
     let client = OpenAiClient::from_api_settings(&config.api)?;
-    let mut session = args
+    let binding = SessionBinding::new(&context, client.base_url())?;
+    let session = options
         .session
         .as_ref()
-        .map(|path| {
-            Session::open(
-                path,
-                SessionBinding::new(&context, client.base_url())?,
-                args.recover_session,
-            )
-        })
+        .map(|path| Session::open(path, binding.clone(), options.recover_session))
         .transpose()?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let mut agent = Agent::new(
@@ -374,11 +372,86 @@ async fn run_agent(
         policy,
         approval,
     );
-    if !args.quiet {
-        let verbose = args.verbose;
+    if !options.quiet {
+        let verbose = options.verbose;
         agent =
             agent.with_event_listener(Arc::new(move |event| output::print_event(event, verbose)));
     }
+    Ok(PreparedAgent {
+        agent,
+        context,
+        binding,
+        session,
+        mcp,
+    })
+}
+
+/// Choose how MCP approval requests are answered. `interactive` is the
+/// handler used when the user can be asked on the terminal.
+fn approval_for(
+    config: &AppConfig,
+    options: &AgentOptions,
+    stdin_is_terminal: bool,
+    interactive: Arc<dyn ApprovalHandler>,
+) -> Result<Arc<dyn ApprovalHandler>> {
+    let auto_approve_mcp = match &options.environment {
+        Some(name) => config.environment_for(name)?.auto_approve_mcp,
+        None => options.auto_approve_mcp,
+    };
+    Ok(if options.non_interactive {
+        Arc::new(DenyApproval)
+    } else if auto_approve_mcp {
+        Arc::new(AlwaysApprove)
+    } else if options.environment.is_some() {
+        // Named environments have the same approval behavior as webhook jobs.
+        Arc::new(DenyApproval)
+    } else if !stdin_is_terminal {
+        eprintln!(
+            "warning: stdin is not a terminal; MCP approval requests will be denied (use --auto-approve-mcp to allow them)"
+        );
+        Arc::new(DenyApproval)
+    } else {
+        interactive
+    })
+}
+
+async fn run_agent(
+    config: AppConfig,
+    user_id: String,
+    args: RunArgs,
+    registry: ToolRegistry,
+) -> Result<()> {
+    let stdin_is_terminal = std::io::stdin().is_terminal();
+    let approval = approval_for(
+        &config,
+        &args.agent,
+        stdin_is_terminal,
+        Arc::new(InteractiveApproval),
+    )?;
+    let prompt = match args.prompt {
+        Some(prompt) => Some(prompt),
+        // Only read a piped prompt; never block waiting on an interactive
+        // terminal when the user supplied only --image or --audio.
+        None if !stdin_is_terminal => read_stdin_prompt()?,
+        None => None,
+    };
+    if prompt.is_none() && args.images.is_empty() && args.audio.is_empty() {
+        anyhow::bail!("provide a prompt, --image, or --audio");
+    }
+    let PreparedAgent {
+        agent,
+        context,
+        mut session,
+        mcp,
+        ..
+    } = prepare_agent(&config, &user_id, &args.agent, registry, approval)?;
+
+    let mut input = Vec::new();
+    if let Some(prompt) = prompt {
+        input.push(InputPart::Text(prompt));
+    }
+    input.extend(args.images.into_iter().map(InputPart::Image));
+    input.extend(args.audio.into_iter().map(InputPart::Audio));
 
     let request = RunRequest { input, context };
     let result = match &mut session {
@@ -395,7 +468,7 @@ async fn run_agent(
 fn resolve_run_context(
     config: &AppConfig,
     user_id: &str,
-    args: &RunArgs,
+    args: &AgentOptions,
 ) -> Result<ExecutionProfile> {
     let mut profile = match &args.environment {
         Some(name) => config.execution_profile(user_id, name, &args.disabled_tools)?,
@@ -427,6 +500,9 @@ fn resolve_run_context(
     if let Some(model) = &args.model {
         settings.model.clone_from(model);
     }
+    if let Some(effort) = &args.reasoning_effort {
+        settings.reasoning_effort = Some(effort.clone());
+    }
     settings.validate()?;
     profile.context.workspace = profile
         .context
@@ -445,6 +521,10 @@ fn resolve_run_context(
             Ok(canonical)
         })
         .transpose()?;
+    if let Some(workspace) = &profile.context.workspace {
+        let sources = read_project_instructions(workspace, &profile.settings.project_instructions)?;
+        profile.settings.append_project_instructions(&sources);
+    }
     Ok(profile)
 }
 
@@ -504,7 +584,7 @@ mod tests {
             policy,
             context,
             auto_approve_mcp: auto_approve,
-        } = resolve_run_context(&config, "default", &args).unwrap();
+        } = resolve_run_context(&config, "default", &args.agent).unwrap();
         assert_eq!(settings.model, "profile-model");
         assert_eq!(settings.instructions, "Review only");
         assert!(policy.is_allowed("workspace_read"));
@@ -543,10 +623,10 @@ mod tests {
     fn invalid_environment_and_workspace_fail_before_api_call() {
         let config = AppConfig::default();
         let args = run_args(&["run", "--environment", "missing", "hello"]);
-        assert!(resolve_run_context(&config, "default", &args).is_err());
+        assert!(resolve_run_context(&config, "default", &args.agent).is_err());
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing");
         let args = run_args(&["run", "--workspace", missing.to_str().unwrap(), "hello"]);
-        assert!(resolve_run_context(&config, "default", &args).is_err());
+        assert!(resolve_run_context(&config, "default", &args.agent).is_err());
     }
 }

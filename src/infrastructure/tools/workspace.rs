@@ -4,7 +4,11 @@
 //! relative, every existing ancestor is canonicalized and checked against the
 //! workspace root, and writes never follow a symbolic link.
 
-use super::non_strict_definition;
+use super::{
+    glob::Glob,
+    non_strict_definition,
+    walk::{relative_to, walk_workspace},
+};
 use crate::{
     application::registry::ToolRegistry,
     domain::tool::{ToolContext, ToolDefinition},
@@ -24,7 +28,6 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const DEFAULT_READ_BYTES: u64 = 64 * 1024;
 const MAX_LIST_ENTRIES: usize = 1000;
-const MAX_SEARCH_ENTRIES: usize = 10_000;
 const MAX_SEARCH_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SEARCH_LINE_BYTES: usize = 2000;
 
@@ -68,12 +71,15 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     registry.register_contextual(
         non_strict_definition(
             "workspace_search",
-            "Find literal text in workspace UTF-8 files and return paths, line numbers, and excerpts. Searches recursively, skips symlinks and .git/target/node_modules/.venv directories, and limits work to 10000 entries and 32 MiB. Narrow path if truncated.",
+            "Find text in workspace UTF-8 files and return paths, line numbers, and excerpts. Literal and case-sensitive by default; set regex=true for a regular expression (Rust syntax) or ignore_case=true. include limits files by a glob such as *.rs or src/**/*.ts. Searches recursively, skips symlinks and .git/target/node_modules/.venv directories, and limits work to 10000 entries and 32 MiB. Narrow path or include if truncated.",
             json!({
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "minLength": 1, "description": "Case-sensitive literal text on one line"},
+                    "query": {"type": "string", "minLength": 1, "description": "Text or regular expression matched within one line"},
                     "path": {"type": "string", "description": "Relative file or directory path; defaults to ."},
+                    "regex": {"type": "boolean", "description": "Treat query as a regular expression; defaults to false"},
+                    "ignore_case": {"type": "boolean", "description": "Match case-insensitively; defaults to false"},
+                    "include": {"type": "string", "description": "Only search files matching this glob, relative to path"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Matching lines to return; defaults to 100"}
                 },
                 "required": ["query"],
@@ -81,6 +87,24 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
             }),
         ),
         |arguments, context| async move { workspace_search(arguments, &context).await },
+    )?;
+    registry.register_contextual(
+        non_strict_definition(
+            "workspace_find",
+            "Find workspace files or directories by path glob. A pattern without / matches names at any depth (*.rs, Cargo.toml); otherwise it matches the path relative to path (src/**/*.rs). Supports *, ?, ** and {a,b}. Skips symlinks and .git/target/node_modules/.venv directories.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "minLength": 1, "description": "Glob pattern"},
+                    "path": {"type": "string", "description": "Relative directory to search; defaults to ."},
+                    "kind": {"type": "string", "enum": ["file", "directory", "any"], "description": "Entries to return; defaults to file"},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Defaults to 200"}
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
+            }),
+        ),
+        |arguments, context| async move { workspace_find(arguments, &context).await },
     )?;
     registry.register_contextual(
         non_strict_definition(
@@ -122,18 +146,27 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
                 "additionalProperties": false
             }),
         ),
-        move |arguments, context| {
+        {
             let mutations = Arc::clone(&mutations);
-            async move {
-                let guard = mutations.lock_owned().await;
-                workspace_write(arguments, &context, guard).await
+            move |arguments, context| {
+                let mutations = Arc::clone(&mutations);
+                async move {
+                    let guard = mutations.lock_owned().await;
+                    workspace_write(arguments, &context, guard).await
+                }
             }
         },
     )?;
+    // Moves and deletes share the lock, so they never race an edit.
+    super::manage::register(registry, mutations)?;
     Ok(())
 }
 
-fn optional_string<'a>(arguments: &'a Value, name: &str, default: &'a str) -> Result<&'a str> {
+pub(super) fn optional_string<'a>(
+    arguments: &'a Value,
+    name: &str,
+    default: &'a str,
+) -> Result<&'a str> {
     match arguments
         .as_object()
         .context("arguments must be an object")?
@@ -167,6 +200,19 @@ fn optional_integer(
         bail!("{name} must be between {min} and {max}");
     }
     Ok(value)
+}
+
+pub(super) fn optional_bool(arguments: &Value, name: &str) -> Result<bool> {
+    match arguments
+        .as_object()
+        .context("arguments must be an object")?
+        .get(name)
+    {
+        None | Some(Value::Null) => Ok(false),
+        Some(value) => value
+            .as_bool()
+            .with_context(|| format!("{name} must be a boolean")),
+    }
 }
 
 async fn workspace_list(arguments: Value, context: &ToolContext) -> Result<Value> {
@@ -276,6 +322,39 @@ async fn workspace_read(arguments: Value, context: &ToolContext) -> Result<Value
     }))
 }
 
+/// How `workspace_search` finds a query in a line.
+enum LineMatcher {
+    Literal(String),
+    Regex(regex::Regex),
+}
+
+impl LineMatcher {
+    fn new(query: &str, is_regex: bool, ignore_case: bool) -> Result<Self> {
+        if !is_regex && !ignore_case {
+            return Ok(Self::Literal(query.to_string()));
+        }
+        let pattern = if is_regex {
+            query.to_string()
+        } else {
+            regex::escape(query)
+        };
+        let regex = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(ignore_case)
+            .size_limit(1 << 20)
+            .build()
+            .context("workspace_search.query is not a valid regular expression")?;
+        Ok(Self::Regex(regex))
+    }
+
+    /// Byte position of the first match in `line`.
+    fn find(&self, line: &str) -> Option<usize> {
+        match self {
+            Self::Literal(query) => line.find(query.as_str()),
+            Self::Regex(regex) => regex.find(line).map(|found| found.start()),
+        }
+    }
+}
+
 async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Value> {
     let query = arguments
         .get("query")
@@ -284,98 +363,44 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
     if query.is_empty() || query.contains(['\r', '\n']) {
         bail!("workspace_search.query must be non-empty text on one line");
     }
+    let is_regex = optional_bool(&arguments, "regex")?;
+    let ignore_case = optional_bool(&arguments, "ignore_case")?;
+    let matcher = LineMatcher::new(query, is_regex, ignore_case)?;
+    let include = match arguments.get("include") {
+        None | Some(Value::Null) => None,
+        Some(value) => Some(Glob::new(
+            value.as_str().context("include must be a glob string")?,
+        )?),
+    };
     let relative = relative_path(optional_string(&arguments, "path", ".")?)?;
     let max_results = optional_integer(&arguments, "max_results", 100, 1, 1000)? as usize;
     let root = workspace_root(context).await?;
     existing_workspace_path(context, &relative).await?;
-    let mut pending = vec![relative.clone()];
+    let walk = walk_workspace(context, &root, &relative).await;
     let mut matches = Vec::new();
-    let mut entries_seen = 1;
     let mut files_searched = 0;
     let mut bytes_read = 0;
     let mut skipped_binary = 0;
     let mut skipped_large = 0;
-    let mut skipped_unreadable = 0;
-    let mut truncated = false;
+    let mut skipped_unreadable = walk.unreadable;
+    let mut truncated = walk.truncated;
 
-    'search: while let Some(path) = pending.pop() {
-        let metadata = match tokio::fs::symlink_metadata(root.join(&path)).await {
-            Ok(metadata) => metadata,
-            Err(_) => {
-                skipped_unreadable += 1;
-                continue;
-            }
-        };
-        if metadata.file_type().is_symlink() {
+    'search: for entry in walk.entries.iter().filter(|entry| !entry.is_dir) {
+        if include
+            .as_ref()
+            .is_some_and(|glob| !glob.matches(&relative_to(&relative, &entry.path)))
+        {
             continue;
         }
-        // Recheck each resolved path before reading, including any intermediate
-        // components in an explicitly supplied path.
-        let absolute = match existing_workspace_path(context, &path).await {
-            Ok(absolute) => absolute,
-            Err(_) => {
-                skipped_unreadable += 1;
-                continue;
-            }
-        };
-        if metadata.is_dir() {
-            let mut directory = match tokio::fs::read_dir(absolute).await {
-                Ok(directory) => directory,
-                Err(_) => {
-                    skipped_unreadable += 1;
-                    continue;
-                }
-            };
-            let mut children = Vec::new();
-            loop {
-                let entry = match directory.next_entry().await {
-                    Ok(Some(entry)) => entry,
-                    Ok(None) => break,
-                    Err(_) => {
-                        skipped_unreadable += 1;
-                        break;
-                    }
-                };
-                if entries_seen >= MAX_SEARCH_ENTRIES {
-                    truncated = true;
-                    break;
-                }
-                entries_seen += 1;
-                let kind = match entry.file_type().await {
-                    Ok(kind) => kind,
-                    Err(_) => {
-                        skipped_unreadable += 1;
-                        continue;
-                    }
-                };
-                let name = entry.file_name();
-                if kind.is_symlink()
-                    || (kind.is_dir()
-                        && matches!(
-                            name.to_str(),
-                            Some(".git" | ".ano" | "target" | "node_modules" | ".venv")
-                        ))
-                {
-                    continue;
-                }
-                children.push(path.join(name));
-            }
-            children.sort();
-            pending.extend(children.into_iter().rev());
-            continue;
-        }
-        if !metadata.is_file() {
-            continue;
-        }
-        if metadata.len() > MAX_FILE_BYTES {
+        if entry.bytes > MAX_FILE_BYTES {
             skipped_large += 1;
             continue;
         }
-        if metadata.len() > MAX_SEARCH_BYTES - bytes_read {
+        if entry.bytes > MAX_SEARCH_BYTES - bytes_read {
             truncated = true;
             break;
         }
-        let file = match tokio::fs::File::open(absolute).await {
+        let file = match tokio::fs::File::open(&entry.absolute).await {
             Ok(file) => file,
             Err(_) => {
                 skipped_unreadable += 1;
@@ -409,7 +434,7 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
         };
         files_searched += 1;
         for (index, line) in content.lines().enumerate() {
-            if let Some(position) = line.find(query) {
+            if let Some(position) = matcher.find(line) {
                 if matches.len() == max_results {
                     truncated = true;
                     break 'search;
@@ -423,7 +448,7 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
                     end -= 1;
                 }
                 matches.push(json!({
-                    "path": path, "line": index + 1,
+                    "path": entry.path, "line": index + 1,
                     "column": line[..position].chars().count() + 1,
                     "text": &line[start..end], "text_truncated": start > 0 || end < line.len()
                 }));
@@ -434,6 +459,53 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
         "path": relative, "query": query, "matches": matches,
         "files_searched": files_searched, "truncated": truncated,
         "skipped_files": {"binary": skipped_binary, "too_large": skipped_large, "unreadable": skipped_unreadable}
+    }))
+}
+
+async fn workspace_find(arguments: Value, context: &ToolContext) -> Result<Value> {
+    let pattern = arguments
+        .get("pattern")
+        .and_then(Value::as_str)
+        .context("workspace_find.pattern must be a string")?;
+    let glob = Glob::new(pattern)?;
+    let kind = optional_string(&arguments, "kind", "file")?;
+    if !matches!(kind, "file" | "directory" | "any") {
+        bail!("workspace_find.kind must be file, directory, or any");
+    }
+    let relative = relative_path(optional_string(&arguments, "path", ".")?)?;
+    let max_results = optional_integer(&arguments, "max_results", 200, 1, 1000)? as usize;
+    let root = workspace_root(context).await?;
+    if !tokio::fs::metadata(existing_workspace_path(context, &relative).await?)
+        .await?
+        .is_dir()
+    {
+        bail!("workspace path is not a directory: {}", relative.display());
+    }
+    let walk = walk_workspace(context, &root, &relative).await;
+    let mut truncated = walk.truncated;
+    let mut results = Vec::new();
+    for entry in &walk.entries {
+        let wanted = match kind {
+            "file" => !entry.is_dir,
+            "directory" => entry.is_dir,
+            _ => true,
+        };
+        if !wanted || !glob.matches(&relative_to(&relative, &entry.path)) {
+            continue;
+        }
+        if results.len() == max_results {
+            truncated = true;
+            break;
+        }
+        results.push(json!({
+            "path": entry.path,
+            "kind": if entry.is_dir { "directory" } else { "file" },
+            "bytes": (!entry.is_dir).then_some(entry.bytes),
+        }));
+    }
+    Ok(json!({
+        "path": relative, "pattern": pattern, "matches": results,
+        "truncated": truncated, "skipped_unreadable": walk.unreadable
     }))
 }
 
@@ -590,7 +662,7 @@ async fn workspace_write(
     )
 }
 
-async fn commit_workspace_file(
+pub(super) async fn commit_workspace_file(
     file: PathBuf,
     root: PathBuf,
     content: Vec<u8>,
@@ -630,7 +702,7 @@ async fn commit_workspace_file(
     .context("workspace save task failed")?
 }
 
-fn relative_path(raw_path: &str) -> Result<PathBuf> {
+pub(super) fn relative_path(raw_path: &str) -> Result<PathBuf> {
     let path = Path::new(raw_path);
     if raw_path.is_empty()
         || path.is_absolute()
@@ -646,7 +718,7 @@ fn relative_path(raw_path: &str) -> Result<PathBuf> {
     Ok(path.to_path_buf())
 }
 
-async fn workspace_root(context: &ToolContext) -> Result<PathBuf> {
+pub(super) async fn workspace_root(context: &ToolContext) -> Result<PathBuf> {
     let root = context
         .workspace
         .as_ref()
@@ -656,7 +728,10 @@ async fn workspace_root(context: &ToolContext) -> Result<PathBuf> {
         .with_context(|| format!("workspace does not exist: {}", root.display()))
 }
 
-async fn existing_workspace_path(context: &ToolContext, relative: &Path) -> Result<PathBuf> {
+pub(super) async fn existing_workspace_path(
+    context: &ToolContext,
+    relative: &Path,
+) -> Result<PathBuf> {
     let root = workspace_root(context).await?;
     let candidate = tokio::fs::canonicalize(root.join(relative))
         .await
@@ -670,7 +745,10 @@ async fn existing_workspace_path(context: &ToolContext, relative: &Path) -> Resu
 /// Resolve a write target without ever touching the filesystem outside the
 /// workspace: each parent directory is checked before the next one is
 /// created, and the final path must not be a symbolic link.
-async fn writable_workspace_path(context: &ToolContext, relative: &Path) -> Result<PathBuf> {
+pub(super) async fn writable_workspace_path(
+    context: &ToolContext,
+    relative: &Path,
+) -> Result<PathBuf> {
     let root = workspace_root(context).await?;
     let file_name = relative
         .file_name()
@@ -1073,6 +1151,114 @@ mod tests {
             .unwrap();
         assert_eq!(scoped["matches"].as_array().unwrap().len(), 1);
         assert_eq!(scoped["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn search_supports_regex_case_folding_and_file_globs() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("src")).unwrap();
+        std::fs::write(
+            workspace.path().join("src/lib.rs"),
+            "fn parse_config() {}\nfn Parse() {}\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.path().join("notes.md"), "parse_config docs\n").unwrap();
+        let registry = registry();
+        let context = context(workspace.path(), false);
+        let search = |arguments| {
+            let registry = registry.clone();
+            let context = context.clone();
+            async move {
+                registry
+                    .execute_with_context("workspace_search", arguments, &context)
+                    .await
+            }
+        };
+
+        let regex = search(json!({"query": r"fn \w+_config\(", "regex": true}))
+            .await
+            .unwrap();
+        assert_eq!(regex["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(regex["matches"][0]["path"], "./src/lib.rs");
+
+        let folded = search(json!({"query": "PARSE", "ignore_case": true, "include": "*.rs"}))
+            .await
+            .unwrap();
+        let lines = folded["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|found| found["line"].as_u64().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(lines, vec![1, 2]);
+
+        // Regex metacharacters stay literal unless regex=true.
+        let literal = search(json!({"query": "config()", "ignore_case": true}))
+            .await
+            .unwrap();
+        assert_eq!(literal["matches"].as_array().unwrap().len(), 1);
+        assert!(search(json!({"query": "(", "regex": true})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn find_matches_globs_by_kind_and_skips_generated_directories() {
+        let workspace = tempfile::tempdir().unwrap();
+        for path in ["src/domain", "target/debug", "docs"] {
+            std::fs::create_dir_all(workspace.path().join(path)).unwrap();
+        }
+        for path in [
+            "Cargo.toml",
+            "src/lib.rs",
+            "src/domain/plan.rs",
+            "target/debug/build.rs",
+            "docs/guide.md",
+        ] {
+            std::fs::write(workspace.path().join(path), "x").unwrap();
+        }
+        let registry = registry();
+        let context = context(workspace.path(), false);
+        let find = |arguments| {
+            let registry = registry.clone();
+            let context = context.clone();
+            async move {
+                let result = registry
+                    .execute_with_context("workspace_find", arguments, &context)
+                    .await
+                    .unwrap();
+                result["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|found| found["path"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+
+        assert_eq!(
+            find(json!({"pattern": "*.rs"})).await,
+            vec!["./src/domain/plan.rs", "./src/lib.rs"]
+        );
+        assert_eq!(
+            find(json!({"pattern": "*.rs", "path": "src/domain"})).await,
+            vec!["src/domain/plan.rs"]
+        );
+        assert_eq!(
+            find(json!({"pattern": "*.{toml,md}"})).await,
+            vec!["./Cargo.toml", "./docs/guide.md"]
+        );
+        assert_eq!(
+            find(json!({"pattern": "src/*", "kind": "directory"})).await,
+            vec!["./src/domain"]
+        );
+        let limited = registry
+            .execute_with_context(
+                "workspace_find",
+                json!({"pattern": "*", "kind": "any", "max_results": 2}),
+                &context,
+            )
+            .await
+            .unwrap();
+        assert_eq!(limited["truncated"], true);
     }
 
     #[tokio::test]

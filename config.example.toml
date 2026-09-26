@@ -6,11 +6,11 @@ api_key_env = "OPENAI_API_KEY"
 timeout_secs = 600
 max_retries = 2
 
-# For LM Studio, replace the two values above with:
-# base_url = "http://127.0.0.1:1234/v1"
-# api_key_env = "LM_STUDIO_API_KEY"
-# A local endpoint uses the harmless fallback key `lm-studio` when the env var
-# is absent. Start LM Studio's server and load a model before running ano.
+# For a local or self-hosted server (LM Studio, Ollama, vLLM, llama.cpp),
+# point base_url at it, e.g. "http://127.0.0.1:1234/v1" (LM Studio) or
+# "http://127.0.0.1:11434/v1" (Ollama), and set agent.model to the loaded model.
+# Only api.openai.com requires the key; for other endpoints, requests are sent
+# without an Authorization header when the api_key_env variable is not set.
 
 [agent]
 # This default is suitable for text/image + tool use. For native audio input,
@@ -19,7 +19,7 @@ max_retries = 2
 model = "gpt-6-astra"
 # Total Responses requests; the final request is reserved for a tool-free report.
 max_tool_rounds = 24
-tool_discovery_limit = 8
+tool_discovery_limit = 12
 parallel_tool_calls = true
 # Tool calls from one response that may run at the same time.
 max_parallel_tool_calls = 8
@@ -32,6 +32,14 @@ tool_timeout_secs = 120
 # Soft per-run limit for reported input + output tokens, including compaction.
 # Checked after API responses; a response can overshoot. Missing usage stops the run.
 # max_total_tokens = 100000
+# Reasoning models: effort (none, minimal, low, medium, high, xhigh) and a
+# readable summary (auto, concise, detailed) shown as progress. Omit to use
+# the model's defaults. Override the effort with `--reasoning-effort`.
+# reasoning_effort = "medium"
+# reasoning_summary = "auto"
+# Files in the workspace root appended to the instructions of every run.
+# Missing files are skipped; set [] to disable.
+# project_instructions = ["AGENTS.md"]
 # Omit instructions to use the built-in plan -> inspect -> edit -> verify workflow.
 # Setting this replaces the built-in instructions.
 # instructions = "Your task-agent instructions..."
@@ -53,14 +61,16 @@ max_retained_jobs = 1000
 job_timeout_secs = 1800
 
 # Webhook callers and `ano run --environment NAME` select names declared here.
-# Relative workspace paths and MCP cwd paths resolve from this config directory.
+# Relative workspace paths and MCP cwd paths resolve from this config directory;
+# a leading ~ expands to the home directory.
 [environments.default]
 workspace = "."
-allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_check"]
+allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_find", "workspace_check"]
 allow_writes = false
 auto_approve_mcp = false
 
-# Example writable coding environment:
+# Example writable coding environment. workspace_* also allows
+# workspace_move and workspace_delete, which cannot be undone.
 # [environments.coding]
 # workspace = "/path/to/my-repository"
 # allowed_tools = ["workspace_*"]

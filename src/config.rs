@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
+    path::{Component, Path, PathBuf},
 };
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -41,21 +41,35 @@ impl AppConfig {
         let directory = absolute_path
             .parent()
             .context("config file has no parent directory")?;
-        for environment in config.environments.values_mut() {
-            if let Some(workspace) = &mut environment.workspace {
-                if workspace.is_relative() {
-                    *workspace = directory.join(&*workspace);
-                }
-            }
-        }
-        for server in &mut config.mcp_servers {
-            if let Some(cwd) = &mut server.cwd {
-                if cwd.is_relative() {
-                    *cwd = directory.join(&*cwd);
-                }
-            }
-        }
+        config.resolve_paths(directory, std::env::home_dir().as_deref())?;
         Ok(config)
+    }
+
+    /// Expand a leading `~` to `home` and resolve other relative paths from
+    /// the config file's `directory`. A stdio `command` is only expanded:
+    /// bare names such as `node` are still looked up on `PATH`.
+    fn resolve_paths(&mut self, directory: &Path, home: Option<&Path>) -> Result<()> {
+        for (name, environment) in &mut self.environments {
+            if let Some(workspace) = &mut environment.workspace {
+                *workspace = resolve_path(workspace, directory, home)
+                    .with_context(|| format!("invalid environments.{name}.workspace"))?;
+            }
+        }
+        for server in &mut self.mcp_servers {
+            let label = &server.label;
+            if let Some(cwd) = &mut server.cwd {
+                *cwd = resolve_path(cwd, directory, home)
+                    .with_context(|| format!("invalid cwd of MCP server '{label}'"))?;
+            }
+            if let Some(command) = &mut server.command {
+                if let Some(expanded) = expand_home(Path::new(command.as_str()), home)
+                    .with_context(|| format!("invalid command of MCP server '{label}'"))?
+                {
+                    *command = expanded.to_string_lossy().into_owned();
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Load `path` when it exists, otherwise use the built-in defaults.
@@ -144,9 +158,29 @@ impl AppConfig {
     }
 }
 
+fn resolve_path(path: &Path, directory: &Path, home: Option<&Path>) -> Result<PathBuf> {
+    Ok(match expand_home(path, home)? {
+        Some(expanded) => expanded,
+        None if path.is_relative() => directory.join(path),
+        None => path.to_path_buf(),
+    })
+}
+
+/// `~` or `~/rest` under `home`; `None` when the path does not start with `~`.
+/// Other forms such as `~user` are left as they are.
+fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
+    let mut components = path.components();
+    if components.next() != Some(Component::Normal("~".as_ref())) {
+        return Ok(None);
+    }
+    let home = home.context("cannot expand '~': the home directory is unknown")?;
+    Ok(Some(home.join(components.as_path())))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AppConfig;
+    use super::{expand_home, AppConfig};
+    use std::path::Path;
 
     #[test]
     fn default_config_is_valid() {
@@ -200,6 +234,30 @@ mod tests {
             Some(root.join("repo"))
         );
         assert_eq!(config.mcp_servers[0].cwd, Some(root.join("servers")));
+    }
+
+    #[test]
+    fn expands_home_in_workspace_cwd_and_command() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = AppConfig::parse("[environments.home]\nworkspace = '~'\n[environments.project]\nworkspace = '~/repo'\n[environments.literal]\nworkspace = '~user/repo'\n[[mcp_servers]]\nlabel = 'local'\ntransport = 'stdio'\ncommand = '~/bin/server'\ncwd = '~/servers'\n[[mcp_servers]]\nlabel = 'path'\ntransport = 'stdio'\ncommand = 'node'\n").unwrap();
+        let home = Path::new("/home/alice");
+        config.resolve_paths(directory.path(), Some(home)).unwrap();
+        let workspace = |name: &str| config.environments[name].workspace.clone().unwrap();
+        assert_eq!(workspace("home"), home);
+        assert_eq!(workspace("project"), home.join("repo"));
+        assert_eq!(workspace("literal"), directory.path().join("~user/repo"));
+        assert_eq!(config.mcp_servers[0].cwd, Some(home.join("servers")));
+        assert_eq!(
+            config.mcp_servers[0].command.as_deref().map(Path::new),
+            Some(home.join("bin/server").as_path())
+        );
+        assert_eq!(config.mcp_servers[1].command.as_deref(), Some("node"));
+    }
+
+    #[test]
+    fn unknown_home_is_an_error_only_when_needed() {
+        assert!(expand_home(Path::new("~/servers"), None).is_err());
+        assert_eq!(expand_home(Path::new("servers"), None).unwrap(), None);
     }
 
     #[test]

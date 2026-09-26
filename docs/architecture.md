@@ -40,7 +40,7 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 | --- | --- | --- |
 | `ResponsesApi` | `/responses` と `/responses/compact` の呼び出し | `infrastructure::openai::OpenAiClient` |
 | `McpGateway` / `DirectMcpServer` | 直接接続 MCP の接続管理と tool 呼び出し | `infrastructure::mcp::McpPool` |
-| `ConversationStore` | 会話の永続化（変更ごとに保存） | `infrastructure::session_store::Session` |
+| `ConversationStore` | 会話の保持（変更ごとに保存） | `infrastructure::session_store::Session`（ファイル）、`infrastructure::memory_store::MemoryConversation`（メモリ） |
 | `ApprovalHandler` | MCP 呼び出しの承認 | `AlwaysApprove`・`DenyApproval`（application）、`InteractiveApproval`（interface/cli） |
 
 テストや別の保存先・API を使う場合は、これらのトレイトを実装して `Agent` に渡せます。
@@ -81,16 +81,24 @@ src/
 │   ├── openai.rs           Responses API クライアント（リトライ付き）
 │   ├── mcp.rs              stdio / Streamable HTTP の MCP 接続プール
 │   ├── session_store.rs    セッションファイルとロック
+│   ├── memory_store.rs     プロセス内だけで保持する会話（ano chat）
+│   ├── project.rs          AGENTS.md などプロジェクト指示の読み込み
 │   ├── fs.rs               原子的なファイル置き換え
-│   └── tools/              組み込み tool（echo・unix_time・workspace_*・workspace_check）
+│   └── tools/
+│       ├── mod.rs          組み込み tool の登録（echo・unix_time）
+│       ├── workspace.rs    list・read・search・find・edit・write とパスの検証
+│       ├── manage.rs       move・delete
+│       ├── walk.rs         上限付きのディレクトリ走査
+│       ├── glob.rs         パスのグロブ照合
+│       └── checks.rs       workspace_check
 └── interface/
-    ├── cli/                clap による CLI、進捗表示、端末での承認
+    ├── cli/                clap による CLI（run・chat・tools・session・serve）、進捗表示、端末での承認
     └── webhook/            署名付き Webhook、ジョブ管理
 ```
 
 ## 1回の実行の流れ
 
-1. `interface`（CLI または Webhook）が設定から `ExecutionProfile`（モデル設定・有効なポリシー・`ToolContext`）を解決し、アダプターを組み立てて `Agent` を作ります。
+1. `interface`（CLI または Webhook）が設定から `ExecutionProfile`（モデル設定・有効なポリシー・`ToolContext`）を解決し、workspace の `AGENTS.md` を instructions に加え、アダプターを組み立てて `Agent` を作ります。
 2. `Agent::run` は入力を Responses API の `input` に変換し、`McpGateway` からポリシーで許可された MCP 接続を借ります。
 3. 各ラウンドで `ResponsesApi::create_response` を呼び、返ってきた `function_call`・`mcp_approval_request` を `dispatch` が並行実行します。セッションがあれば、実行前に呼び出しを、完了するたびに結果を `ConversationStore` へ保存します。
 4. `tool_search` の結果は次のラウンドから tool 一覧に反映されます（`discovery`）。

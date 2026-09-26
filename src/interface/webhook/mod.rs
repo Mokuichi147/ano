@@ -18,6 +18,7 @@ use crate::{
     },
     config::AppConfig,
     domain::plan::RunOutcome,
+    infrastructure::project::read_project_instructions,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -29,7 +30,7 @@ use axum::{
     Json, Router,
 };
 use futures::FutureExt;
-use jobs::{evict_finished_jobs, JobOutcome, JobRecord};
+use jobs::{evict_finished_jobs, JobOutcome, JobProgress, JobRecord};
 use serde::Deserialize;
 use serde_json::json;
 use signature::{remember_signature, verify_signature};
@@ -267,9 +268,11 @@ async fn create_job(
                     usage: None,
                     stop_reason: None,
                     error: None,
+                    recent_events: Vec::new(),
                 },
                 cancel,
                 finished_at: None,
+                progress: Default::default(),
             },
         );
         // Register the task before releasing the admission lock. Shutdown
@@ -319,13 +322,7 @@ async fn get_job(
     if let Err(message) = verify_signature(&state, &headers, id.as_bytes(), unix_now()) {
         return error_response(StatusCode::UNAUTHORIZED, message);
     }
-    match state
-        .jobs
-        .read()
-        .await
-        .get(&id)
-        .map(|job| job.snapshot.clone())
-    {
+    match state.jobs.read().await.get(&id).map(|job| job.status()) {
         Some(status) => (StatusCode::OK, Json(status)).into_response(),
         None => error_response(StatusCode::NOT_FOUND, "job not found"),
     }
@@ -346,11 +343,11 @@ async fn cancel_job(
         return error_response(StatusCode::NOT_FOUND, "job not found");
     };
     if job.snapshot.status.is_finished() {
-        return (StatusCode::OK, Json(job.snapshot.clone())).into_response();
+        return (StatusCode::OK, Json(job.status())).into_response();
     }
     job.snapshot.cancellation_requested = true;
     job.cancel.send_replace(true);
-    (StatusCode::ACCEPTED, Json(job.snapshot.clone())).into_response()
+    (StatusCode::ACCEPTED, Json(job.status())).into_response()
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -379,21 +376,22 @@ async fn run_job(
         finish(&state, &id, JobOutcome::Cancelled).await;
         return;
     };
-    {
+    let progress = {
         let mut jobs = state.jobs.write().await;
         let Some(job) = jobs.get_mut(&id) else { return };
         if !job.snapshot.cancellation_requested && !*state.shutdown.borrow() {
             job.snapshot.status = JobState::Running;
             job.snapshot.started_at_unix = Some(unix_now());
         }
-    }
+        Arc::clone(&job.progress)
+    };
     let outcome = tokio::select! {
         biased;
         _ = cancellation_requested(cancellation) => JobOutcome::Cancelled,
         _ = cancellation_requested(shutdown) => JobOutcome::Cancelled,
         outcome = tokio::time::timeout(
             Duration::from_secs(state.config.webhook.job_timeout_secs),
-            execute_job(&state, request),
+            execute_job(&state, request, progress),
         ) => match outcome {
             Ok(Ok(result)) => JobOutcome::Completed(Box::new(result)),
             Ok(Err(error)) => JobOutcome::Failed(format!("{error:#}")),
@@ -446,10 +444,22 @@ async fn shutdown_jobs(state: &WebhookState) {
     }
 }
 
-async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Result<AgentResult> {
-    let profile = state
+async fn execute_job(
+    state: &WebhookState,
+    request: WebhookTaskRequest,
+    progress: Arc<Mutex<JobProgress>>,
+) -> Result<AgentResult> {
+    let mut profile = state
         .config
         .execution_profile(&request.user, &request.environment, &[])?;
+    if let Some(workspace) = profile.context.workspace.clone() {
+        let names = profile.settings.project_instructions.clone();
+        let sources =
+            tokio::task::spawn_blocking(move || read_project_instructions(&workspace, &names))
+                .await
+                .context("project instructions task failed")??;
+        profile.settings.append_project_instructions(&sources);
+    }
     // A webhook has no interactive terminal. The secure default is to deny
     // approval requests unless the named environment opts in.
     let approval = profile.unattended_approval();
@@ -460,7 +470,13 @@ async fn execute_job(state: &WebhookState, request: WebhookTaskRequest) -> Resul
         state.registry.clone(),
         profile.policy,
         approval,
-    );
+    )
+    .with_event_listener(Arc::new(move |event| {
+        progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .record(event)
+    }));
     let mut input = vec![InputPart::Text(request.task)];
     input.extend(
         request

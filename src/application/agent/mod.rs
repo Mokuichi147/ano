@@ -33,7 +33,7 @@ use discovery::ActiveTools;
 use dispatch::RoundScope;
 use events::EventLog;
 use mcp_runtime::McpRuntime;
-use response::{extract_output_text, validate_response_status};
+use response::{extract_output_text, reasoning_summary_text, validate_response_status};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
 
@@ -238,6 +238,9 @@ impl Agent {
             if let Some(max_output_tokens) = self.settings.max_output_tokens {
                 payload["max_output_tokens"] = json!(max_output_tokens);
             }
+            if let Some(reasoning) = self.settings.reasoning() {
+                payload["reasoning"] = reasoning;
+            }
             if session.is_some() || local_history.is_some() {
                 payload["store"] = json!(false);
                 payload["include"] = json!(["reasoning.encrypted_content"]);
@@ -294,6 +297,9 @@ impl Agent {
                 .collect::<Vec<_>>();
             let only_commentary =
                 !messages.is_empty() && messages.iter().all(|item| item["phase"] == "commentary");
+            for text in items.iter().filter_map(reasoning_summary_text) {
+                events.push(AgentEvent::ReasoningSummary { round, text });
+            }
             for message in messages.iter().filter(|item| item["phase"] == "commentary") {
                 let text = extract_output_text(&json!({"output":[message]}));
                 if !text.trim().is_empty() {

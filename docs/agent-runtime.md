@@ -17,19 +17,23 @@
 | `parallel_tool_calls` | `true` | 1つの応答に含まれる複数の function call を並行実行するか |
 | `max_parallel_tool_calls` | 8 | 同時に実行する tool 呼び出しの上限 |
 | `tool_timeout_secs` | 120 | ローカル tool・直接接続 MCP tool 1回あたりのタイムアウト |
-| `tool_discovery_limit` | 8 | `tool_search` 1回で有効化する tool 数 |
+| `tool_discovery_limit` | 12 | `tool_search` 1回で有効化する tool 数 |
 | `max_output_tokens` | なし | 各応答の出力トークン上限 |
+| `reasoning_effort` | なし | 推論モデルの `reasoning.effort`（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`）。CLI では `--reasoning-effort` |
+| `reasoning_summary` | なし | 推論の要約（`auto`・`concise`・`detailed`）。要約は `reasoning_summary` イベントとして進捗に表示 |
+| `project_instructions` | `["AGENTS.md"]` | instructions の末尾に追加する workspace 内のファイル（[README](../README.md#プロジェクト指示agentsmd)） |
 
 - モデルが不正な JSON 引数を返した場合や tool が失敗した場合は、実行を中断せず、エラー内容を tool 出力としてモデルへ返します。
 - `workspace_check` は検証ごとの `timeout_secs` を使い、結果回収のために外側の制限へ5秒の猶予を設けます。
 - API が `incomplete`・`failed` などの未完了状態を返した場合は、その応答のローカル tool を実行せずにエラーにします。回答拒否（refusal）の説明文はそのまま利用者へ返します。
 - 並行実行した結果は、応答内の順序でモデルへ返します。MCP の承認要求は並行実行中でも1件ずつ承認ハンドラーへ渡すため、CLI の確認プロンプトが混ざることはありません。
-- `Agent::with_event_listener` を使うと、tool 呼び出しなどのイベントを発生時点で受け取れます（CLI はこれで進行状況を stderr に表示します）。
+- `Agent::with_event_listener` を使うと、tool 呼び出しなどのイベントを発生時点で受け取れます（CLI はこれで進行状況を stderr に表示し、Webhook はジョブの `recent_events` に記録します）。
+- 推論設定はどちらも未指定なら送信しません。対応値はモデルによって異なり、非対応の値は API がエラーを返します。
 - Responses API への要求には `api.timeout_secs`（既定600秒）のタイムアウトがあり、接続失敗と 429 / 5xx は `api.max_retries`（既定2回）まで `Retry-After` を尊重して再試行します。
 
 ## 会話セッション
 
-`--session` でセッションファイルを指定すると、プロセスをまたいで会話を続けられます。
+`--session` でセッションファイルを指定すると、プロセスをまたいで会話を続けられます。`ano chat` は `--session` がなくても、プロセス内のメモリで同じ仕組みの会話を保持します。
 
 ```sh
 ano run --environment default --session .ano/review.json "リポジトリを調査して問題点を整理して"

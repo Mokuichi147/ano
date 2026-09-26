@@ -48,7 +48,7 @@ allowed_tools = ["read_file", "list_files"]
 ```
 
 - Streamable HTTP は `url` に接続先を指定し、必要なら `authorization_env` にトークンが入った環境変数名を設定します。
-- stdio は `command`・`args`・任意の `cwd` でローカルプロセスを起動します。`cwd` の相対パスは設定ファイルのディレクトリを基準に解決します。
+- stdio は `command`・`args`・任意の `cwd` でローカルプロセスを起動します。`cwd` の相対パスは設定ファイルのディレクトリを基準に解決します。`cwd` と `command` の先頭の `~`（`~` と `~/...`）はホームディレクトリに展開します。`args` は展開しないため、ホーム以下のファイルを渡す場合は絶対パスで書いてください。
 - 子プロセスは ano の環境変数を継承します。`env_vars` は「子プロセスへ渡す環境変数名 = ano 側で値を読む環境変数名」の対応表で、値を追加・上書きします。
 - stdio プロセスは ano と同じ OS ユーザー権限で実行され、継承した環境変数にもアクセスできます。信頼できる MCP server だけを登録してください。
 
@@ -99,7 +99,7 @@ Responses API 管理方式では、`tool_search` の検索対象として軽量�
 
 ```toml
 [agent]
-tool_discovery_limit = 8
+tool_discovery_limit = 12
 
 [[mcp_servers]]
 label = "github"

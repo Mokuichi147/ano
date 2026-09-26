@@ -31,6 +31,11 @@ pub enum AgentEvent {
         round: usize,
         text: String,
     },
+    /// Summary of the model's reasoning, when `reasoning_summary` is set.
+    ReasoningSummary {
+        round: usize,
+        text: String,
+    },
     LocalToolCall {
         round: usize,
         name: String,
