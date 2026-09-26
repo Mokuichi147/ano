@@ -1,4 +1,9 @@
-use crate::{ToolContext, ToolDefinition, ToolRegistry};
+//! `workspace_check`: run a validation command fixed by the environment.
+
+use crate::{
+    application::registry::ToolRegistry,
+    domain::tool::{ToolContext, ToolDefinition},
+};
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::{process::Stdio, time::Duration};
@@ -9,7 +14,7 @@ use tokio::{
 
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-pub(crate) fn register_workspace_check(registry: &ToolRegistry) -> Result<()> {
+pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     registry.register_contextual(ToolDefinition::new(
         "workspace_check",
         "Run a configured build, test, or validation check in the workspace. Use name=null to list available checks, then run an exact name. The program and arguments are fixed by the environment. Inspect success, exit_code, stdout and stderr; never claim validation passed when it failed.",
@@ -114,7 +119,7 @@ async fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::CheckConfig;
+    use crate::domain::environment::CheckConfig;
 
     #[tokio::test]
     async fn only_explicitly_configured_checks_can_run() {
@@ -195,7 +200,7 @@ mod tests {
                     .into_owned(),
                 args: vec![
                     "--exact".into(),
-                    "checks::tests::slow_check_fixture".into(),
+                    "infrastructure::tools::checks::tests::slow_check_fixture".into(),
                     "--ignored".into(),
                     "--nocapture".into(),
                 ],

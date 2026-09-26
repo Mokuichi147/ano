@@ -1,9 +1,18 @@
-//! Local conversation persistence. Tool calls are journaled before execution;
-//! interrupted calls are never replayed automatically.
-use crate::{storage::atomic_write, CompactionRecord, TaskPlan, ToolContext, UsageSummary};
+//! File-backed conversation store: one JSON checkpoint per session, a sidecar
+//! lock against concurrent processes, and atomic replacement on every save.
+
+use crate::{
+    application::ports::ConversationStore,
+    domain::{
+        compaction::CompactionRecord,
+        plan::TaskPlan,
+        session::{SessionBinding, SessionData, SessionStatus},
+        usage::UsageSummary,
+    },
+    infrastructure::fs::atomic_write,
+};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
     fs::{File, OpenOptions},
     io::{ErrorKind, Read},
@@ -11,60 +20,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-const SESSION_VERSION: u32 = 1;
 const MAX_SESSION_BYTES: u64 = 32 * 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionBinding {
-    pub user_id: String,
-    pub environment: String,
-    pub workspace: Option<PathBuf>,
-    pub endpoint: String,
-}
-
-impl SessionBinding {
-    pub fn new(context: &ToolContext, endpoint: &str) -> Result<Self> {
-        Ok(Self {
-            user_id: context.user_id.clone(),
-            environment: context.environment.clone(),
-            workspace: context
-                .workspace
-                .as_ref()
-                .map(std::fs::canonicalize)
-                .transpose()?,
-            endpoint: endpoint.trim_end_matches('/').to_string(),
-        })
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionStatus {
-    Ready,
-    Running,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SessionData {
-    pub version: u32,
-    pub binding: SessionBinding,
-    pub status: SessionStatus,
-    pub completed_turns: u64,
-    pub updated_at_unix: u64,
-    pub last_response_id: Option<String>,
-    pub last_error: Option<String>,
-    pub history: Vec<Value>,
-    #[serde(default)]
-    pub plan: TaskPlan,
-    #[serde(default)]
-    pub usage: UsageSummary,
-    #[serde(default)]
-    pub compactions: Vec<CompactionRecord>,
-    pending_calls: Vec<Value>,
-}
 
 pub struct Session {
     path: PathBuf,
@@ -105,20 +61,7 @@ impl Session {
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|error| error.kind() == ErrorKind::NotFound) =>
             {
-                SessionData {
-                    version: SESSION_VERSION,
-                    binding: binding.clone(),
-                    status: SessionStatus::Ready,
-                    completed_turns: 0,
-                    updated_at_unix: now(),
-                    last_response_id: None,
-                    last_error: None,
-                    history: Vec::new(),
-                    plan: TaskPlan::default(),
-                    usage: UsageSummary::default(),
-                    compactions: Vec::new(),
-                    pending_calls: Vec::new(),
-                }
+                SessionData::new(binding.clone(), now())
             }
             Err(error) => return Err(error),
         };
@@ -149,10 +92,7 @@ impl Session {
         }
         let data: SessionData = serde_json::from_slice(&bytes)
             .context("invalid session file; original file was not modified")?;
-        if data.version != SESSION_VERSION {
-            bail!("unsupported session version {}", data.version);
-        }
-        data.plan.validate().context("invalid session plan")?;
+        data.validate()?;
         Ok(data)
     }
 
@@ -160,91 +100,59 @@ impl Session {
         &self.data
     }
 
-    pub(crate) fn verify_context(&self, context: &ToolContext, endpoint: &str) -> Result<()> {
-        if self.data.binding != SessionBinding::new(context, endpoint)? {
-            bail!("run context does not match this session");
-        }
-        Ok(())
-    }
-
-    pub(crate) fn begin_turn(&mut self, input: &Value) -> Result<()> {
-        if self.data.status == SessionStatus::Running {
-            bail!("session already has an active turn");
-        }
-        self.data.history.extend(
-            input
-                .as_array()
-                .context("session input must be an array")?
-                .iter()
-                .cloned(),
-        );
-        self.data.status = SessionStatus::Running;
-        self.data.last_error = None;
+    #[cfg(test)]
+    pub(crate) fn record_tool_results(&mut self, results: &[Value]) -> Result<()> {
+        self.data.record_tool_results(results);
         self.save()
     }
 
-    pub(crate) fn record_response(&mut self, id: &str, output: &[Value]) -> Result<()> {
-        self.data.history.extend_from_slice(output);
-        self.data.last_response_id = Some(id.to_string());
-        self.data.pending_calls = output
-            .iter()
-            .filter(|item| {
-                matches!(
-                    item["type"].as_str(),
-                    Some("function_call" | "mcp_approval_request")
-                )
-            })
-            .cloned()
-            .collect();
+    fn save(&mut self) -> Result<()> {
+        self.data.updated_at_unix = now();
+        let bytes = serde_json::to_vec_pretty(&self.data)?;
+        if bytes.len() as u64 > MAX_SESSION_BYTES {
+            bail!("session exceeds the 32 MiB limit; start a new session");
+        }
+        atomic_write(&self.path, &bytes, None)
+    }
+}
+
+impl ConversationStore for Session {
+    fn data(&self) -> &SessionData {
+        &self.data
+    }
+
+    fn begin_turn(&mut self, input: &Value) -> Result<()> {
+        self.data.begin_turn(input)?;
+        self.save()
+    }
+
+    fn record_response(&mut self, id: &str, output: &[Value]) -> Result<()> {
+        self.data.record_response(id, output);
         // This must reach disk before executing any of these calls.
         self.save()
     }
 
-    pub(crate) fn record_tool_results(&mut self, results: &[Value]) -> Result<()> {
-        for result in results {
-            self.data
-                .pending_calls
-                .retain(|call| !matches_result(call, result));
-        }
-        self.data.history.extend_from_slice(results);
+    fn checkpoint_tool_result(&mut self, result: &Value, plan: &TaskPlan) -> Result<()> {
+        self.data.checkpoint_tool_result(result, plan);
         self.save()
     }
 
-    pub(crate) fn checkpoint_tool_result(&mut self, result: &Value, plan: &TaskPlan) -> Result<()> {
-        self.data.plan = plan.clone();
-        self.record_tool_results(std::slice::from_ref(result))
-    }
-
-    pub(crate) fn record_runtime_input(&mut self, input: &Value) -> Result<()> {
-        self.data.history.extend(
-            input
-                .as_array()
-                .context("runtime input must be an array")?
-                .iter()
-                .cloned(),
-        );
+    fn record_runtime_input(&mut self, input: &Value) -> Result<()> {
+        self.data.record_runtime_input(input)?;
         self.save()
     }
 
-    pub(crate) fn complete(&mut self) -> Result<()> {
-        self.data.status = SessionStatus::Ready;
-        self.data.completed_turns += 1;
+    fn record_usage(&mut self, delta: &UsageSummary) -> Result<()> {
+        self.data.record_usage(delta);
         self.save()
     }
 
-    pub(crate) fn record_usage(&mut self, delta: &UsageSummary) -> Result<()> {
-        self.data.usage.add(delta);
-        self.save()
-    }
-
-    pub(crate) fn replace_history(
+    fn replace_history(
         &mut self,
         history: Vec<Value>,
         mut record: CompactionRecord,
     ) -> Result<CompactionRecord> {
-        if !self.data.pending_calls.is_empty() {
-            bail!("cannot compact while tool results are pending");
-        }
+        self.data.ensure_compactable()?;
         let original = self.data.clone();
         let archive = format!(
             "{}.archive-{}.json",
@@ -262,8 +170,7 @@ impl Session {
             None,
         )?;
         record.archive_file = Some(archive);
-        self.data.history = history;
-        self.data.compactions.push(record.clone());
+        self.data.apply_compaction(history, record.clone())?;
         if let Err(error) = self.save() {
             self.data = original;
             return Err(error);
@@ -271,64 +178,20 @@ impl Session {
         Ok(record)
     }
 
-    pub(crate) fn skip_pending(&mut self, message: &str) -> Result<()> {
-        let results = self.data.pending_calls.iter().map(|call| {
-            if call["type"] == "function_call" {
-                json!({"type":"function_call_output","call_id":call.get("call_id").or_else(|| call.get("id")),
-                    "output":json!({"error":"execution_limit","message":message}).to_string()})
-            } else {
-                json!({"type":"mcp_approval_response","approval_request_id":call.get("approval_request_id").or_else(|| call.get("id")),"approve":false})
-            }
-        }).collect::<Vec<_>>();
-        self.record_tool_results(&results)
-    }
-
-    pub(crate) fn fail(&mut self, error: &str) -> Result<()> {
-        for call in self.data.pending_calls.drain(..) {
-            if call["type"] == "function_call" {
-                let call_id = call
-                    .get("call_id")
-                    .or_else(|| call.get("id"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                self.data.history.push(json!({"type":"function_call_output", "call_id":call_id,
-                    "output":serde_json::to_string(&json!({"error":"execution_interrupted", "message":"Outcome unknown. This call was not replayed. Inspect current state before repeating any side effects."}))?}));
-            } else {
-                let id = call
-                    .get("approval_request_id")
-                    .or_else(|| call.get("id"))
-                    .cloned()
-                    .unwrap_or(Value::Null);
-                self.data.history.push(json!({"type":"mcp_approval_response", "approval_request_id":id, "approve":false}));
-            }
-        }
-        self.data.last_error = Some(error.to_string());
-        self.data.history.push(json!({"role":"user", "content":[{"type":"input_text", "text":format!("Agent execution stopped: {error}")}]}));
-        self.data.status = SessionStatus::Failed;
+    fn skip_pending(&mut self, message: &str) -> Result<()> {
+        self.data.skip_pending(message);
         self.save()
     }
 
-    fn save(&mut self) -> Result<()> {
-        self.data.updated_at_unix = now();
-        let bytes = serde_json::to_vec_pretty(&self.data)?;
-        if bytes.len() as u64 > MAX_SESSION_BYTES {
-            bail!("session exceeds the 32 MiB limit; start a new session");
-        }
-        atomic_write(&self.path, &bytes, None)
+    fn complete(&mut self) -> Result<()> {
+        self.data.complete();
+        self.save()
     }
-}
 
-fn matches_result(call: &Value, result: &Value) -> bool {
-    let (kind, key) = match call["type"].as_str() {
-        Some("function_call") => ("function_call_output", "call_id"),
-        Some("mcp_approval_request") => ("mcp_approval_response", "approval_request_id"),
-        _ => return false,
-    };
-    result["type"] == kind
-        && call
-            .get(key)
-            .or_else(|| call.get("id"))
-            .is_some_and(|id| !id.is_null() && Some(id) == result.get(key))
+    fn fail(&mut self, error: &str) -> Result<()> {
+        self.data.fail(error)?;
+        self.save()
+    }
 }
 
 fn now() -> u64 {
@@ -341,6 +204,8 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::{compaction::compacted_history, tool::ToolContext};
+    use serde_json::json;
 
     fn binding() -> SessionBinding {
         SessionBinding::new(
@@ -392,12 +257,12 @@ mod tests {
                 json!({"type":"function_call","call_id":"write1","name":"workspace_edit","arguments":"{}"}),
                 json!({"type":"mcp_approval_request","id":"approve1","server_label":"docs","name":"update","arguments":"{}"}),
             ]).unwrap();
-            assert_eq!(Session::inspect(&path).unwrap().pending_calls.len(), 2);
+            assert_eq!(Session::inspect(&path).unwrap().pending_calls().len(), 2);
         }
         assert!(Session::open(&path, binding(), false).is_err());
         let session = Session::open(&path, binding(), true).unwrap();
         assert_eq!(session.data.status, SessionStatus::Failed);
-        assert!(session.data.pending_calls.is_empty());
+        assert!(session.data.pending_calls().is_empty());
         assert_eq!(session.data.history[3]["call_id"], "write1");
         let output: Value =
             serde_json::from_str(session.data.history[3]["output"].as_str().unwrap()).unwrap();
@@ -492,7 +357,7 @@ mod tests {
             .unwrap();
         session.record_response("r1", &[json!({"type":"function_call","call_id":"write1","name":"workspace_write","arguments":"{}"})]).unwrap();
         let before = std::fs::read(&path).unwrap();
-        let (history, record) = crate::context::compacted_history(&json!({"object":"response.compaction","id":"cmp1","output":[{"type":"compaction","encrypted_content":"opaque"}]}), &session.data.history).unwrap();
+        let (history, record) = compacted_history(&json!({"object":"response.compaction","id":"cmp1","output":[{"type":"compaction","encrypted_content":"opaque"}]}), &session.data.history).unwrap();
         assert!(session.replace_history(history, record).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert!(session.data.compactions.is_empty());
@@ -509,7 +374,7 @@ mod tests {
             .unwrap();
         let before = std::fs::read(&path).unwrap();
         let original = session.data.history.clone();
-        let (history, record) = crate::context::compacted_history(&json!({"object":"response.compaction","id":"cmp1","output":[{"type":"compaction","encrypted_content":"x".repeat(MAX_SESSION_BYTES as usize)}]}), &original).unwrap();
+        let (history, record) = compacted_history(&json!({"object":"response.compaction","id":"cmp1","output":[{"type":"compaction","encrypted_content":"x".repeat(MAX_SESSION_BYTES as usize)}]}), &original).unwrap();
         assert!(session.replace_history(history, record).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
         assert_eq!(session.data.history, original);

@@ -1,37 +1,60 @@
-pub mod agent;
-pub mod builtin;
-mod checks;
-pub mod client;
-pub mod config;
-pub mod context;
-pub mod input;
-mod mcp;
-pub mod plan;
-pub mod policy;
-pub mod session;
-mod storage;
-pub mod tools;
-pub mod usage;
-pub mod webhook;
+//! An autonomous agent backed by the OpenAI Responses API.
+//!
+//! The crate follows a layered (clean) architecture. Dependencies point
+//! inward only:
+//!
+//! ```text
+//! interface ─┐
+//!            ├─> application ─> domain
+//! infrastructure ┘
+//! ```
+//!
+//! - [`domain`]: plans, token usage, tool policies, conversation state.
+//! - [`application`]: the agent run loop and its ports (traits).
+//! - [`infrastructure`]: OpenAI HTTP client, MCP connections, session files,
+//!   built-in tools.
+//! - [`interface`]: the CLI (also the binary's composition root) and the
+//!   webhook server.
+//! - [`config`]: the configuration file, combining every layer's settings.
+//!
+//! The most common types are re-exported at the crate root.
 
-pub use agent::{
-    Agent, AgentEvent, AgentResult, AlwaysApprove, ApprovalHandler, DenyApproval, EventListener,
-    InteractiveApproval, McpApprovalRequest, RunRequest,
+pub mod application;
+pub mod config;
+pub mod domain;
+pub mod infrastructure;
+pub mod interface;
+
+pub use application::{
+    agent::{task_plan_definition, Agent, AgentEvent, AgentResult, EventListener, RunRequest},
+    approval::{AlwaysApprove, DenyApproval},
+    input::{build_user_input, InputPart},
+    ports::{
+        ApprovalHandler, ConversationStore, DirectMcpServer, DirectMcpTool, McpApprovalRequest,
+        McpGateway, ResponsesApi,
+    },
+    profile::ExecutionProfile,
+    registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
+    settings::AgentSettings,
 };
-pub use builtin::register_builtin_tools;
-pub use client::OpenAiClient;
-pub use config::{
-    AgentSettings, ApiSettings, AppConfig, CheckConfig, EnvironmentConfig, McpApprovalMode,
-    McpServerConfig, McpToolCatalog, McpTransport, WebhookSettings,
+pub use config::AppConfig;
+pub use domain::{
+    compaction::CompactionRecord,
+    environment::{CheckConfig, EnvironmentConfig},
+    mcp::{McpApprovalMode, McpServerConfig, McpToolCatalog, McpTransport},
+    plan::{PlanStep, RunOutcome, StepStatus, TaskPlan, TASK_PLAN_NAME},
+    policy::UserPolicy,
+    session::{SessionBinding, SessionData, SessionStatus},
+    tool::{ToolContext, ToolDefinition, TOOL_SEARCH_NAME},
+    usage::{ApiOperation, StopReason, UsageSummary},
 };
-pub use context::CompactionRecord;
-pub use input::{build_user_input, InputPart};
-pub use mcp::McpPool;
-pub use plan::{PlanStep, RunOutcome, StepStatus, TaskPlan};
-pub use policy::UserPolicy;
-pub use session::{Session, SessionBinding, SessionData, SessionStatus};
-pub use tools::{
-    ContextualToolHandler, ToolContext, ToolDefinition, ToolHandler, ToolRegistry, TOOL_SEARCH_NAME,
+pub use infrastructure::{
+    mcp::McpPool,
+    openai::{ApiSettings, OpenAiClient},
+    session_store::Session,
+    tools::register_builtin_tools,
 };
-pub use usage::{ApiOperation, StopReason, UsageSummary};
-pub use webhook::{serve as serve_webhook, JobState, JobStatus};
+pub use interface::{
+    cli::InteractiveApproval,
+    webhook::{serve as serve_webhook, JobState, JobStatus, WebhookSettings},
+};

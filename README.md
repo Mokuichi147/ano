@@ -1,129 +1,151 @@
 # ano
 
-OpenAI Responses API を使う、Rust 製の自律型 AI agent です。Responses API が返した function call を自動実行し、tool の結果を次の Responses リクエストへ返すループを持ちます。
+OpenAI Responses API を使う、Rust 製の自律型 AI エージェントです。モデルが返した function call を自動で実行し、結果を次のリクエストへ返すループで、ファイルの調査・編集・検証のような複数ステップの作業を進めます。CLI・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
 
-## できること
+- [特長](#特長)
+- [クイックスタート](#クイックスタート)
+- [CLI の使い方](#cli-の使い方)
+- [設定ファイル](#設定ファイル)
+- [組み込み tool](#組み込み-tool)
+- [ライブラリとして使う](#ライブラリとして使う)
+- [ドキュメント](#ドキュメント)
+- [開発](#開発)
+- [セキュリティ上の注意](#セキュリティ上の注意)
 
-- OpenAI Responses API 経由の自動 tool calling
-- Rust の `ToolRegistry` へ登録したローカル function tool
-- Responses API の `mcp` tool によるリモート MCP / Secure MCP Tunnel
-- ユーザーごとの function denylist とワイルドカード
-- テキスト、画像、音声入力
-- 音声は Responses API の native `input_audio` としてそのままモデルへ渡す（文字起こし前処理なし）
-- MCP の承認フロー（`always` / `never`、CLI では対話確認も可能）
-- LM Studio の OpenAI 互換 `/v1/responses` endpoint
-- 名前付き実行環境を選べる署名付き Webhook と、中止・タイムアウトに対応する非同期ジョブ API
-- 実行環境に閉じたファイル一覧・分割読み取り・全文検索・書き込み
+## 特長
+
+**エージェント実行**
+- Responses API の function call を自動実行し、複数の呼び出しを並行処理
+- 工程と進捗を記録する作業計画（`task_plan`）と、未完了工程の継続・完了判定
+- 登録した tool・MCP を検索で必要な分だけ公開する遅延公開（`tool_search`）
 - 保存して別プロセスから再開できる会話セッション
 - 長い会話の自動圧縮と、使用トークン数に応じた実行停止
-- 工程と進捗を保存する作業計画、未完了工程の継続、完了・中断理由の区別
-- 競合検出付きの正確なファイル編集と、登録済み検証コマンドの実行
-- CLI からの名前付き環境選択、JSON 出力、ログ量の切り替え
-- tool / MCP は lazy discovery し、検索結果の少数だけを model request に公開
 
-## 起動
+**tool と MCP**
+- workspace 内に閉じたファイル一覧・分割読み取り・全文検索・書き込み
+- 競合検出付きの正確なファイル編集と、設定で登録した検証コマンド（ビルド・テスト）の実行
+- リモート MCP（Responses API 経由、Secure MCP Tunnel 対応）と、ano からの直接接続（stdio / Streamable HTTP）
+- ユーザー・実行環境ごとの tool allowlist / denylist（ワイルドカード対応）と MCP 承認フロー
 
-Rust 1.89 以降が必要です。PowerShell の例です。
+**入出力と連携**
+- テキスト・画像・音声入力（音声は文字起こしせず native `input_audio` として送信）
+- 名前付き実行環境を選べる署名付き Webhook と、中止・タイムアウトに対応した非同期ジョブ API
+- LM Studio などの OpenAI 互換 `/v1/responses` endpoint
+- JSON 出力とログ量の切り替え
 
-```powershell
-Copy-Item config.example.toml config.toml
-$env:OPENAI_API_KEY = "sk-..."
-cargo run -- run --environment default "READMEとソースを読み、実装の概要を説明して"
+## クイックスタート
+
+Rust 1.89 以降と OpenAI API キー（または [LM Studio](#lm-studio)）が必要です。
+
+```sh
+cargo install --path .
+cp config.example.toml config.toml
+export OPENAI_API_KEY="sk-..."
+ano run --environment default "README とソースを読み、実装の概要を説明して"
 ```
 
-画像と音声はそれぞれ同じ agent の入力として扱えます。
+インストールせずに `cargo run -- run ...` でも実行できます。Windows（PowerShell）では `Copy-Item config.example.toml config.toml`、`$env:OPENAI_API_KEY = "sk-..."` のように読み替えてください。
 
-```powershell
-cargo run -- run "この画像を説明して" --image .\diagram.png
-cargo run -- run "この音声の内容に答えて" --audio .\instruction.wav --model gpt-audio-1.5
+`config.example.toml` の `default` 環境は、カレントディレクトリを読み取り専用で調べる設定です。ファイルを編集させる場合は[実行環境](#実行環境)で `allow_writes = true` の環境を用意します。
+
+## CLI の使い方
+
+| コマンド | 内容 |
+| --- | --- |
+| `ano run [PROMPT]` | タスクを実行します。PROMPT を省略すると stdin から読みます |
+| `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
+| `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
+| `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
+
+共通オプションは `--config PATH`（設定ファイル）と `--user NAME`（`[users]` のユーザー、既定 `default`）です。
+
+### `ano run` の主なオプション
+
+| オプション | 内容 |
+| --- | --- |
+| `--environment NAME` | 設定済みの実行環境（workspace・書き込み権限・MCP 承認方針・model・instructions・検証コマンド）を使う |
+| `--workspace PATH` / `--allow-writes` | 環境を指定しない場合の workspace（既定はカレントディレクトリ）と書き込み許可 |
+| `--model NAME` | モデルを変更 |
+| `--image PATH` / `--audio PATH` | 画像・音声を入力に追加（複数指定可） |
+| `--disable-tool NAME` | この実行だけ tool を無効化（複数指定可） |
+| `--session PATH` / `--recover-session` | 会話を保存・再開（[セッション](docs/agent-runtime.md#会話セッション)） |
+| `--compact-threshold-bytes N` / `--max-total-tokens N` | 履歴の圧縮とトークン上限（[圧縮と上限](docs/agent-runtime.md#履歴の圧縮)） |
+| `--auto-approve-mcp` / `--non-interactive` | MCP 承認を自動承認 / 確認せず拒否 |
+| `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力 |
+| `--quiet` / `--verbose` | 進捗ログを省略 / 引数と結果を含めて詳しく表示 |
+
+```sh
+ano run "この画像を説明して" --image ./diagram.png
+ano run "この音声の内容に答えて" --audio ./instruction.wav --model gpt-audio-1.5
+ano run --disable-tool echo "echo は使わずに答えて"
+ano tools --environment default
 ```
 
-利用可能な tool とユーザー単位のフィルタは次で確認できます。
+音声入力には `input_audio` に対応したモデル（例: `gpt-audio-1.5`）を指定してください。画像と音声を同じリクエストで使う場合は、両方に対応したモデルが必要です。
 
-```powershell
-cargo run -- tools --user default
-cargo run -- run --disable-tool echo "echo は使わずに答えて"
-```
+### 実行環境
 
-`--config` を省略するとカレントディレクトリの `config.toml` を読み、無ければ組み込みの既定値で動きます。`--config` で明示したファイルが存在しない場合はエラーになります（打ち間違いでポリシーなしの既定値へ黙って切り替わらないようにするため）。設定ファイルの未知のキーもエラーになるので、`disable_tools` のような綴り間違いで制限が無効になることはありません。
-
-設定内の `environments.*.workspace` と MCP の `cwd` の相対パスは、設定ファイルのあるディレクトリを基準に解決します。CLI の `--workspace` は起動ディレクトリを基準にします。`--user` の未知の名前はエラーになり、別ユーザーの設定へ自動的に切り替わりません。
-
-CLI でも Webhook と同じ環境設定を使えます。ユーザーと環境の両方が許可した tool だけが利用可能です。
-
-```powershell
-cargo run -- tools --environment default
-cargo run -- run --environment default "src内でTODOを検索して整理して"
-# スクリプトから読む場合。stdout は1つのJSONオブジェクトになります。
-cargo run --quiet -- run --environment default --json --quiet "実装の概要を説明して"
-```
-
-`--environment` は workspace・書き込み権限・MCP承認方針・model・instructions を読み込みます。`--workspace`、`--allow-writes`、`--auto-approve-mcp` との併用はエラーです。`--model` でモデルを変更でき、`--non-interactive` で環境の自動承認も無効にできます。環境指定なしの場合は従来どおり `--workspace` と `--allow-writes` を使えます。
-
-通常の進捗ログは tool 名・状態、モデルの途中経過、作業計画の更新を stderr に出力します。引数・ファイル内容を含む完全なログが必要なら `--verbose`、進捗を省略するなら `--quiet` を指定します。`--json` の出力は `text`、`response_id`、`events`、`outcome`、`plan`、`usage`、`stop_reason` を含みます（`events` には引数と結果も含まれます）。実行エラーは非ゼロ終了コードと stderr のエラーを返します。実行が正常終了しても未完了の工程が残る場合があるため、自動処理では `outcome` も確認してください。
-
-`OPENAI_BASE_URL` を設定すると、Responses API のモックサーバーなどへ向けられます。モデルは `config.toml` または `--model` で変更できます。音声入力を使う場合は、`input_audio` をサポートするモデル（例: `gpt-audio-1.5`）を指定してください。現在の公式モデル一覧では、一般的な画像対応モデルと音声専用モデルの対応範囲が異なるため、画像と音声を同一リクエストで使う場合は、両方をサポートするモデルを選んでください。
-
-## 会話を保存して作業を続ける
-
-長い調査や複数回の修正は、セッションファイルを指定するとプロセスをまたいで続けられます。
-
-```powershell
-cargo run -- run --environment default --session .ano/review.json "リポジトリを調査して問題点を整理して"
-cargo run -- run --environment default --session .ano/review.json "前回の調査結果を使って修正して"
-cargo run -- session .ano/review.json
-```
-
-セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。プロセスが中断して `running` のまま残ったセッションは、workspace の状態を確認してから `--recover-session` を付けて再開します。エラーを記録して `failed` になったセッションは通常どおり再開できます。実行中のセッションは sidecar lock で二重起動を防ぎ、壊れたファイルはそのまま残して読み込みを拒否します。`.ano/` は既定で Git 管理対象外です。
-
-並行 tool 実行では、応答が返ったものから個別に保存します。遅い tool の待機中に中断しても、保存済みの結果は復元時に維持されます。結果未記録の呼び出しだけを「結果不明」として扱い、自動再実行しません。外部操作の完了と結果保存の間に停止した場合は結果不明になるため、再試行前に実際の状態を確認します。
-
-## 長い会話とトークン上限
-
-会話が増えたら自動で圧縮し、1回の実行で使うトークン数に応じて止められます。どちらも既定では無効です。
-
-```powershell
-cargo run -- run --environment default --session .ano/work.json --compact-threshold-bytes 262144 --max-total-tokens 100000 "調査、修正、検証を続けて"
-```
-
-`[agent]` の `compact_threshold_bytes` と `max_total_tokens` でも指定でき、Webhook ジョブにも適用されます。CLI の同名オプションはその実行だけ設定を上書きします。
-
-圧縮は [OpenAI の `/responses/compact`](https://developers.openai.com/api/docs/guides/compaction) を使用します。各応答とその tool 結果を揃えてから次の応答の前に実行し、返されたメッセージと暗号化された状態をすべて保持して `store:false` で再送します。セッションなしでも、圧縮を有効にすると実行中の履歴を保持します。対応していない互換 endpoint・モデルでは有効にしないでください。圧縮要求が失敗した場合は元の履歴を残してエラーで終了します。
-
-セッションの履歴を置き換える前に、同じディレクトリへ `<session名>.archive-<UUID>.json` を保存します。`ano session PATH --json` で `compactions` の記録と退避ファイル名を確認できます。作業計画と累積使用量は圧縮後も別に保持します。退避ファイルは自動削除しないため、不要になったものは利用者が整理してください。
-
-圧縮のしきい値は履歴 JSON のバイト数（1024〜16777216）で、トークン数やモデルのコンテキスト上限を保証するものではありません。暗号化された出力のバイト数が増える場合もあるため、再圧縮には前回の出力から少なくともしきい値の半分の履歴増加を必要とします。大きいファイルは分割して読み、コンテキスト上限に達する前に圧縮する設定にします。セッションファイルの32 MiB上限は引き続き適用されます。
-
-`usage` は今回の実行で返された API 使用量の合計です。`input_tokens`・`output_tokens`・`total_tokens`、その内訳の `cached_input_tokens`・`reasoning_tokens`、応答回数 `responses`、圧縮回数 `compactions`、使用量が欠落・不正だった回数 `unreported_requests` を返します。圧縮の使用量も合算し、キャッシュ・推論分は総量へ二重加算しません。`ano session PATH` はセッション全体の累積値を表示します。HTTP リトライや応答を受信できなかった要求の消費量は計測できないため、課金額の算出には使えません。
-
-`max_total_tokens` は応答受信後に確認するソフト上限です。1回の応答で超過することがあり、送信済みのリモート MCP 操作も取り消せません。上限に達したら次の API 要求と新しいローカル tool の実行を止め、`stop_reason: "token_limit"`、`outcome: "incomplete"` を返します。上限指定中に使用量を取得できなければ `"usage_unavailable"` で止めます。未実行の tool call は未実行として履歴を閉じ、セッションは同じファイルから再開できる状態にします。上限は実行ごとに数え直し、以前の操作を自動で再実行しません。応答生成前に圧縮だけで止まった場合の `response_id` は空文字列です。
-
-通常の最終回答では `stop_reason: "final_answer"`、`max_tool_rounds` の最終応答では `"round_limit"` を返します。停止理由と作業の完了状態は別なので、両方を確認してください。Webhook の終了結果にも `usage` と `stop_reason` が入り、トークン上限による停止は計画の有無にかかわらず `incomplete` になります。
-
-## 作業計画と完了判定
-
-モデルは `task_plan` で工程を作り、`pending`・`in_progress`・`completed`・`blocked` を更新できます。`steps:null` で現在の計画を読み、更新時は全工程と `expected_revision`（初回は0）を送ります。同じ版に対する並行更新は一方を拒否し、変更の消失を防ぎます。工程には一意の `id`、`description`、`status`、`detail` があり、`blocked` には理由が必要です。既存工程の削除・変更には `explanation` が必要です。
-
-未完了の工程があるのにモデルが最終回答を返した場合、ランタイムは残りの `max_tool_rounds` 内で作業の継続を促します。上限までに終わらなかった工程は `outcome: "incomplete"`、残りがすべて実行不能なら `"blocked"`、全工程が完了した場合は `"completed"` として返します。計画未作成時の最終回答は従来と同じく `"completed"` です。これはモデルが記録した工程の状態であり、成果物の正しさは `workspace_check` などの検証結果で確認します。
-
-`--session` を使うと計画も保存され、`ano session PATH` で残りの工程を確認できます。既存の計画なしセッションも読み込めます。`task_plan` は `tool_search` と同じく常時利用できるランタイム機能で、allowlist への追加は不要です。`disabled_tools = ["task_plan"]` または `--disable-tool task_plan` で無効化できます。
-
-## 修正後にビルド・テストを実行する
-
-`workspace_edit` は置換対象がファイル内にちょうど一度だけ存在することと、必要なら `expected_sha256` が一致することを確認してから原子的に書き込みます。まず `dry_run:true` で差分とハッシュを確認し、問題がなければ `dry_run:false` で適用できます。競合が起きた場合は書き込みを行いません。
-
-環境設定の `checks` に実行を許可するコマンドを名前付きで登録すると、agent は `workspace_check({"name": "test"})` のように検証できます。`name:null` は利用可能な検証名を一覧表示します。コマンドと引数は設定ファイルで固定され、workspace を作業ディレクトリとして実行し、出力は上限付きで返します。OSの権限は ano と同じなので、信頼するプロジェクトのコマンドを登録してください。検証固有の `timeout_secs` を優先し、タイムアウト時も取得済みの出力を返します。Webhook のジョブ全体の制限は引き続き適用されます。
+`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--auto-approve-mcp` との併用はエラーになります。`--model` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。
 
 ```toml
+[environments.coding]
+workspace = "/path/to/my-repository"
+allowed_tools = ["workspace_*"]
+allow_writes = true
+auto_approve_mcp = false
+
 [environments.coding.checks.test]
 program = "cargo"
 args = ["test", "--locked"]
 timeout_secs = 900
 ```
 
-## LM Studio
+### 出力とログ
 
-LM Studio は OpenAI 互換の Responses API、function tool、Remote MCP を提供するため、`[api]` の endpoint を差し替えて利用できます。LM Studio 側で server を起動し、モデルをロードしてください。Remote MCP を使う場合は LM Studio の Server Settings で MCP 利用を有効にします。
+進捗ログ（tool 名と状態、モデルの途中経過、作業計画の更新）は stderr に出力します。`--json` の出力は次のフィールドを持ちます。
+
+| フィールド | 内容 |
+| --- | --- |
+| `text` | 最終回答 |
+| `response_id` | 最後の応答の ID |
+| `events` | tool 呼び出しなどのイベント（引数と結果を含む） |
+| `outcome` | 作業計画から見た完了状態（`completed` / `blocked` / `incomplete`） |
+| `plan` | 作業計画 |
+| `usage` | この実行のトークン使用量 |
+| `stop_reason` | 停止理由（`final_answer` / `round_limit` / `token_limit` / `usage_unavailable`） |
+
+```sh
+ano run --environment default --json --quiet "実装の概要を説明して" | jq .outcome
+```
+
+実行エラーは非ゼロの終了コードと stderr のメッセージで返ります。正常終了でも未完了の工程が残る場合があるため、自動処理では `outcome` も確認してください（[作業計画と完了判定](docs/agent-runtime.md#作業計画と完了判定)）。
+
+## 設定ファイル
+
+`--config` を省略するとカレントディレクトリの `config.toml` を読み、無ければ組み込みの既定値で動きます。全項目の例は [config.example.toml](config.example.toml) を参照してください。
+
+| セクション | 内容 | 詳細 |
+| --- | --- | --- |
+| `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ | [LM Studio](#lm-studio) |
+| `[agent]` | モデル・instructions・実行ラウンド数・並行数・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
+| `[environments.<name>]` | workspace・許可する tool・書き込み・MCP 自動承認・検証コマンド | [実行環境](#実行環境) |
+| `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
+| `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](docs/mcp.md) |
+| `[webhook]` | 待ち受けアドレス・署名・ジョブ数とタイムアウト | [docs/webhook.md](docs/webhook.md) |
+
+設定の誤りで意図せず制限が外れないよう、次の場合はエラーになります。
+
+- `--config` で明示したファイルが存在しない（ポリシーなしの既定値へ黙って切り替えないため）
+- 未知のキーがある（`disable_tools` のような綴り間違いで制限が無効になることを防ぐため）
+- `--user` に未定義の名前を指定した（別ユーザーの設定へ切り替えないため）
+
+`environments.*.workspace` と MCP の `cwd` の相対パスは、設定ファイルのあるディレクトリを基準に解決します。CLI の `--workspace` は起動ディレクトリを基準にします。
+
+API キーは設定ファイルに保存せず、`api_key_env` で指定した環境変数から読み込みます。`OPENAI_BASE_URL` を設定すると、設定ファイルの `base_url` より優先して endpoint を変更できます（モックサーバーなど）。
+
+### LM Studio
+
+LM Studio は OpenAI 互換の Responses API・function tool・Remote MCP を提供するため、`[api]` の endpoint を差し替えて使えます。LM Studio で server を起動してモデルをロードし、Remote MCP を使う場合は Server Settings で MCP 利用を有効にします。
 
 ```toml
 [api]
@@ -131,252 +153,84 @@ base_url = "http://127.0.0.1:1234/v1"
 api_key_env = "LM_STUDIO_API_KEY"
 ```
 
-ローカル endpoint では `LM_STUDIO_API_KEY` が未設定でも動くよう、クライアントは `lm-studio` というダミーの Bearer 値を使います。認証を有効にした場合は環境変数へ実際のキーを設定してください。ロードしたモデル名を `agent.model` または `--model` で指定します。tool calling の品質はモデルの tool-use 対応（native tool use 対応モデルが推奨）に依存します。URL 形式の MCP は `url` で登録できますが、OpenAI Secure MCP Tunnel の `tunnel_id` は LM Studio ではなく OpenAI Responses API 側の機能です。
+ローカルの endpoint では、`LM_STUDIO_API_KEY` が未設定でも動くよう `lm-studio` というダミーの Bearer 値を送ります。認証を有効にした場合は環境変数に実際のキーを設定してください。ロードしたモデル名は `agent.model` または `--model` で指定します。tool calling の品質はモデルの tool use 対応に依存します（native tool use 対応モデルを推奨）。URL 形式の MCP は `url` で登録できますが、Secure MCP Tunnel（`tunnel_id`）は OpenAI Responses API の機能で、LM Studio では使えません。
 
-## Webhook から環境を指定して開始
+## 組み込み tool
 
-`[environments.<name>]` にサーバー側の実行環境を登録し、`ano serve` を起動します。Webhook の JSON では `task`、`user`、`environment` と任意の inline 画像・音声を指定できますが、workspace パスや tool allowlist を外部から上書きできません。
+| tool | 内容 | 条件 |
+| --- | --- | --- |
+| `workspace_list` | ディレクトリ直下を名前順に取得（既定100件、最大1000件）。`next_after` を次の `after` に渡すと続きを取得 | workspace |
+| `workspace_read` | UTF-8 ファイルを `offset`（バイト位置）と `max_bytes`（既定 64 KiB、最大 10 MiB）で分割して読む。`next_offset` で続きを読み、文字の途中では分割しない | workspace |
+| `workspace_search` | UTF-8 テキストを再帰的に文字列検索し、パス・行番号・列番号・抜粋を返す（大文字小文字を区別、正規表現なし、既定100件、最大1000件） | workspace |
+| `workspace_edit` | 置換対象がちょうど1回だけ出現することと、必要なら `expected_sha256` の一致を確認してから原子的に書き込む。`dry_run:true` で差分とハッシュを確認できる | `allow_writes` |
+| `workspace_write` | UTF-8 テキストをファイルへ書き込む | `allow_writes` |
+| `workspace_check` | 環境の `checks` に登録した検証コマンドを実行。`name:null` で一覧 | `checks` |
+| `task_plan` | 作業計画の読み書き（[詳細](docs/agent-runtime.md#作業計画と完了判定)） | 常時 |
+| `tool_search` | 登録済み tool・MCP の検索（[詳細](docs/agent-runtime.md#tool-の遅延公開tool_search)） | 常時 |
+| `echo` / `unix_time` | 動作確認用 | なし |
 
-```toml
-[webhook]
-bind = "127.0.0.1:8080"
-path = "/webhook/tasks"
-secret_env = "ANO_WEBHOOK_SECRET"
+実際に使える tool は、ユーザーと環境の `allowed_tools` / `disabled_tools` で決まります。読み取り専用の環境で検索を使うには `allowed_tools` に `workspace_search` を加えてください。
 
-[environments.coding]
-workspace = "C:/work/my-repository"
-allowed_tools = ["workspace_*"]
-allow_writes = true
-auto_approve_mcp = false
-```
+- **workspace の外には出ません。** 絶対パスや `..` を拒否し、既存の親ディレクトリを1階層ずつ正規化して workspace 内であることを確認します。シンボリックリンクを経由した書き込みも拒否します。
+- **検索量に上限があります。** 10,000 エントリ・32 MiB までを走査し、リンク・バイナリ・10 MiB 超のファイルと、`.git`・`node_modules`・`target` などの生成物ディレクトリを省略します。上限に達したら範囲を狭めて再検索します。
+- **検証コマンドは設定で固定されます。** `workspace_check` のコマンドと引数は設定ファイルで決まり、workspace を作業ディレクトリとして実行し、出力は上限付きで返します。検証ごとの `timeout_secs` を優先し、タイムアウト時も取得済みの出力を返します。Webhook のジョブ全体の制限は引き続き適用されます。
+- **shell 実行 tool はありません。** 必要な場合は、アプリケーション側でより狭い権限の tool を登録してください。
 
-```powershell
-$env:ANO_WEBHOOK_SECRET = "replace-with-a-long-random-secret"
-cargo run -- serve
-```
+## ライブラリとして使う
 
-署名は `X-Ano-Timestamp` に現在の Unix 秒を入れ、`"<timestamp>.<body>"` の HMAC-SHA256 を `X-Ano-Signature: sha256=<hex>` として送ります。タイムスタンプが `webhook.signature_tolerance_secs`（既定 300 秒）より古い・新しいリクエストと、一度受け付けた署名の再送（リプレイ）は `401` で拒否します。
-
-```json
-{
-  "task": "リポジトリを確認して必要な修正を行って",
-  "user": "default",
-  "environment": "coding",
-  "images": [{"data": "<base64>", "mime_type": "image/png"}],
-  "audio": [{"data": "<base64>", "format": "wav"}]
-}
-```
-
-`user` は `[users]` に定義済みの名前（または `default`）だけを受け付けます。未知のフィールド（`workspace` など）を含む body は `400` になります。`images` と `audio` は任意です。音声は Webhook でも文字起こしせず、native `input_audio` としてそのままモデルへ渡します。body 上限は `webhook.max_body_bytes` で設定します。
-
-PowerShell から送る場合の署名例です。タイムスタンプと同じ `$body` のバイト列を署名してから POST します。
-
-```powershell
-$body = '{"task":"リポジトリを確認して必要な修正を行って","user":"default","environment":"coding"}'
-$timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
-$key = [Text.Encoding]::UTF8.GetBytes($env:ANO_WEBHOOK_SECRET)
-$bytes = [Text.Encoding]::UTF8.GetBytes("$timestamp.$body")
-$hmac = [Security.Cryptography.HMACSHA256]::new($key)
-$signature = [Convert]::ToHexString($hmac.ComputeHash($bytes)).ToLowerInvariant()
-Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/webhook/tasks' `
-  -Headers @{ 'X-Ano-Timestamp' = $timestamp; 'X-Ano-Signature' = "sha256=$signature" } `
-  -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($body))
-```
-
-成功時は `202 Accepted` と `job_id`、`status_url`、`cancel_url` が返り、`GET /jobs/<job_id>` で状態と結果を取得できます。状態取得にも同じ形式の `X-Ano-Timestamp` と `X-Ano-Signature` が必要で、署名対象は `"<timestamp>.<job_id>"` です。状態は `queued`、`running`、`completed`、`blocked`、`incomplete`、`failed`、`cancelled`、`timed_out` のいずれかです。`blocked` と `incomplete` も終了状態であり、`result` と `plan` から理由と残りの工程を確認できます。`started_at_unix` と `finished_at_unix` は開始前・終了前には `null` です。
-
-同時に実行するジョブは `webhook.max_concurrent_jobs`（既定 2）までで、それを超えたジョブは `queued` のまま待ちます。待機中と実行中の合計が `webhook.max_pending_jobs`（既定 64）に達すると `503` を返します。`webhook.job_timeout_secs`（既定1800秒）は、待機時間を除いた実行全体の上限で、API応答待ちやtool実行時間も含みます。上限到達時は `timed_out` になり、空いた実行枠で次のジョブを開始します。終了済みのジョブだけを `webhook.max_retained_jobs`（既定1000）件まで保持し、終了するたびに古い結果から削除します。`0` を指定すると結果を保持しません。
-
-Ctrl+C では新しいジョブの受付を止め、待機中・実行中のジョブへ中止を通知し、ジョブ終了を最大5秒待ってから残ったタスクを中止します。その後MCP接続を閉じます。toolのpanicもジョブの `failed` として記録し、次のジョブに実行枠を返します（プロセス全体をabortするpanic設定を除きます）。
-
-secret を設定せずに起動する `--allow-unauthenticated` は loopback アドレスへの bind でだけ使え、secret の環境変数が空文字の場合は起動を拒否します。Webhook 実行は対話端末を持たないため、MCP の承認はデフォルトで拒否されます。信頼済み環境だけ `auto_approve_mcp = true` にしてください。`webhook.path` は固定パスを指定し、管理用の `/jobs` 以下と `/healthz` は使えません。
-
-混雑による `503` や入力不備による `400` では署名を消費しません。署名の有効期限内なら同じ要求を再送できます。同時に同じ署名を送ってもジョブは一度しか登録されません。ジョブと結果はメモリ内に保持するため、サーバー再起動をまたいだ復元には対応していません。
-
-### ジョブの中止
-
-`POST /jobs/<job_id>/cancel` は待機中・実行中のジョブを中止します。署名対象は `"<timestamp>.cancel:<job_id>"` です。状態取得用の署名では中止できません。未終了なら `202` と `cancellation_requested: true` を返し、その後 `GET /jobs/<job_id>` で `cancelled` への遷移を確認できます。すでに終了済みなら `200` で既存の結果を返すため、中止要求は再送できます。未知・削除済みのジョブは `404` です。
-
-```powershell
-$jobId = '<job_id>'
-$timestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds().ToString()
-$key = [Text.Encoding]::UTF8.GetBytes($env:ANO_WEBHOOK_SECRET)
-$hmac = [Security.Cryptography.HMACSHA256]::new($key)
-$payload = [Text.Encoding]::UTF8.GetBytes("$timestamp.cancel:$jobId")
-$signature = [Convert]::ToHexString($hmac.ComputeHash($payload)).ToLowerInvariant()
-Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/jobs/$jobId/cancel" `
-  -Headers @{ 'X-Ano-Timestamp' = $timestamp; 'X-Ano-Signature' = "sha256=$signature" }
-```
-
-中止・タイムアウトは処理の待機を打ち切ります。すでに完了したファイル書き込みや外部操作は巻き戻さず、送信済みの外部操作が相手側で継続する場合もあります。独自toolは非同期の待機を使い、同期ブロックや別途起動した処理の停止が必要ならtool自身でも中止を扱ってください。
-
-`workspace_write` は `allow_writes = true` の環境だけで動作し、設定された workspace の外へ出る絶対パスや `..` を拒否します。親ディレクトリは 1 階層ずつ正規化して workspace 内であることを確かめてから作成し、シンボリックリンクを経由した書き込みも拒否します。shell 実行 tool は標準登録していません。必要な場合はアプリケーション側で、さらに狭い権限の tool を登録してください。
-
-## ファイル調査の tool
-
-- `workspace_list`: `path` の直下を名前順に取得します。`limit` は既定100、最大1000件です。`next_after` が返ったら、その値を次の呼び出しの `after` に指定すると続きを取得できます。
-- `workspace_read`: UTF-8 ファイルを `offset`（バイト位置）と `max_bytes` で分割して読みます。既定64 KiB、最大10 MiBです。`next_offset` で続きが読め、日本語などの文字の途中では分割しません。
-- `workspace_search`: `path` 以下の UTF-8 テキストを `query` の文字列で再帰検索し、パス・行番号・列番号・抜粋を返します。正規表現ではなく、大文字小文字を区別する検索です。`max_results` は既定100、最大1000件です。
-
-検索は10,000エントリ・32 MiBの走査量に上限を設け、リンク、バイナリ、10 MiB超のファイル、`.git` や `node_modules`、`target` などの生成物ディレクトリを省略します。上限に達した場合は検索範囲を狭めて再検索してください。必要なファイルだけを調べるため、shell を許可せずリポジトリの調査ができます。読み取り専用環境で検索を使うには `allowed_tools` に `workspace_search` を加えます。
-
-## ローカル tool の登録
-
-アプリケーションに埋め込む場合は `ToolRegistry` に JSON Schema と async handler を登録します。
+`ToolRegistry` に JSON Schema と async handler を登録し、`Agent` に渡します。動く例は [examples/embed.rs](examples/embed.rs) にあります。
 
 ```rust
-use ano::{ToolDefinition, ToolRegistry};
-use anyhow::Result;
+use ano::{register_builtin_tools, ToolDefinition, ToolRegistry};
 use serde_json::json;
 
-fn register_tools(registry: &ToolRegistry) -> Result<()> {
-    registry.register(
-        ToolDefinition::new(
-            "lookup_customer",
-            "Look up a customer by id.",
-            json!({
-                "type": "object",
-                "properties": {"id": {"type": "string"}},
-                "required": ["id"],
-                "additionalProperties": false
-            }),
-        ),
-        |arguments| async move {
-            let id = arguments["id"].as_str().unwrap_or_default();
-            Ok(json!({"id": id, "status": "example"}))
-        },
-    )?;
-    Ok(())
-}
-```
-
-実行環境を受け取る tool は `register_contextual` を使います。Webhook が選んだ user、environment、workspace、書き込み許可を `ToolContext` から参照できます。
-
-```rust
-use ano::{ToolContext, ToolDefinition, ToolRegistry};
-
-registry.register_contextual(
+let registry = ToolRegistry::new();
+register_builtin_tools(&registry)?; // echo・unix_time・workspace_*
+registry.register(
     ToolDefinition::new(
-        "environment_info",
-        "Return the selected environment.",
-        serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        "lookup_customer",
+        "Look up a customer by id.",
+        json!({
+            "type": "object",
+            "properties": {"id": {"type": "string"}},
+            "required": ["id"],
+            "additionalProperties": false
+        }),
     ),
-    |_arguments, context: ToolContext| async move {
-        Ok(serde_json::json!({"environment": context.environment}))
+    |arguments| async move {
+        let id = arguments["id"].as_str().unwrap_or_default();
+        Ok(json!({"id": id, "status": "example"}))
     },
 )?;
 ```
 
-標準の tool（`echo`、`unix_time`、`workspace_*`）は `ano::register_builtin_tools(&registry)` で登録できます。tool 名は Responses API の関数名規則に合わせて ASCII 英数字・`_`・`-` の 64 文字以内に限られ、`tool_search` と `mcp__` で始まる名前は予約されています。
+- 実行環境（user・environment・workspace・書き込み許可）を受け取る tool は `register_contextual` で登録し、`ToolContext` から参照します。
+- tool 名は Responses API の関数名規則に合わせて ASCII 英数字・`_`・`-` の64文字以内です。`tool_search`・`task_plan` と `mcp__` で始まる名前は予約されています。
+- 直接接続の MCP を使う場合は `McpPool` を1つ作り、`Arc` で各 `Agent` に渡すと接続を共有できます。終了時に `shutdown().await` を呼んでください。
+- `Agent` は外部依存をトレイト（`ResponsesApi`・`McpGateway`・`ConversationStore`・`ApprovalHandler`）で受け取るため、別の API クライアントや保存先に差し替えられます。構成は [docs/architecture.md](docs/architecture.md) を参照してください。
 
-`Agent::run` は function call を自動で処理します。モデルが不正な JSON 引数を返した場合や tool が失敗した場合は、実行を中断せずエラー内容を tool 出力としてモデルへ返します。通常の tool 呼び出しには `agent.tool_timeout_secs`（既定 120 秒）のタイムアウトがあります。登録済みの `workspace_check` は検証ごとの `timeout_secs` を使い、結果回収のために外側の制限へ5秒の猶予を設けます。
+## ドキュメント
 
-`agent.max_tool_rounds` は Responses リクエスト数の上限です。最後の1回は tool を無効にして、実行済みの内容と未完了の作業を報告するために確保します。`1` を指定した場合は tool を使わず回答します。API が `incomplete`・`failed` などの未完了状態を返した場合は、その応答のローカル tool を実行せずエラーにします。回答拒否の説明文はそのまま利用者へ返します。
+| ドキュメント | 内容 |
+| --- | --- |
+| [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開 |
+| [docs/mcp.md](docs/mcp.md) | MCP の接続方式、接続の再利用、承認、ポリシーの名前空間、検索カタログ |
+| [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
+| [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
 
-1 つのレスポンスに複数の function call が含まれる場合は、`agent.max_parallel_tool_calls`（既定 8）件まで並行して実行し、結果はレスポンス内の順序でモデルへ返します。`agent.parallel_tool_calls = false` にすると 1 件ずつ順に実行します。MCP の承認要求は並行実行中でも 1 件ずつ承認ハンドラーへ渡すため、CLI の確認プロンプトが混ざることはありません。同じレスポンス内で `tool_search` を呼んだ場合、その結果は次のリクエストから有効になり、同時に呼ばれた他の tool はモデルがそのレスポンスを生成した時点の tool 一覧で判定します。`Agent::with_event_listener` を使うと tool 呼び出しなどのイベントを発生時点で受け取れます（CLI はこれで進行状況を stderr に表示します）。登録した名前を `users.<id>.disabled_tools` に置くと、そのユーザーの Responses リクエストから tool 定義が除外されます。万一モデルが直接呼び出しても、実行前にもう一度 denylist を確認して `tool_disabled` を返します。
+## 開発
 
-## MCP 設定
-
-`[[mcp_servers]]` の transport は3種類です。省略時は `responses` となり、Responses API がリモート MCP server の tool 一覧取得と実行を担当します。この方式は `url` または `tunnel_id` を使います。Rust 側で直接接続する場合は `stdio` または `streamable_http` を指定します。
-
-```toml
-[[mcp_servers]]
-label = "github"
-url = "https://example.invalid/mcp"
-allowed_tools = ["list_issues", "delete_issue"]
-require_approval = "always"
-
-[users.alice]
-disabled_tools = ["mcp:github:delete_issue"]
-```
-
-Streamable HTTP は `url` に接続先を指定し、必要なら `authorization_env` にトークンが入った環境変数名を設定します。stdio は `command`、`args`、任意の `cwd` でローカルプロセスを起動します。子プロセスは ano の環境変数を継承し、`env_vars` は「子プロセスへ渡す環境変数名 = ano 側で値を読む環境変数名」の対応表で値を追加・上書きします。stdio プロセスは ano と同じ OS ユーザー権限で実行され、継承した環境変数にもアクセスできるため、信頼できる MCP server のみ登録してください。
-
-```toml
-[[mcp_servers]]
-label = "docs_http"
-transport = "streamable_http"
-url = "https://mcp.example.invalid/mcp"
-authorization_env = "DOCS_MCP_TOKEN"
-allowed_tools = ["search_docs", "read_page"]
-
-[[mcp_servers]]
-label = "local_files"
-transport = "stdio"
-command = "node"
-args = ["./server.js"]
-cwd = "./mcp-servers/files"
-env_vars = { FILES_API_TOKEN = "FILES_API_TOKEN" }
-allowed_tools = ["read_file", "list_files"]
-```
-
-直接接続では、接続時に MCP server から tool 名・説明・schema を取得しますが、モデルへは検索カタログの名前と説明だけを使います。`tool_search` が選んだ関数の schema だけを次の Responses リクエストに含めます。`allowed_tools` とユーザー別 `disabled_tools` の両方を適用し、`require_approval` の既定値は `always` です。Webhook ジョブも同じ制限・承認フローを利用します。
-
-### 接続の再利用
-
-直接接続の MCP server は `McpPool` が管理し、実行開始時に接続と tool 一覧取得を行い、以後の実行で使い回します。`ano serve` ではすべての Webhook ジョブが 1 つのプールを共有するため、stdio server のプロセスはジョブごとではなく 1 回だけ起動し、同時に走るジョブも同じ接続へ並行してリクエストします。ユーザー別の制限は実行ごとに適用するので、共有していても各ユーザーに見える tool は変わりません。サーバー全体が denylist で無効化されている場合は接続しません。
-
-直接接続の初期化と tool 一覧取得には、サーバーごとに合計30秒の上限があります。応答しないサーバーはエラーとなり、再実行時に再接続できます。shutdown は進行中の接続待ちも中止します。
-
-プロセスの異常終了などで接続が切れた場合、その実行中の呼び出しはエラーとしてモデルへ返り、次の実行で自動的に接続し直します。tool 一覧は接続時に取得するため、server 側で tool を増減した場合は再接続（ano の再起動）で反映されます。CLI の終了時と `ano serve` の graceful shutdown 時には接続を閉じ、stdio のプロセスを停止します。
-
-server がタスク間で状態を持ち、別のユーザーやジョブと共有したくない場合は `reuse_connection = false` を指定してください。その server だけ従来どおり実行ごとに接続し、実行の終了時に閉じます（Responses API 管理方式の server には指定できません）。
-
-アプリケーションに埋め込む場合は、`McpPool` を 1 つ作って `Arc` で各 `Agent` に渡すと接続を共有できます。
-
-```rust
-let mcp = Arc::new(McpPool::new(config.mcp_servers.clone()));
-let agent = Agent::new(client, settings, Arc::clone(&mcp), registry, policy, approval);
-// ... 終了時
-mcp.shutdown().await;
-```
-
-`require_approval = "never"` は信頼済みサーバーを完全自動で動かす設定です。未指定時は安全側の `always` になり、CLI から確認します。`--auto-approve-mcp` を付けると CLI の確認を自動承認へ切り替えられます。stdin が端末でない場合（プロンプトをパイプで渡した場合など）は対話確認ができないため、承認要求は拒否されます。Responses API 側から届いた承認要求も、ユーザーポリシーと直前の `tool_search` の選択に含まれない tool であれば、承認ハンドラーに渡さず拒否します。
-
-### ポリシーの名前空間
-
-MCP tool は `mcp:<label>:<tool>` または `<label>:<tool>` で指定します。サーバー全体は `<label>:*` や `mcp:<label>` で指定できます。
-
-- `disabled_tools` は安全側に倒すため、`delete_*` のような修飾なしのルールも全サーバーの同名 MCP tool に適用されます。
-- `allowed_tools` はサーバー名で修飾したルール（または `*`）だけが MCP tool に一致します。ローカル tool 用の `read_*` が別サーバーの `read_file` を許可してしまうことはありません。
-- environment の `allowed_tools` はユーザーの allowlist に重ねて適用され、両方で許可された tool だけが使えます。
-
-MCP server の `label` は ASCII 英数字・`_`・`-` だけが使え、重複は起動時にエラーになります。
-
-## 大量の tool / MCP を登録する場合
-
-tool 定義や MCP server を登録しても、初回の Responses リクエストへ全件は送りません。最初に固定サイズの `tool_search` と `task_plan` を公開し、モデルが capability を検索した後、上位 `agent.tool_discovery_limit` 件だけを次のリクエストへ追加します。これにより登録数に比例して tool schema が毎回トークンを消費することを防ぎます。
-
-Responses API 管理方式では検索用の軽量 `tool_catalog` を設定できます。`tool_catalog` がない場合でも、MCP の `allowed_tools` に列挙した名前は検索対象になります。サーバーの tool 全件をモデルへ公開したくない場合は、`allowed_tools` と `tool_catalog` を明示してください。直接接続方式では実サーバーからローカルで取得した一覧が検索対象になります。
-
-```toml
-[agent]
-tool_discovery_limit = 8
-
-[[mcp_servers]]
-label = "github"
-url = "https://example.invalid/mcp"
-allowed_tools = ["list_issues", "create_issue", "delete_issue"]
-
-[[mcp_servers.tool_catalog]]
-name = "list_issues"
-description = "List issues in a repository"
-
-[[mcp_servers.tool_catalog]]
-name = "create_issue"
-description = "Create an issue"
-```
-
-モデルは `tool_search` に「issue を一覧」「ファイルを読む」のように capability を渡します。検索結果の schema だけが有効化されるため、必要な tool が変わった場合は再度検索します。
-
-## 検証
-
-```powershell
+```sh
 cargo fmt --check
-cargo test
 cargo clippy --all-targets -- -D warnings
+cargo test
 ```
 
-Responses API へのリクエストには `api.timeout_secs`（既定 600 秒）のタイムアウトがあり、接続失敗と 429 / 5xx は `api.max_retries`（既定 2 回）まで `Retry-After` を尊重しつつ再試行します。
+統合テスト（`tests/`）はモックの Responses API を立て、ビルドした `ano` バイナリを実際に起動して検証します。ソースの構成は [docs/architecture.md](docs/architecture.md) を参照してください。
 
-API キーは設定ファイルに保存せず、`api_key_env` で指定した環境変数から読み込みます。リモート MCP server は外部へデータを送信できるため、信頼できる server だけを登録してください。
+## セキュリティ上の注意
+
+- ano は起動したユーザーの OS 権限で動きます。`allow_writes`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。
+- リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` は信頼済みの server に限ってください。
+- Webhook は必ず secret を設定して公開します。未認証での起動は loopback アドレスに限られます（[docs/webhook.md](docs/webhook.md#セキュリティ)）。
+- 中止・タイムアウト・トークン上限による停止は、完了済みのファイル書き込みや外部操作を巻き戻しません。

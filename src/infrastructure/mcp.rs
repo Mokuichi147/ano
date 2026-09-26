@@ -1,16 +1,19 @@
 //! Directly connected MCP servers (`stdio` and `streamable_http`).
 //!
 //! An [`McpPool`] owns the connections and shares them between runs, so a
-//! stdio server process is started once rather than once per task. Each run
-//! borrows the connections through an [`McpRuntime`], which applies that
-//! run's user policy.
+//! stdio server process is started once rather than once per task. The
+//! application applies each run's user policy to the borrowed connections.
 
 use crate::{
-    config::{McpServerConfig, McpTransport},
-    policy::UserPolicy,
-    tools::DIRECT_MCP_PREFIX,
+    application::ports::{DirectMcpServer, DirectMcpTool, McpGateway},
+    domain::{
+        mcp::{McpServerConfig, McpTransport},
+        policy::UserPolicy,
+        tool::DIRECT_MCP_PREFIX,
+    },
 };
 use anyhow::{Context, Result};
+use async_trait::async_trait;
 use rmcp::{
     model::CallToolRequestParams,
     service::RunningService,
@@ -20,7 +23,7 @@ use rmcp::{
     },
     RoleClient, ServiceExt,
 };
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::{process::Stdio, sync::Arc, time::Duration};
 use tokio::{
     process::Command,
@@ -97,10 +100,9 @@ impl McpPool {
         }
     }
 
-    /// Borrow the connections a run with `policy` may use, connecting any
-    /// that are missing or dead. Servers disabled for the policy are not
-    /// connected at all.
-    pub(crate) async fn runtime(&self, policy: &UserPolicy) -> Result<McpRuntime> {
+    /// Connect the direct servers a run with `policy` may use, reusing live
+    /// shared connections. Servers disabled for the policy are not connected.
+    async fn connect_for(&self, policy: &UserPolicy) -> Result<Vec<Arc<ConnectedMcpServer>>> {
         if *self.shutdown_signal.borrow() {
             anyhow::bail!("MCP pool is shutting down");
         }
@@ -113,11 +115,7 @@ impl McpPool {
                     && !policy.is_mcp_server_disabled(&config.label)
             })
             .map(|(index, _)| self.server(index));
-        let servers = futures::future::try_join_all(wanted).await?;
-        Ok(McpRuntime {
-            servers,
-            policy: policy.clone(),
-        })
+        futures::future::try_join_all(wanted).await
     }
 
     async fn server(&self, index: usize) -> Result<Arc<ConnectedMcpServer>> {
@@ -153,26 +151,11 @@ impl McpPool {
     }
 }
 
-/// The MCP connections one run may use, filtered by that run's policy.
-#[derive(Default)]
-pub(crate) struct McpRuntime {
-    servers: Vec<Arc<ConnectedMcpServer>>,
-    policy: UserPolicy,
-}
-
 pub(crate) struct ConnectedMcpServer {
-    pub(crate) config: McpServerConfig,
-    requires_approval: bool,
+    config: McpServerConfig,
     service: McpClient,
     /// Tools permitted by the server config. User policy is applied per run.
     tools: Vec<DirectMcpTool>,
-}
-
-pub(crate) struct DirectMcpTool {
-    pub function_name: String,
-    pub name: String,
-    pub description: String,
-    pub input_schema: Value,
 }
 
 impl ConnectedMcpServer {
@@ -281,7 +264,6 @@ impl ConnectedMcpServer {
 
         Ok(Self {
             config: config.clone(),
-            requires_approval: config.requires_approval(),
             service,
             tools,
         })
@@ -301,74 +283,56 @@ impl ConnectedMcpServer {
     }
 }
 
-impl McpRuntime {
-    /// Tools on the borrowed servers that the run's policy allows.
-    pub fn tools(&self) -> impl Iterator<Item = (&ConnectedMcpServer, &DirectMcpTool)> {
-        self.servers.iter().flat_map(move |server| {
-            server
-                .tools
-                .iter()
-                .filter(move |tool| server.config.is_tool_allowed(&self.policy, &tool.name))
-                .map(move |tool| (server.as_ref(), tool))
-        })
+#[async_trait]
+impl DirectMcpServer for ConnectedMcpServer {
+    fn config(&self) -> &McpServerConfig {
+        &self.config
     }
 
-    pub fn find_tool(&self, function_name: &str) -> Option<(&ConnectedMcpServer, &DirectMcpTool)> {
-        self.tools()
-            .find(|(_, tool)| tool.function_name == function_name)
+    fn tools(&self) -> &[DirectMcpTool] {
+        &self.tools
     }
 
-    pub fn server_label(server: &ConnectedMcpServer) -> &str {
-        &server.config.label
+    fn is_healthy(&self) -> bool {
+        ConnectedMcpServer::is_healthy(self)
     }
 
-    pub fn tool_requires_approval(server: &ConnectedMcpServer) -> bool {
-        server.requires_approval
-    }
-
-    pub fn is_tool_allowed(
-        server: &ConnectedMcpServer,
-        policy: &UserPolicy,
-        tool: &DirectMcpTool,
-    ) -> bool {
-        server.config.is_tool_allowed(policy, &tool.name)
-    }
-
-    pub async fn call_tool(&self, function_name: &str, arguments: &Value) -> Result<Value> {
-        let (server, tool) = self
-            .find_tool(function_name)
-            .with_context(|| format!("unknown direct MCP function '{function_name}'"))?;
-        if !server.is_healthy() {
-            anyhow::bail!(
-                "connection to MCP server '{}' was lost; it will be reconnected for the next task",
-                server.config.label
-            );
-        }
-        let arguments = arguments.as_object().cloned().with_context(|| {
-            format!(
-                "arguments for MCP tool '{}' must be a JSON object",
-                tool.name
-            )
-        })?;
-        let result = server
+    async fn call_tool(&self, tool_name: &str, arguments: Map<String, Value>) -> Result<Value> {
+        let result = self
             .service
-            .call_tool(CallToolRequestParams::new(tool.name.clone()).with_arguments(arguments))
-            .await
-            .with_context(|| {
-                format!(
-                    "MCP tool '{}' on server '{}' failed",
-                    tool.name, server.config.label
-                )
-            })?;
+            .call_tool(CallToolRequestParams::new(tool_name.to_string()).with_arguments(arguments))
+            .await?;
         serde_json::to_value(result).context("failed to serialize MCP tool result")
+    }
+}
+
+#[async_trait]
+impl McpGateway for McpPool {
+    fn configs(&self) -> &[McpServerConfig] {
+        &self.configs
+    }
+
+    async fn connect(&self, policy: &UserPolicy) -> Result<Vec<Arc<dyn DirectMcpServer>>> {
+        Ok(self
+            .connect_for(policy)
+            .await?
+            .into_iter()
+            .map(|server| server as Arc<dyn DirectMcpServer>)
+            .collect())
+    }
+
+    async fn shutdown(&self) {
+        McpPool::shutdown(self).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ConnectedMcpServer, McpPool};
-    use crate::config::{McpApprovalMode, McpServerConfig, McpTransport};
-    use crate::policy::UserPolicy;
+    use crate::domain::{
+        mcp::{McpApprovalMode, McpServerConfig, McpTransport},
+        policy::UserPolicy,
+    };
     use std::{sync::Arc, time::Duration};
     use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
 
@@ -396,8 +360,8 @@ mod tests {
         let pool = McpPool::new(vec![stdio_server("files")]);
         let policy = UserPolicy::new(vec!["mcp:files".into()], None);
 
-        let runtime = pool.runtime(&policy).await.unwrap();
-        assert_eq!(runtime.tools().count(), 0);
+        let servers = pool.connect_for(&policy).await.unwrap();
+        assert!(servers.is_empty());
         assert!(pool.connected_servers().await.is_empty());
     }
 
@@ -405,7 +369,7 @@ mod tests {
     async fn failed_connection_is_not_cached() {
         let pool = McpPool::new(vec![stdio_server("files")]);
 
-        assert!(pool.runtime(&UserPolicy::default()).await.is_err());
+        assert!(pool.connect_for(&UserPolicy::default()).await.is_err());
         assert!(pool.slots[0].lock().await.is_none());
     }
 
@@ -441,10 +405,12 @@ mod tests {
         let (config, server, ready) = stalled_http_server().await;
         let pool = Arc::new(McpPool::new(vec![config]));
         let task_pool = Arc::clone(&pool);
-        let task =
-            tokio::spawn(
-                async move { task_pool.runtime(&UserPolicy::default()).await.map(|_| ()) },
-            );
+        let task = tokio::spawn(async move {
+            task_pool
+                .connect_for(&UserPolicy::default())
+                .await
+                .map(|_| ())
+        });
         tokio::time::timeout(Duration::from_secs(2), ready)
             .await
             .unwrap()
@@ -461,6 +427,6 @@ mod tests {
         server.abort();
         assert!(error.to_string().contains("shutting down"));
         assert!(pool.connected_servers().await.is_empty());
-        assert!(pool.runtime(&UserPolicy::default()).await.is_err());
+        assert!(pool.connect_for(&UserPolicy::default()).await.is_err());
     }
 }

@@ -1,12 +1,46 @@
-use crate::config::ApiSettings;
+//! HTTP client for the OpenAI Responses API and compatible endpoints.
+
+use crate::application::ports::ResponsesApi;
 use anyhow::{bail, Context, Result};
+use async_trait::async_trait;
 use reqwest::{Client, StatusCode, Url};
+use serde::Deserialize;
 use serde_json::Value;
 use std::time::Duration;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_CHARS: usize = 2000;
+
+fn default_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+
+fn default_api_key_env() -> String {
+    "OPENAI_API_KEY".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiSettings {
+    pub base_url: String,
+    pub api_key_env: String,
+    /// Total timeout for one Responses API request.
+    pub timeout_secs: u64,
+    /// Retries for connection failures and 429 / 5xx responses.
+    pub max_retries: u32,
+}
+
+impl Default for ApiSettings {
+    fn default() -> Self {
+        Self {
+            base_url: default_base_url(),
+            api_key_env: default_api_key_env(),
+            timeout_secs: 600,
+            max_retries: 2,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct OpenAiClient {
@@ -129,6 +163,21 @@ impl OpenAiClient {
                 )
             });
         }
+    }
+}
+
+#[async_trait]
+impl ResponsesApi for OpenAiClient {
+    fn base_url(&self) -> &str {
+        OpenAiClient::base_url(self)
+    }
+
+    async fn create_response(&self, payload: &Value) -> Result<Value> {
+        OpenAiClient::create_response(self, payload).await
+    }
+
+    async fn compact_response(&self, payload: &Value) -> Result<Value> {
+        OpenAiClient::compact_response(self, payload).await
     }
 }
 

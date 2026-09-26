@@ -1,9 +1,8 @@
 //! Run-scoped task plans. Revisions prevent concurrent updates from silently
 //! overwriting each other; session checkpoints persist the accepted state.
-use crate::ToolDefinition;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashSet;
 
 pub const TASK_PLAN_NAME: &str = "task_plan";
@@ -162,24 +161,10 @@ impl TaskPlan {
     }
 }
 
-pub fn task_plan_definition() -> ToolDefinition {
-    ToolDefinition::new(TASK_PLAN_NAME,
-        "Read or replace this task's plan. Use steps=null to read. To update, send all steps and the current expected_revision (initially 0). Use stable ids, at most one in_progress step, and detail for blocked reasons or completion evidence. Keep the plan current while working; mark completed only after doing the work. Changing the goal or dropping steps requires an explanation. Plans persist with a session. Plan state is not proof that verification passed.",
-        json!({"type":"object","properties":{
-            "expected_revision":{"type":["integer","null"],"minimum":0},
-            "explanation":{"type":["string","null"]},
-            "steps":{"type":["array","null"],"minItems":1,"maxItems":50,"items":{
-                "type":"object","properties":{
-                    "id":{"type":"string"},"description":{"type":"string"},
-                    "status":{"type":"string","enum":["pending","in_progress","completed","blocked"]},
-                    "detail":{"type":["string","null"]}
-                },"required":["id","description","status","detail"],"additionalProperties":false}}
-        },"required":["expected_revision","explanation","steps"],"additionalProperties":false}))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     fn step(id: &str, status: &str) -> Value {
         json!({"id":id,"description":"Verify the change","status":status,"detail":null})

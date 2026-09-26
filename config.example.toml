@@ -62,7 +62,7 @@ auto_approve_mcp = false
 
 # Example writable coding environment:
 # [environments.coding]
-# workspace = "C:/work/my-repository"
+# workspace = "/path/to/my-repository"
 # allowed_tools = ["workspace_*"]
 # allow_writes = true
 # auto_approve_mcp = false

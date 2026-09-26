@@ -1,10 +1,14 @@
-//! Built-in local tools: `echo`, `unix_time`, and workspace file access.
+//! Workspace file tools: list, read, search, edit, and write.
 //!
-//! Workspace tools are confined to `ToolContext::workspace`. Paths must be
+//! These tools are confined to `ToolContext::workspace`. Paths must be
 //! relative, every existing ancestor is canonicalized and checked against the
 //! workspace root, and writes never follow a symbolic link.
 
-use crate::tools::{ToolContext, ToolDefinition, ToolRegistry};
+use super::non_strict_definition;
+use crate::{
+    application::registry::ToolRegistry,
+    domain::tool::{ToolContext, ToolDefinition},
+};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -14,7 +18,6 @@ use std::{
     io::ErrorKind,
     path::{Component, Path, PathBuf},
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -25,47 +28,9 @@ const MAX_SEARCH_ENTRIES: usize = 10_000;
 const MAX_SEARCH_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SEARCH_LINE_BYTES: usize = 2000;
 
-/// Register the built-in tools into `registry`.
-pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
-    crate::checks::register_workspace_check(registry)?;
+/// Register the workspace file tools into `registry`.
+pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     let mutations = Arc::new(tokio::sync::Mutex::new(()));
-    registry.register(
-        non_strict_definition(
-            "echo",
-            "Return the supplied JSON value unchanged. Useful for testing tool wiring.",
-            json!({
-                "type": "object",
-                "properties": {"value": {}},
-                "required": ["value"],
-                "additionalProperties": false
-            }),
-        ),
-        |arguments| async move {
-            arguments
-                .get("value")
-                .cloned()
-                .context("echo.value is required")
-        },
-    )?;
-    registry.register(
-        ToolDefinition::new(
-            "unix_time",
-            "Return the current Unix timestamp.",
-            json!({
-                "type": "object",
-                "properties": {},
-                "required": [],
-                "additionalProperties": false
-            }),
-        ),
-        |_arguments| async move {
-            let seconds = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .context("system clock is before Unix epoch")?
-                .as_secs();
-            Ok(json!({"unix_seconds": seconds}))
-        },
-    )?;
     registry.register_contextual(
         non_strict_definition(
             "workspace_list",
@@ -166,14 +131,6 @@ pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
         },
     )?;
     Ok(())
-}
-
-// Optional arguments and echo's arbitrary JSON value are intentionally not
-// strict Responses schemas. Runtime handlers validate the optional arguments.
-fn non_strict_definition(name: &str, description: &str, parameters: Value) -> ToolDefinition {
-    let mut definition = ToolDefinition::new(name, description, parameters);
-    definition.strict = false;
-    definition
 }
 
 fn optional_string<'a>(arguments: &'a Value, name: &str, default: &'a str) -> Result<&'a str> {
@@ -667,7 +624,7 @@ async fn commit_workspace_file(
                 bail!("edit conflict: file changed before save; read it again");
             }
         }
-        crate::storage::atomic_write(&file, &content, permissions)
+        crate::infrastructure::fs::atomic_write(&file, &content, permissions)
     })
     .await
     .context("workspace save task failed")?
@@ -765,8 +722,11 @@ async fn writable_workspace_path(context: &ToolContext, relative: &Path) -> Resu
 
 #[cfg(test)]
 mod tests {
-    use super::{register_builtin_tools, relative_path};
-    use crate::tools::{ToolContext, ToolRegistry};
+    use super::relative_path;
+    use crate::{
+        application::registry::ToolRegistry, domain::tool::ToolContext,
+        infrastructure::tools::register_builtin_tools,
+    };
     use serde_json::json;
 
     fn context(workspace: &std::path::Path, allow_writes: bool) -> ToolContext {
