@@ -1,6 +1,6 @@
 //! Local conversation persistence. Tool calls are journaled before execution;
 //! interrupted calls are never replayed automatically.
-use crate::{storage::atomic_write, TaskPlan, ToolContext};
+use crate::{storage::atomic_write, CompactionRecord, TaskPlan, ToolContext, UsageSummary};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -59,6 +59,10 @@ pub struct SessionData {
     pub history: Vec<Value>,
     #[serde(default)]
     pub plan: TaskPlan,
+    #[serde(default)]
+    pub usage: UsageSummary,
+    #[serde(default)]
+    pub compactions: Vec<CompactionRecord>,
     pending_calls: Vec<Value>,
 }
 
@@ -111,6 +115,8 @@ impl Session {
                     last_error: None,
                     history: Vec::new(),
                     plan: TaskPlan::default(),
+                    usage: UsageSummary::default(),
+                    compactions: Vec::new(),
                     pending_calls: Vec::new(),
                 }
             }
@@ -224,6 +230,57 @@ impl Session {
         self.data.status = SessionStatus::Ready;
         self.data.completed_turns += 1;
         self.save()
+    }
+
+    pub(crate) fn record_usage(&mut self, delta: &UsageSummary) -> Result<()> {
+        self.data.usage.add(delta);
+        self.save()
+    }
+
+    pub(crate) fn replace_history(
+        &mut self,
+        history: Vec<Value>,
+        mut record: CompactionRecord,
+    ) -> Result<CompactionRecord> {
+        if !self.data.pending_calls.is_empty() {
+            bail!("cannot compact while tool results are pending");
+        }
+        let original = self.data.clone();
+        let archive = format!(
+            "{}.archive-{}.json",
+            self.path
+                .file_name()
+                .context("session path has no file name")?
+                .to_string_lossy(),
+            uuid::Uuid::new_v4()
+        );
+        // Write the complete previous checkpoint first. If the session save
+        // fails, that session remains usable and the archive is still intact.
+        atomic_write(
+            &self.path.with_file_name(&archive),
+            &serde_json::to_vec_pretty(&original)?,
+            None,
+        )?;
+        record.archive_file = Some(archive);
+        self.data.history = history;
+        self.data.compactions.push(record.clone());
+        if let Err(error) = self.save() {
+            self.data = original;
+            return Err(error);
+        }
+        Ok(record)
+    }
+
+    pub(crate) fn skip_pending(&mut self, message: &str) -> Result<()> {
+        let results = self.data.pending_calls.iter().map(|call| {
+            if call["type"] == "function_call" {
+                json!({"type":"function_call_output","call_id":call.get("call_id").or_else(|| call.get("id")),
+                    "output":json!({"error":"execution_limit","message":message}).to_string()})
+            } else {
+                json!({"type":"mcp_approval_response","approval_request_id":call.get("approval_request_id").or_else(|| call.get("id")),"approve":false})
+            }
+        }).collect::<Vec<_>>();
+        self.record_tool_results(&results)
     }
 
     pub(crate) fn fail(&mut self, error: &str) -> Result<()> {
@@ -415,9 +472,53 @@ mod tests {
         }
         let mut old: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         old.as_object_mut().unwrap().remove("plan");
+        old.as_object_mut().unwrap().remove("usage");
+        old.as_object_mut().unwrap().remove("compactions");
         std::fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
         let reopened = Session::open(&path, binding(), false).unwrap();
         assert_eq!(reopened.data.plan, TaskPlan::default());
+        assert_eq!(reopened.data.usage, UsageSummary::default());
+        assert!(reopened.data.compactions.is_empty());
         assert_eq!(reopened.data.history[0]["content"], "original task");
+    }
+
+    #[test]
+    fn compaction_rejects_pending_calls_before_creating_an_archive() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("work.json");
+        let mut session = Session::open(&path, binding(), false).unwrap();
+        session
+            .begin_turn(&json!([{"role":"user","content":"task"}]))
+            .unwrap();
+        session.record_response("r1", &[json!({"type":"function_call","call_id":"write1","name":"workspace_write","arguments":"{}"})]).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let (history, record) = crate::context::compacted_history(&json!({"object":"response.compaction","id":"cmp1","output":[{"type":"compaction","encrypted_content":"opaque"}]}), &session.data.history).unwrap();
+        assert!(session.replace_history(history, record).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(session.data.compactions.is_empty());
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2); // checkpoint and lock
+    }
+
+    #[test]
+    fn failed_compaction_save_preserves_original_checkpoint_and_memory() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("work.json");
+        let mut session = Session::open(&path, binding(), false).unwrap();
+        session
+            .begin_turn(&json!([{"role":"user","content":"task"}]))
+            .unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let original = session.data.history.clone();
+        let (history, record) = crate::context::compacted_history(&json!({"object":"response.compaction","id":"cmp1","output":[{"type":"compaction","encrypted_content":"x".repeat(MAX_SESSION_BYTES as usize)}]}), &original).unwrap();
+        assert!(session.replace_history(history, record).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert_eq!(session.data.history, original);
+        assert!(session.data.compactions.is_empty());
+        let archive = std::fs::read_dir(directory.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().contains("archive-"))
+            .unwrap();
+        assert_eq!(Session::inspect(archive.path()).unwrap().history, original);
     }
 }

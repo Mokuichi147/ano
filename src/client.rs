@@ -69,6 +69,10 @@ impl OpenAiClient {
         &self.base_url
     }
 
+    pub async fn compact_response(&self, payload: &Value) -> Result<Value> {
+        self.post_json("responses/compact", payload).await
+    }
+
     async fn post_json(&self, endpoint: &str, payload: &Value) -> Result<Value> {
         let url = format!("{}/{}", self.base_url, endpoint);
         let mut attempt = 0;

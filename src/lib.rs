@@ -3,6 +3,7 @@ pub mod builtin;
 mod checks;
 pub mod client;
 pub mod config;
+pub mod context;
 pub mod input;
 mod mcp;
 pub mod plan;
@@ -10,6 +11,7 @@ pub mod policy;
 pub mod session;
 mod storage;
 pub mod tools;
+pub mod usage;
 pub mod webhook;
 
 pub use agent::{
@@ -22,6 +24,7 @@ pub use config::{
     AgentSettings, ApiSettings, AppConfig, CheckConfig, EnvironmentConfig, McpApprovalMode,
     McpServerConfig, McpToolCatalog, McpTransport, WebhookSettings,
 };
+pub use context::CompactionRecord;
 pub use input::{build_user_input, InputPart};
 pub use mcp::McpPool;
 pub use plan::{PlanStep, RunOutcome, StepStatus, TaskPlan};
@@ -30,4 +33,5 @@ pub use session::{Session, SessionBinding, SessionData, SessionStatus};
 pub use tools::{
     ContextualToolHandler, ToolContext, ToolDefinition, ToolHandler, ToolRegistry, TOOL_SEARCH_NAME,
 };
+pub use usage::{ApiOperation, StopReason, UsageSummary};
 pub use webhook::{serve as serve_webhook, JobState, JobStatus};

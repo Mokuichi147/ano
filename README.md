@@ -15,6 +15,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI agent です。Response
 - 名前付き実行環境を選べる署名付き Webhook と、中止・タイムアウトに対応する非同期ジョブ API
 - 実行環境に閉じたファイル一覧・分割読み取り・全文検索・書き込み
 - 保存して別プロセスから再開できる会話セッション
+- 長い会話の自動圧縮と、使用トークン数に応じた実行停止
 - 工程と進捗を保存する作業計画、未完了工程の継続、完了・中断理由の区別
 - 競合検出付きの正確なファイル編集と、登録済み検証コマンドの実行
 - CLI からの名前付き環境選択、JSON 出力、ログ量の切り替え
@@ -59,7 +60,7 @@ cargo run --quiet -- run --environment default --json --quiet "実装の概要�
 
 `--environment` は workspace・書き込み権限・MCP承認方針・model・instructions を読み込みます。`--workspace`、`--allow-writes`、`--auto-approve-mcp` との併用はエラーです。`--model` でモデルを変更でき、`--non-interactive` で環境の自動承認も無効にできます。環境指定なしの場合は従来どおり `--workspace` と `--allow-writes` を使えます。
 
-通常の進捗ログは tool 名・状態、モデルの途中経過、作業計画の更新を stderr に出力します。引数・ファイル内容を含む完全なログが必要なら `--verbose`、進捗を省略するなら `--quiet` を指定します。`--json` の出力は `text`、`response_id`、`events`、`outcome`、`plan` を含みます（`events` には引数と結果も含まれます）。実行エラーは非ゼロ終了コードと stderr のエラーを返します。実行が正常終了しても未完了の工程が残る場合があるため、自動処理では `outcome` も確認してください。
+通常の進捗ログは tool 名・状態、モデルの途中経過、作業計画の更新を stderr に出力します。引数・ファイル内容を含む完全なログが必要なら `--verbose`、進捗を省略するなら `--quiet` を指定します。`--json` の出力は `text`、`response_id`、`events`、`outcome`、`plan`、`usage`、`stop_reason` を含みます（`events` には引数と結果も含まれます）。実行エラーは非ゼロ終了コードと stderr のエラーを返します。実行が正常終了しても未完了の工程が残る場合があるため、自動処理では `outcome` も確認してください。
 
 `OPENAI_BASE_URL` を設定すると、Responses API のモックサーバーなどへ向けられます。モデルは `config.toml` または `--model` で変更できます。音声入力を使う場合は、`input_audio` をサポートするモデル（例: `gpt-audio-1.5`）を指定してください。現在の公式モデル一覧では、一般的な画像対応モデルと音声専用モデルの対応範囲が異なるため、画像と音声を同一リクエストで使う場合は、両方をサポートするモデルを選んでください。
 
@@ -76,6 +77,28 @@ cargo run -- session .ano/review.json
 セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。プロセスが中断して `running` のまま残ったセッションは、workspace の状態を確認してから `--recover-session` を付けて再開します。エラーを記録して `failed` になったセッションは通常どおり再開できます。実行中のセッションは sidecar lock で二重起動を防ぎ、壊れたファイルはそのまま残して読み込みを拒否します。`.ano/` は既定で Git 管理対象外です。
 
 並行 tool 実行では、応答が返ったものから個別に保存します。遅い tool の待機中に中断しても、保存済みの結果は復元時に維持されます。結果未記録の呼び出しだけを「結果不明」として扱い、自動再実行しません。外部操作の完了と結果保存の間に停止した場合は結果不明になるため、再試行前に実際の状態を確認します。
+
+## 長い会話とトークン上限
+
+会話が増えたら自動で圧縮し、1回の実行で使うトークン数に応じて止められます。どちらも既定では無効です。
+
+```powershell
+cargo run -- run --environment default --session .ano/work.json --compact-threshold-bytes 262144 --max-total-tokens 100000 "調査、修正、検証を続けて"
+```
+
+`[agent]` の `compact_threshold_bytes` と `max_total_tokens` でも指定でき、Webhook ジョブにも適用されます。CLI の同名オプションはその実行だけ設定を上書きします。
+
+圧縮は [OpenAI の `/responses/compact`](https://developers.openai.com/api/docs/guides/compaction) を使用します。各応答とその tool 結果を揃えてから次の応答の前に実行し、返されたメッセージと暗号化された状態をすべて保持して `store:false` で再送します。セッションなしでも、圧縮を有効にすると実行中の履歴を保持します。対応していない互換 endpoint・モデルでは有効にしないでください。圧縮要求が失敗した場合は元の履歴を残してエラーで終了します。
+
+セッションの履歴を置き換える前に、同じディレクトリへ `<session名>.archive-<UUID>.json` を保存します。`ano session PATH --json` で `compactions` の記録と退避ファイル名を確認できます。作業計画と累積使用量は圧縮後も別に保持します。退避ファイルは自動削除しないため、不要になったものは利用者が整理してください。
+
+圧縮のしきい値は履歴 JSON のバイト数（1024〜16777216）で、トークン数やモデルのコンテキスト上限を保証するものではありません。暗号化された出力のバイト数が増える場合もあるため、再圧縮には前回の出力から少なくともしきい値の半分の履歴増加を必要とします。大きいファイルは分割して読み、コンテキスト上限に達する前に圧縮する設定にします。セッションファイルの32 MiB上限は引き続き適用されます。
+
+`usage` は今回の実行で返された API 使用量の合計です。`input_tokens`・`output_tokens`・`total_tokens`、その内訳の `cached_input_tokens`・`reasoning_tokens`、応答回数 `responses`、圧縮回数 `compactions`、使用量が欠落・不正だった回数 `unreported_requests` を返します。圧縮の使用量も合算し、キャッシュ・推論分は総量へ二重加算しません。`ano session PATH` はセッション全体の累積値を表示します。HTTP リトライや応答を受信できなかった要求の消費量は計測できないため、課金額の算出には使えません。
+
+`max_total_tokens` は応答受信後に確認するソフト上限です。1回の応答で超過することがあり、送信済みのリモート MCP 操作も取り消せません。上限に達したら次の API 要求と新しいローカル tool の実行を止め、`stop_reason: "token_limit"`、`outcome: "incomplete"` を返します。上限指定中に使用量を取得できなければ `"usage_unavailable"` で止めます。未実行の tool call は未実行として履歴を閉じ、セッションは同じファイルから再開できる状態にします。上限は実行ごとに数え直し、以前の操作を自動で再実行しません。応答生成前に圧縮だけで止まった場合の `response_id` は空文字列です。
+
+通常の最終回答では `stop_reason: "final_answer"`、`max_tool_rounds` の最終応答では `"round_limit"` を返します。停止理由と作業の完了状態は別なので、両方を確認してください。Webhook の終了結果にも `usage` と `stop_reason` が入り、トークン上限による停止は計画の有無にかかわらず `incomplete` になります。
 
 ## 作業計画と完了判定
 

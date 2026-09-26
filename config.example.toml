@@ -26,6 +26,12 @@ max_parallel_tool_calls = 8
 # Timeout for one local tool or direct MCP tool call.
 # Named workspace_check commands use their own timeout_secs instead.
 tool_timeout_secs = 120
+# Opt-in history compaction; requires this model/endpoint to support /responses/compact.
+# Threshold is serialized history bytes, not tokens. Sessions archive the old history.
+# compact_threshold_bytes = 262144
+# Soft per-run limit for reported input + output tokens, including compaction.
+# Checked after API responses; a response can overshoot. Missing usage stops the run.
+# max_total_tokens = 100000
 # Omit instructions to use the built-in plan -> inspect -> edit -> verify workflow.
 # Setting this replaces the built-in instructions.
 # instructions = "Your task-agent instructions..."

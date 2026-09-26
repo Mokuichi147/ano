@@ -58,6 +58,18 @@ struct RunArgs {
     )]
     recover_session: bool,
 
+    #[arg(
+        long,
+        help = "Compact history after this many JSON bytes (requires /responses/compact)"
+    )]
+    compact_threshold_bytes: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Stop after a response reaches this run's observed token budget (soft limit)"
+    )]
+    max_total_tokens: Option<u64>,
+
     #[arg(value_name = "PROMPT")]
     prompt: Option<String>,
 
@@ -183,6 +195,12 @@ async fn main() -> Result<()> {
                 if !session.plan.steps.is_empty() {
                     println!("{}", format_plan(&session.plan));
                 }
+                println!(
+                    "Usage: {} reported tokens, {} requests without usage\nCompactions: {}",
+                    session.usage.total_tokens,
+                    session.usage.unreported_requests,
+                    session.compactions.len()
+                );
             }
             Ok(())
         }
@@ -367,6 +385,12 @@ fn resolve_run_context(
     args: &RunArgs,
 ) -> Result<(AgentSettings, UserPolicy, ToolContext, bool)> {
     let mut settings = config.agent.clone();
+    if let Some(threshold) = args.compact_threshold_bytes {
+        settings.compact_threshold_bytes = Some(threshold);
+    }
+    if let Some(limit) = args.max_total_tokens {
+        settings.max_total_tokens = Some(limit);
+    }
     let mut policy = config.policy_for(user_id, &args.disabled_tools);
     let mut checks = Default::default();
     let (workspace, allow_writes, auto_approve_mcp) = if let Some(name) = &args.environment {
@@ -440,6 +464,8 @@ fn format_result(result: &AgentResult, as_json: bool) -> Result<String> {
             "events": result.events,
             "outcome": result.outcome,
             "plan": result.plan,
+            "usage": result.usage,
+            "stop_reason": result.stop_reason,
         }))?)
     } else {
         if result.outcome == RunOutcome::Completed {
@@ -482,6 +508,16 @@ fn read_stdin_prompt() -> Result<Option<String>> {
 
 fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
+        AgentEvent::ContextCompacted { record, .. } => eprintln!(
+            "[context compacted] {} -> {} bytes",
+            record.before_bytes, record.after_bytes
+        ),
+        AgentEvent::UsageUpdated { usage, .. } => {
+            if verbose {
+                eprintln!("[usage] {} reported tokens", usage.total_tokens);
+            }
+        }
+        AgentEvent::ExecutionStopped { reason, .. } => eprintln!("[execution stopped] {reason:?}"),
         AgentEvent::PlanUpdated { plan, .. } => eprintln!("{}", format_plan(plan)),
         AgentEvent::AssistantProgress { text, .. } => eprintln!("[agent] {text}"),
         AgentEvent::LocalToolCall {
@@ -560,6 +596,7 @@ fn print_tool_result(label: &str, output: &serde_json::Value, verbose: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ano::{StopReason, UsageSummary};
 
     fn run_args(arguments: &[&str]) -> RunArgs {
         let cli =
@@ -631,6 +668,8 @@ mod tests {
     #[test]
     fn json_output_round_trips_text_and_events() {
         let result = AgentResult {
+            usage: UsageSummary::default(),
+            stop_reason: StopReason::FinalAnswer,
             outcome: RunOutcome::Completed,
             plan: TaskPlan::default(),
             text: "日本語の結果\n\"quoted\"".into(),

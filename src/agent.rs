@@ -1,12 +1,14 @@
 use crate::{
     client::OpenAiClient,
     config::{AgentSettings, McpTransport},
+    context::{compacted_history, compaction_due, CompactionRecord},
     input::{build_user_input, InputPart},
     mcp::{ConnectedMcpServer, DirectMcpTool, McpPool, McpRuntime},
     plan::{task_plan_definition, RunOutcome, TaskPlan, TASK_PLAN_NAME},
     policy::UserPolicy,
     session::{Session, SessionStatus},
     tools::{ToolContext, ToolDefinition, ToolRegistry, TOOL_SEARCH_NAME},
+    usage::{ApiOperation, StopReason, UsageSummary},
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -38,6 +40,19 @@ impl RunRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEvent {
+    ContextCompacted {
+        round: usize,
+        record: CompactionRecord,
+    },
+    UsageUpdated {
+        round: usize,
+        operation: ApiOperation,
+        usage: UsageSummary,
+    },
+    ExecutionStopped {
+        reason: StopReason,
+        usage: UsageSummary,
+    },
     PlanUpdated {
         round: usize,
         plan: TaskPlan,
@@ -101,6 +116,8 @@ pub struct AgentResult {
     pub events: Vec<AgentEvent>,
     pub outcome: RunOutcome,
     pub plan: TaskPlan,
+    pub usage: UsageSummary,
+    pub stop_reason: StopReason,
 }
 
 #[derive(Debug, Clone)]
@@ -305,6 +322,17 @@ impl Agent {
             session.begin_turn(&user_input)?;
         }
         let mcp_runtime = self.mcp.runtime(&self.policy).await?;
+        let mut local_history = (session.is_none()
+            && self.settings.compact_threshold_bytes.is_some())
+        .then(|| user_input.as_array().cloned().unwrap_or_default());
+        let mut previous_compact_size = session.as_ref().and_then(|session| {
+            session
+                .data()
+                .compactions
+                .last()
+                .map(|record| record.after_bytes)
+        });
+        let mut usage = UsageSummary::default();
         let mut next_input = user_input;
         let mut previous_response_id: Option<String> = None;
         let events = EventLog::new(self.event_listener.as_ref());
@@ -317,6 +345,50 @@ impl Agent {
         let mut active = ActiveTools::default();
 
         for round in 0..self.settings.max_tool_rounds {
+            let history = session
+                .as_ref()
+                .map(|session| &session.data().history)
+                .or(local_history.as_ref());
+            if let Some(history) = history {
+                if compaction_due(
+                    history,
+                    self.settings.compact_threshold_bytes,
+                    previous_compact_size,
+                )? {
+                    let compact_payload = json!({"model":self.settings.model,"instructions":self.settings.instructions,"input":history});
+                    let compacted = self.client.compact_response(&compact_payload).await
+                        .context("context compaction failed; original history was preserved. Disable compact_threshold_bytes for endpoints without /responses/compact support")?;
+                    observe_usage(
+                        &compacted,
+                        ApiOperation::Compaction,
+                        round,
+                        &mut usage,
+                        session.as_deref_mut(),
+                        &events,
+                    )?;
+                    let (history, mut record) = compacted_history(
+                        &compacted,
+                        compact_payload["input"].as_array().unwrap(),
+                    )?;
+                    previous_compact_size = Some(record.after_bytes);
+                    if let Some(session) = session.as_deref_mut() {
+                        record = session.replace_history(history, record)?;
+                    } else {
+                        local_history = Some(history);
+                    }
+                    events.push(AgentEvent::ContextCompacted { round, record });
+                    if let Some(reason) = usage.stop_reason(self.settings.max_total_tokens) {
+                        return finish_limited(
+                            reason,
+                            usage,
+                            previous_response_id.unwrap_or_default(),
+                            &plan,
+                            events,
+                            session,
+                        );
+                    }
+                }
+            }
             // Keep the request budget bounded while reserving one response to
             // explain completed work and any outstanding steps to the user.
             let final_round = round + 1 == self.settings.max_tool_rounds;
@@ -336,7 +408,7 @@ impl Agent {
             let mut payload = json!({
                 "model": self.settings.model,
                 "instructions": instructions,
-                "input": match &session { Some(session) => Value::Array(session.data().history.clone()), None => next_input.clone() },
+                "input": match &session { Some(session) => Value::Array(session.data().history.clone()), None => local_history.as_ref().map(|history| Value::Array(history.clone())).unwrap_or_else(|| next_input.clone()) },
                 "tools": tools,
                 "tool_choice": if final_round { "none" } else { "auto" },
                 "parallel_tool_calls": self.settings.parallel_tool_calls,
@@ -344,7 +416,7 @@ impl Agent {
             if let Some(max_output_tokens) = self.settings.max_output_tokens {
                 payload["max_output_tokens"] = json!(max_output_tokens);
             }
-            if session.is_some() {
+            if session.is_some() || local_history.is_some() {
                 payload["store"] = json!(false);
                 payload["include"] = json!(["reasoning.encrypted_content"]);
             } else if let Some(previous_response_id) = &previous_response_id {
@@ -352,6 +424,14 @@ impl Agent {
             }
 
             let response = self.client.create_response(&payload).await?;
+            observe_usage(
+                &response,
+                ApiOperation::Response,
+                round,
+                &mut usage,
+                session.as_deref_mut(),
+                &events,
+            )?;
             if let Some(error) = response["error"]["message"].as_str() {
                 bail!("Responses API returned an error: {error}");
             }
@@ -401,6 +481,12 @@ impl Agent {
             if let Some(session) = session.as_deref_mut() {
                 session.record_response(&response_id, &items)?;
             }
+            if let Some(history) = local_history.as_mut() {
+                history.extend_from_slice(&items);
+            }
+            if let Some(reason) = usage.stop_reason(self.settings.max_total_tokens) {
+                return finish_limited(reason, usage, response_id, &plan, events, session);
+            }
             let (continuation, selection) = self
                 .handle_output_items(
                     &items,
@@ -415,6 +501,9 @@ impl Agent {
                     session.as_deref_mut(),
                 )
                 .await?;
+            if let Some(history) = local_history.as_mut() {
+                history.extend_from_slice(&continuation);
+            }
             if let Some(selection) = selection {
                 active = selection;
             }
@@ -457,6 +546,9 @@ impl Agent {
                     if let Some(session) = session.as_deref_mut() {
                         session.record_runtime_input(&next_input)?;
                     }
+                    if let Some(history) = local_history.as_mut() {
+                        history.extend(next_input.as_array().unwrap().iter().cloned());
+                    }
                     events.push(AgentEvent::AssistantProgress {
                         round,
                         text: "Continuing unfinished plan steps.".into(),
@@ -472,6 +564,12 @@ impl Agent {
                     events: events.into_events(),
                     outcome,
                     plan,
+                    usage,
+                    stop_reason: if final_round {
+                        StopReason::RoundLimit
+                    } else {
+                        StopReason::FinalAnswer
+                    },
                 });
             }
 
@@ -1156,6 +1254,66 @@ fn parse_arguments(value: &Value) -> Result<Value> {
         bail!("tool arguments must be a JSON object");
     }
     Ok(arguments)
+}
+
+fn observe_usage(
+    response: &Value,
+    operation: ApiOperation,
+    round: usize,
+    usage: &mut UsageSummary,
+    session: Option<&mut Session>,
+    events: &EventLog<'_>,
+) -> Result<()> {
+    let delta = UsageSummary::from_response(response, operation);
+    usage.add(&delta);
+    if let Some(session) = session {
+        session.record_usage(&delta)?;
+    }
+    if delta.unreported_requests == 0 {
+        events.push(AgentEvent::UsageUpdated {
+            round,
+            operation,
+            usage: usage.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn finish_limited(
+    reason: StopReason,
+    usage: UsageSummary,
+    response_id: String,
+    plan: &Mutex<TaskPlan>,
+    events: EventLog<'_>,
+    session: Option<&mut Session>,
+) -> Result<AgentResult> {
+    let text = match reason {
+        StopReason::UsageUnavailable => "Execution stopped because the provider did not return valid token usage, so the configured token budget cannot be enforced. No further local tool calls were started. Completed actions are not undone.",
+        _ => "Execution stopped at the configured token budget. No further local tool calls were started. Completed actions are not undone; unfinished work can be continued in another run.",
+    }.to_string();
+    if let Some(session) = session {
+        session.skip_pending(&text)?;
+        session.record_runtime_input(
+            &json!([{"role":"user","content":[{"type":"input_text","text":text}]}]),
+        )?;
+        session.complete()?;
+    }
+    events.push(AgentEvent::ExecutionStopped {
+        reason,
+        usage: usage.clone(),
+    });
+    Ok(AgentResult {
+        text,
+        response_id,
+        events: events.into_events(),
+        outcome: RunOutcome::Incomplete,
+        plan: plan
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone(),
+        usage,
+        stop_reason: reason,
+    })
 }
 
 fn compact_output(value: &Value) -> String {

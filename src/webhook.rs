@@ -5,7 +5,7 @@ use crate::{
     input::InputPart,
     mcp::McpPool,
     tools::{ToolContext, ToolRegistry},
-    AgentResult, ApprovalHandler, RunOutcome, TaskPlan,
+    AgentResult, ApprovalHandler, RunOutcome, StopReason, TaskPlan, UsageSummary,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -116,6 +116,8 @@ pub struct JobStatus {
     pub cancellation_requested: bool,
     pub result: Option<String>,
     pub plan: Option<TaskPlan>,
+    pub usage: Option<UsageSummary>,
+    pub stop_reason: Option<StopReason>,
     pub error: Option<String>,
 }
 
@@ -127,7 +129,7 @@ struct JobRecord {
 }
 
 enum JobOutcome {
-    Completed(String, TaskPlan),
+    Completed(Box<AgentResult>),
     Failed(String),
     Cancelled,
     TimedOut,
@@ -322,6 +324,8 @@ async fn create_job(
                     cancellation_requested: false,
                     result: None,
                     plan: None,
+                    usage: None,
+                    stop_reason: None,
                     error: None,
                 },
                 cancel,
@@ -451,7 +455,7 @@ async fn run_job(
             Duration::from_secs(state.config.webhook.job_timeout_secs),
             execute_job(&state, request),
         ) => match outcome {
-            Ok(Ok(result)) => JobOutcome::Completed(result.text, result.plan),
+            Ok(Ok(result)) => JobOutcome::Completed(Box::new(result)),
             Ok(Err(error)) => JobOutcome::Failed(format!("{error:#}")),
             Err(_) => JobOutcome::TimedOut,
         },
@@ -576,14 +580,16 @@ async fn finish(state: &WebhookState, id: &str, outcome: JobOutcome) {
         status.finished_at_unix = Some(unix_now());
         job.finished_at = Some(Instant::now());
         match outcome {
-            JobOutcome::Completed(text, plan) => {
-                status.status = match plan.outcome() {
+            JobOutcome::Completed(result) => {
+                status.status = match result.outcome {
                     RunOutcome::Completed => JobState::Completed,
                     RunOutcome::Blocked => JobState::Blocked,
                     RunOutcome::Incomplete => JobState::Incomplete,
                 };
-                status.result = Some(text);
-                status.plan = Some(plan);
+                status.result = Some(result.text);
+                status.plan = Some(result.plan);
+                status.usage = Some(result.usage);
+                status.stop_reason = Some(result.stop_reason);
             }
             JobOutcome::Failed(error) => {
                 status.status = JobState::Failed;
@@ -699,7 +705,10 @@ mod tests {
         shutdown_jobs, unix_now, verify_signature, HmacSha256, JobOutcome, JobRecord, JobState,
         JobStatus, WebhookState,
     };
-    use crate::{AppConfig, OpenAiClient, TaskPlan, ToolRegistry};
+    use crate::{
+        AgentResult, AppConfig, OpenAiClient, RunOutcome, StopReason, TaskPlan, ToolRegistry,
+        UsageSummary,
+    };
     use axum::{
         body::{to_bytes, Bytes},
         extract::{Path, State},
@@ -718,6 +727,18 @@ mod tests {
         sync::{watch, Notify, RwLock, Semaphore},
         task::{JoinHandle, JoinSet},
     };
+
+    fn completed(text: &str, plan: TaskPlan) -> JobOutcome {
+        JobOutcome::Completed(Box::new(AgentResult {
+            text: text.into(),
+            response_id: "test_response".into(),
+            events: Vec::new(),
+            outcome: plan.outcome(),
+            plan,
+            usage: UsageSummary::default(),
+            stop_reason: StopReason::FinalAnswer,
+        }))
+    }
 
     fn state() -> WebhookState {
         let mut config = AppConfig::default();
@@ -1008,12 +1029,7 @@ mod tests {
         )
         .await;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
-        finish(
-            &state,
-            &id,
-            JobOutcome::Completed("late result".into(), TaskPlan::default()),
-        )
-        .await;
+        finish(&state, &id, completed("late result", TaskPlan::default())).await;
         finish(&state, &id, JobOutcome::Failed("later error".into())).await;
         let status = &state.jobs.read().await[&id].snapshot;
         assert_eq!(status.status, JobState::Cancelled);
@@ -1029,19 +1045,9 @@ mod tests {
         let old = enqueue(&state, "first").await;
         let new = enqueue(&state, "second").await;
         let pending = enqueue(&state, "third").await;
-        finish(
-            &state,
-            &old,
-            JobOutcome::Completed("old".into(), TaskPlan::default()),
-        )
-        .await;
+        finish(&state, &old, completed("old", TaskPlan::default())).await;
         assert_eq!(state.jobs.read().await.len(), 3);
-        finish(
-            &state,
-            &new,
-            JobOutcome::Completed("new".into(), TaskPlan::default()),
-        )
-        .await;
+        finish(&state, &new, completed("new", TaskPlan::default())).await;
         let jobs = state.jobs.read().await;
         assert_eq!(jobs.len(), 2);
         assert!(!jobs.contains_key(&old));
@@ -1061,12 +1067,7 @@ mod tests {
             let id = enqueue(&state, &format!("needs more work: {step_status}")).await;
             let plan: TaskPlan = serde_json::from_value(json!({"revision":1,"explanation":null,
                 "steps":[{"id":"verify","description":"Run tests","status":step_status,"detail":"Test database unavailable"}]})).unwrap();
-            finish(
-                &state,
-                &id,
-                JobOutcome::Completed("Still needs verification".into(), plan),
-            )
-            .await;
+            finish(&state, &id, completed("Still needs verification", plan)).await;
             let snapshot = state.jobs.read().await[&id].snapshot.clone();
             assert_eq!(snapshot.status, expected);
             assert!(snapshot.status.is_finished());
@@ -1078,6 +1079,33 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(state.jobs.read().await[&id].snapshot.status, expected);
         }
+        shutdown_jobs(&state).await;
+    }
+
+    #[tokio::test]
+    async fn token_limit_is_incomplete_even_without_pending_plan_steps() {
+        let mut state = state();
+        state.job_slots = Arc::new(Semaphore::new(0));
+        let state = Arc::new(state);
+        let id = enqueue(&state, "limited work").await;
+        let JobOutcome::Completed(mut result) = completed("Budget exhausted", TaskPlan::default())
+        else {
+            unreachable!()
+        };
+        result.outcome = RunOutcome::Incomplete;
+        result.stop_reason = StopReason::TokenLimit;
+        result.usage = UsageSummary {
+            responses: 1,
+            input_tokens: 90,
+            output_tokens: 10,
+            total_tokens: 100,
+            ..Default::default()
+        };
+        finish(&state, &id, JobOutcome::Completed(result)).await;
+        let snapshot = state.jobs.read().await[&id].snapshot.clone();
+        assert_eq!(snapshot.status, JobState::Incomplete);
+        assert_eq!(snapshot.stop_reason, Some(StopReason::TokenLimit));
+        assert_eq!(snapshot.usage.unwrap().total_tokens, 100);
         shutdown_jobs(&state).await;
     }
 
@@ -1142,6 +1170,8 @@ mod tests {
                     cancellation_requested: false,
                     result: None,
                     plan: None,
+                    usage: None,
+                    stop_reason: None,
                     error: None,
                 },
                 cancel: watch::channel(false).0,
@@ -1195,6 +1225,8 @@ mod tests {
                 cancellation_requested: false,
                 result: None,
                 plan: None,
+                usage: None,
+                stop_reason: None,
                 error: None,
             },
             cancel: watch::channel(false).0,

@@ -75,6 +75,10 @@ pub struct AgentSettings {
     pub max_parallel_tool_calls: usize,
     /// Timeout for a single local tool or direct MCP tool call.
     pub tool_timeout_secs: u64,
+    /// Opt-in standalone compaction; measured as serialized history bytes.
+    pub compact_threshold_bytes: Option<usize>,
+    /// Soft per-run token limit, checked after each returned API response.
+    pub max_total_tokens: Option<u64>,
 }
 
 impl Default for AgentSettings {
@@ -88,6 +92,8 @@ impl Default for AgentSettings {
             parallel_tool_calls: true,
             max_parallel_tool_calls: 8,
             tool_timeout_secs: 120,
+            compact_threshold_bytes: None,
+            max_total_tokens: None,
         }
     }
 }
@@ -103,6 +109,15 @@ impl AgentSettings {
     }
 
     pub fn validate(&self) -> Result<()> {
+        if self
+            .compact_threshold_bytes
+            .is_some_and(|value| !(1024..=16 * 1024 * 1024).contains(&value))
+        {
+            bail!("agent.compact_threshold_bytes must be between 1024 and 16777216");
+        }
+        if self.max_total_tokens == Some(0) {
+            bail!("agent.max_total_tokens must be greater than zero");
+        }
         if self.model.trim().is_empty() {
             bail!("agent.model must not be empty");
         }
@@ -692,6 +707,9 @@ mod tests {
         for text in [
             "[agent]\nmodel = '  '",
             "[agent]\nmax_output_tokens = 0",
+            "[agent]\nmax_total_tokens = 0",
+            "[agent]\ncompact_threshold_bytes = 1023",
+            "[agent]\ncompact_threshold_bytes = 16777217",
             "[api]\ntimeout_secs = 0",
             "[webhook]\njob_timeout_secs = 0",
             "[environments.project]\nmodel = ''",
