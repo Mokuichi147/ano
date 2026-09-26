@@ -5,7 +5,11 @@ use crate::{
     domain::plan::{RunOutcome, TaskPlan},
 };
 use anyhow::Result;
-use termimad::{Alignment, MadSkin};
+use std::{
+    io::IsTerminal,
+    sync::{LazyLock, Mutex, PoisonError},
+};
+use termimad::{crossterm::style::Stylize, Alignment, MadSkin};
 
 /// How the answer text is printed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,35 +170,96 @@ pub(super) fn format_plan(plan: &TaskPlan) -> String {
     lines.join("\n")
 }
 
+/// Progress lines held back while an approval prompt waits for an answer,
+/// or `None` when lines are printed right away.
+static HELD_PROGRESS: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+macro_rules! progress {
+    ($($argument:tt)*) => {
+        emit_progress(format!($($argument)*))
+    };
+}
+
+fn emit_progress(line: String) {
+    let mut held = HELD_PROGRESS.lock().unwrap_or_else(PoisonError::into_inner);
+    match held.as_mut() {
+        Some(lines) => lines.push(line),
+        None => print_progress(&line),
+    }
+}
+
+/// Print a progress line dimmed on a terminal, so that it stands apart from
+/// the answer. `NO_COLOR` turns the styling off.
+fn print_progress(line: &str) {
+    static DIM: LazyLock<bool> = LazyLock::new(|| {
+        std::io::stderr().is_terminal()
+            && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty())
+    });
+    if *DIM {
+        for line in line.lines() {
+            eprintln!("{}", line.dim());
+        }
+    } else {
+        eprintln!("{line}");
+    }
+}
+
+/// Holds progress lines back until the guard is dropped, so that events of
+/// tool calls running in parallel do not break into a prompt.
+pub(super) struct ProgressHold(());
+
+impl ProgressHold {
+    pub(super) fn start() -> Self {
+        HELD_PROGRESS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get_or_insert_with(Vec::new);
+        Self(())
+    }
+}
+
+impl Drop for ProgressHold {
+    fn drop(&mut self) {
+        let held = HELD_PROGRESS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        for line in held.into_iter().flatten() {
+            print_progress(&line);
+        }
+    }
+}
+
 pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
     match event {
-        AgentEvent::ContextCompacted { record, .. } => eprintln!(
+        AgentEvent::ContextCompacted { record, .. } => progress!(
             "[context compacted] {} -> {} bytes",
-            record.before_bytes, record.after_bytes
+            record.before_bytes,
+            record.after_bytes
         ),
         AgentEvent::UsageUpdated { usage, .. } => {
             if verbose {
-                eprintln!("[usage] {} reported tokens", usage.total_tokens);
+                progress!("[usage] {} reported tokens", usage.total_tokens);
             }
         }
-        AgentEvent::ExecutionStopped { reason, .. } => eprintln!("[execution stopped] {reason:?}"),
-        AgentEvent::PlanUpdated { plan, .. } => eprintln!("{}", format_plan(plan)),
-        AgentEvent::AssistantProgress { text, .. } => eprintln!("[agent] {text}"),
-        AgentEvent::ReasoningSummary { text, .. } => eprintln!("[reasoning] {text}"),
+        AgentEvent::ExecutionStopped { reason, .. } => progress!("[execution stopped] {reason:?}"),
+        AgentEvent::PlanUpdated { plan, .. } => progress!("{}", format_plan(plan)),
+        AgentEvent::AssistantProgress { text, .. } => progress!("[agent] {text}"),
+        AgentEvent::ReasoningSummary { text, .. } => progress!("[reasoning] {text}"),
         AgentEvent::LocalToolCall {
             name, arguments, ..
         } => {
             if verbose {
-                eprintln!("[tool] {name} {arguments}");
+                progress!("[tool] {name} {arguments}");
             } else {
-                eprintln!("[tool] {name}");
+                progress!("[tool] {name}");
             }
         }
         AgentEvent::LocalToolResult { name, output, .. } => {
             print_tool_result(&format!("[tool result] {name}"), output, verbose);
         }
         AgentEvent::LocalToolBlocked { name, .. } => {
-            eprintln!("[tool blocked] {name}");
+            progress!("[tool blocked] {name}");
         }
         AgentEvent::LocalToolApproval {
             name,
@@ -204,8 +269,8 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
         } => {
             let decision = if *approved { "approved" } else { "denied" };
             match reason {
-                Some(reason) => eprintln!("[approval] {name} -> {decision} ({reason})"),
-                None => eprintln!("[approval] {name} -> {decision}"),
+                Some(reason) => progress!("[approval] {name} -> {decision} ({reason})"),
+                None => progress!("[approval] {name} -> {decision}"),
             }
         }
         AgentEvent::McpToolCall {
@@ -215,9 +280,9 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
             ..
         } => {
             if verbose {
-                eprintln!("[mcp call] {server_label}:{tool_name} {arguments}");
+                progress!("[mcp call] {server_label}:{tool_name} {arguments}");
             } else {
-                eprintln!("[mcp call] {server_label}:{tool_name}");
+                progress!("[mcp call] {server_label}:{tool_name}");
             }
         }
         AgentEvent::McpToolResult {
@@ -237,7 +302,7 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
             tool_name,
             ..
         } => {
-            eprintln!("[mcp blocked] {server_label}:{tool_name}");
+            progress!("[mcp blocked] {server_label}:{tool_name}");
         }
         AgentEvent::McpApproval {
             server_label,
@@ -249,13 +314,13 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
             let decision = if *approved { "approved" } else { "denied" };
             match reason {
                 Some(reason) => {
-                    eprintln!("[mcp approval] {server_label}:{tool_name} -> {decision} ({reason})")
+                    progress!("[mcp approval] {server_label}:{tool_name} -> {decision} ({reason})")
                 }
-                None => eprintln!("[mcp approval] {server_label}:{tool_name} -> {decision}"),
+                None => progress!("[mcp approval] {server_label}:{tool_name} -> {decision}"),
             }
         }
         AgentEvent::ToolSearch { query, results, .. } => {
-            eprintln!("[tool search] {query} -> {} result(s)", results.len());
+            progress!("[tool search] {query} -> {} result(s)", results.len());
         }
         AgentEvent::SubagentStarted { task, .. } => {
             let summary = task.lines().next().unwrap_or_default();
@@ -263,7 +328,7 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
                 Some((index, _)) => format!("{}…", &summary[..index]),
                 None => summary.to_string(),
             };
-            eprintln!("[subagent] started: {summary}");
+            progress!("[subagent] started: {summary}");
         }
         AgentEvent::SubagentFinished {
             outcome,
@@ -271,23 +336,23 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
             error,
             ..
         } => match (outcome, error) {
-            (_, Some(error)) => eprintln!("[subagent] failed: {error}"),
-            (Some(outcome), None) => eprintln!(
+            (_, Some(error)) => progress!("[subagent] failed: {error}"),
+            (Some(outcome), None) => progress!(
                 "[subagent] finished ({outcome:?}, {} tokens)",
                 usage.total_tokens
             ),
-            (None, None) => eprintln!("[subagent] finished"),
+            (None, None) => progress!("[subagent] finished"),
         },
     }
 }
 
 fn print_tool_result(label: &str, output: &serde_json::Value, verbose: bool) {
     if verbose {
-        eprintln!("{label} {output}");
+        progress!("{label} {output}");
     } else if output.get("error").is_some() || output["isError"] == true {
-        eprintln!("{label} error");
+        progress!("{label} error");
     } else {
-        eprintln!("{label} received");
+        progress!("{label} received");
     }
 }
 
@@ -295,6 +360,18 @@ fn print_tool_result(label: &str, output: &serde_json::Value, verbose: bool) {
 mod tests {
     use super::*;
     use crate::domain::usage::{StopReason, UsageSummary};
+
+    #[test]
+    fn progress_is_held_while_a_prompt_waits() {
+        let hold = ProgressHold::start();
+        progress!("[mcp result] web:search received");
+        assert_eq!(
+            HELD_PROGRESS.lock().unwrap().as_deref(),
+            Some(&["[mcp result] web:search received".to_string()][..])
+        );
+        drop(hold);
+        assert!(HELD_PROGRESS.lock().unwrap().is_none());
+    }
 
     #[test]
     fn json_output_round_trips_text_and_events() {

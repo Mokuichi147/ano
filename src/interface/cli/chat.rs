@@ -7,7 +7,10 @@
 //! Ctrl+C cancels the running turn and keeps the conversation; `/exit` or
 //! end of input quits.
 
-use super::{output, prepare_agent, AgentOptions, PreparedAgent};
+use super::{
+    output::{self, ProgressHold},
+    prepare_agent, AgentOptions, PreparedAgent,
+};
 use crate::{
     application::{
         agent::RunRequest,
@@ -117,6 +120,8 @@ struct ChatApproval {
 #[async_trait]
 impl ApprovalHandler for ChatApproval {
     async fn approve(&self, request: McpApprovalRequest) -> Result<bool> {
+        // Events of tool calls running in parallel wait until the answer.
+        let _hold = ProgressHold::start();
         eprintln!(
             "\n{}: {}\nArguments: {}",
             request.heading(),
@@ -240,7 +245,8 @@ pub(super) async fn run(
             match outcome {
                 Some(Ok(result)) => {
                     let format = output::TextFormat::for_stdout(options.raw);
-                    println!("{}\n", output::format_result(&result, false, format)?)
+                    // A blank line sets the answer apart from the progress.
+                    println!("\n{}\n", output::format_result(&result, false, format)?)
                 }
                 // The failure is recorded in the conversation; the next turn
                 // can continue from it.

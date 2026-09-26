@@ -9,11 +9,19 @@ use crate::application::ports::{
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
+use regex::Regex;
 use serde_json::{json, Value};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{Arc, LazyLock},
+};
 use tokio::sync::Mutex;
 
 const MAX_FIELD_CHARS: usize = 4000;
+/// Reviews whose answer cannot be read are asked once more: local models
+/// occasionally break the requested format, for example by dropping the
+/// closing brace of the JSON object.
+const REVIEW_ATTEMPTS: usize = 2;
 
 const REVIEW_INSTRUCTIONS: &str = "You review tool calls that an autonomous AI agent wants to make, and decide whether each may run without asking the user.
 
@@ -92,8 +100,14 @@ impl AutoApproval {
             }},
             "store": false,
         });
-        let response = self.client.create_response(&payload).await?;
-        parse_review(&response)
+        let mut attempt = 1;
+        loop {
+            let response = self.client.create_response(&payload).await?;
+            match parse_review(&response) {
+                Err(_) if attempt < REVIEW_ATTEMPTS => attempt += 1,
+                result => return result,
+            }
+        }
     }
 }
 
@@ -166,7 +180,42 @@ fn parse_review(response: &Value) -> Result<(Verdict, String)> {
             return review_from_json(&value);
         }
     }
-    review_from_prose(&text)
+    if let Some(review) = review_from_fields(&text) {
+        return Ok(review);
+    }
+    review_from_prose(&text).with_context(|| {
+        let answer = text.trim();
+        if answer.is_empty() {
+            "reviewer gave an empty answer".to_string()
+        } else {
+            let excerpt: String = answer.chars().take(200).collect();
+            format!("could not read the reviewer answer {excerpt:?}")
+        }
+    })
+}
+
+/// Read the fields of a JSON object that is malformed, such as one missing
+/// its closing brace. Only a single, unambiguous `"decision"` field counts.
+fn review_from_fields(text: &str) -> Option<(Verdict, String)> {
+    static DECISION: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#""decision"\s*:\s*"([A-Za-z]+)""#).unwrap());
+    static REASON: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r#""reason"\s*:\s*"((?:[^"\\]|\\.)*)"#).unwrap());
+    let mut decisions = DECISION.captures_iter(text);
+    let decision = decisions.next()?[1].to_ascii_lowercase();
+    if decisions.next().is_some() {
+        return None;
+    }
+    let verdict = verdict_from(&decision).ok()?;
+    let reason = REASON
+        .captures(text)
+        .map(|captures| {
+            let escaped = &captures[1];
+            serde_json::from_str::<String>(&format!("\"{escaped}\""))
+                .unwrap_or_else(|_| escaped.to_string())
+        })
+        .unwrap_or_default();
+    Some((verdict, reason_from(&reason)))
 }
 
 fn review_from_json(value: &Value) -> Result<(Verdict, String)> {
@@ -228,24 +277,33 @@ mod tests {
     use crate::application::approval::{AlwaysApprove, DenyApproval};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// Returns a fixed reviewer response and records the requests.
+    /// Returns the given reviewer responses in turn, repeating the last
+    /// one, and records the requests.
     struct FakeReviewer {
-        reply: Result<Value, String>,
+        replies: Vec<Result<Value, String>>,
         requests: std::sync::Mutex<Vec<Value>>,
     }
 
     impl FakeReviewer {
         fn new(reply: Result<Value, String>) -> Arc<Self> {
+            Self::sequence(vec![reply])
+        }
+
+        fn sequence(replies: Vec<Result<Value, String>>) -> Arc<Self> {
             Arc::new(Self {
-                reply,
+                replies,
                 requests: std::sync::Mutex::new(Vec::new()),
             })
         }
 
-        fn text(text: &str) -> Arc<Self> {
-            Self::new(Ok(json!({"output": [{"type": "message", "content": [
+        fn answer(text: &str) -> Result<Value, String> {
+            Ok(json!({"output": [{"type": "message", "content": [
                 {"type": "output_text", "text": text}
-            ]}]})))
+            ]}]}))
+        }
+
+        fn text(text: &str) -> Arc<Self> {
+            Self::new(Self::answer(text))
         }
     }
 
@@ -256,8 +314,10 @@ mod tests {
         }
 
         async fn create_response(&self, payload: &Value) -> Result<Value> {
-            self.requests.lock().unwrap().push(payload.clone());
-            self.reply.clone().map_err(anyhow::Error::msg)
+            let mut requests = self.requests.lock().unwrap();
+            requests.push(payload.clone());
+            let index = (requests.len() - 1).min(self.replies.len() - 1);
+            self.replies[index].clone().map_err(anyhow::Error::msg)
         }
 
         async fn compact_response(&self, _payload: &Value) -> Result<Value> {
@@ -350,6 +410,47 @@ mod tests {
             assert_eq!(decision.approved, approved, "{answer}");
             assert_eq!(decision.reason.as_deref(), Some(reason));
         }
+    }
+
+    #[tokio::test]
+    async fn malformed_json_is_read_or_reviewed_again() {
+        // The closing brace is missing: the decision field still counts.
+        let approval = AutoApproval::new(
+            FakeReviewer::text(r#"{"decision": "allow", "reason": "A read-only \"search\"."#),
+            "reviewer",
+            Arc::new(DenyApproval),
+        );
+        let decision = approval.decide(request("search")).await.unwrap();
+        assert!(decision.approved);
+        assert_eq!(
+            decision.reason.as_deref(),
+            Some(r#"auto: A read-only "search"."#)
+        );
+
+        // Conflicting decisions are not guessed at.
+        assert_eq!(
+            review_from_fields(r#"{"decision": "allow", "decision": "deny""#),
+            None
+        );
+
+        // An unreadable answer is reviewed once more before asking the user.
+        let reviewer = FakeReviewer::sequence(vec![
+            FakeReviewer::answer(""),
+            FakeReviewer::answer(r#"{"decision":"allow","reason":"Read-only."}"#),
+        ]);
+        let approval = AutoApproval::new(reviewer.clone(), "reviewer", Arc::new(DenyApproval));
+        assert!(approval.decide(request("search")).await.unwrap().approved);
+        assert_eq!(reviewer.requests.lock().unwrap().len(), 2);
+
+        let reviewer = FakeReviewer::text("The call looks fine.");
+        let approval = AutoApproval::new(reviewer.clone(), "reviewer", Arc::new(DenyApproval));
+        let decision = approval.decide(request("search")).await.unwrap();
+        assert!(!decision.approved);
+        assert_eq!(reviewer.requests.lock().unwrap().len(), REVIEW_ATTEMPTS);
+        assert!(decision
+            .reason
+            .unwrap()
+            .contains(r#"could not read the reviewer answer "The call looks fine.""#));
     }
 
     #[tokio::test]

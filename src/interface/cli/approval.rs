@@ -1,5 +1,6 @@
 //! Terminal prompt for tool approval.
 
+use super::output::ProgressHold;
 use crate::application::ports::{ApprovalHandler, McpApprovalRequest};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -24,6 +25,7 @@ impl ApprovalHandler for InteractiveApproval {
         );
         tokio::task::spawn_blocking(move || {
             use std::io::{self, Write};
+            let _hold = ProgressHold::start();
             eprint!("{prompt}");
             io::stderr().flush().ok();
             let mut answer = String::new();
