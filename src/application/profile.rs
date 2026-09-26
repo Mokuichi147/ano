@@ -52,6 +52,7 @@ impl ExecutionProfile {
                 environment: name.to_string(),
                 workspace: environment.workspace.clone(),
                 allow_writes: environment.allow_writes,
+                allow_exec: environment.allow_exec,
                 checks: environment.checks.clone(),
             },
             approval_mode: environment.effective_approval_mode(),

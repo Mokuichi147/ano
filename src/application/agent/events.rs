@@ -1,6 +1,6 @@
 use crate::domain::{
     compaction::CompactionRecord,
-    plan::TaskPlan,
+    plan::{RunOutcome, TaskPlan},
     usage::{ApiOperation, StopReason, UsageSummary},
 };
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,15 @@ pub enum AgentEvent {
         round: usize,
         name: String,
     },
+    /// Decision on a local tool that requires approval, such as
+    /// `workspace_exec`.
+    LocalToolApproval {
+        round: usize,
+        name: String,
+        approved: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     McpToolCall {
         round: usize,
         server_label: String,
@@ -80,6 +89,19 @@ pub enum AgentEvent {
         round: usize,
         query: String,
         results: Vec<Value>,
+    },
+    /// `delegate_task` started a sub-agent. Its own events follow through
+    /// the event listener but are not part of this run's events.
+    SubagentStarted {
+        round: usize,
+        task: String,
+    },
+    SubagentFinished {
+        round: usize,
+        outcome: Option<RunOutcome>,
+        usage: UsageSummary,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
     },
 }
 

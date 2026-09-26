@@ -1,9 +1,11 @@
 //! Built-in local tools: `echo`, `unix_time`, workspace file access and
-//! management, and configured validation checks.
+//! management, configured validation checks, and shell commands.
 
 mod checks;
+mod exec;
 mod glob;
 mod manage;
+mod process;
 mod walk;
 mod workspace;
 
@@ -15,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Register the built-in tools into `registry`.
 pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
     checks::register(registry)?;
+    exec::register(registry)?;
     registry.register(
         non_strict_definition(
             "echo",

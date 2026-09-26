@@ -20,8 +20,11 @@ use crate::{
     },
     config::AppConfig,
     domain::{
-        approval::ApprovalMode, mcp::McpTransport, plan::TASK_PLAN_NAME, session::SessionBinding,
-        tool::ToolContext,
+        approval::ApprovalMode,
+        mcp::McpTransport,
+        plan::TASK_PLAN_NAME,
+        session::SessionBinding,
+        tool::{ToolContext, DELEGATE_TASK_NAME, WORKSPACE_EXEC_NAME},
     },
     infrastructure::{
         mcp::McpPool, openai::OpenAiClient, project::read_project_instructions,
@@ -143,6 +146,13 @@ struct AgentOptions {
         help = "Allow workspace_write, workspace_edit, workspace_move, and workspace_delete to modify files"
     )]
     allow_writes: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "environment",
+        help = "Allow workspace_exec to run shell commands in the workspace (each command needs approval)"
+    )]
+    allow_exec: bool,
 
     #[arg(
         long,
@@ -284,8 +294,12 @@ fn list_tools(
     registry: &ToolRegistry,
 ) -> Result<()> {
     let mut policy = config.policy_for(user_id, &args.disabled_tools);
-    if let Some(name) = &args.environment {
-        let environment = config.environment_for(name)?;
+    let environment = args
+        .environment
+        .as_deref()
+        .map(|name| config.environment_for(name))
+        .transpose()?;
+    if let Some(environment) = environment {
         policy = policy.with_restrictions(
             environment.allowed_tools.as_deref(),
             &environment.disabled_tools,
@@ -295,8 +309,29 @@ fn list_tools(
     if !policy.is_disabled(TASK_PLAN_NAME) {
         println!("  task_plan - Read/update this run's task plan (always available)");
     }
+    if !policy.is_disabled(DELEGATE_TASK_NAME) {
+        println!(
+            "  delegate_task - Hand a task to a sub-agent with a fresh context (always available)"
+        );
+    }
     for definition in registry.definitions(&policy) {
-        println!("  {} - {}", definition.name, definition.description);
+        let mut notes = Vec::new();
+        if definition.name == WORKSPACE_EXEC_NAME {
+            notes.push(match environment {
+                Some(environment) if environment.allow_exec => "enabled by allow_exec",
+                Some(_) => "unavailable: allow_exec is not set",
+                None => "needs --allow-exec",
+            });
+        }
+        if definition.requires_approval {
+            notes.push("requires approval");
+        }
+        let notes = if notes.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", notes.join(", "))
+        };
+        println!("  {}{notes} - {}", definition.name, definition.description);
     }
     println!("\nMCP servers:");
     for server in &config.mcp_servers {
@@ -499,6 +534,7 @@ fn resolve_run_context(
                     }
                 }),
                 allow_writes: args.allow_writes,
+                allow_exec: args.allow_exec,
                 checks: Default::default(),
             },
             approval_mode: config.agent.approval_mode,
@@ -616,6 +652,7 @@ mod tests {
         assert_eq!(context.environment, "review");
         assert!(context.workspace.is_none());
         assert!(!context.allow_writes);
+        assert!(!context.allow_exec);
         assert_eq!(approval_mode, ApprovalMode::Deny);
     }
 
@@ -624,6 +661,7 @@ mod tests {
         for extra in [
             vec!["--workspace", "."],
             vec!["--allow-writes"],
+            vec!["--allow-exec"],
             vec!["--auto-approve-mcp"],
         ] {
             let mut arguments = vec!["ano", "run", "--environment", "review", "review"];

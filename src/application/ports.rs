@@ -63,9 +63,23 @@ pub trait ConversationStore: Send + Sync {
     fn fail(&mut self, error: &str) -> Result<()>;
 }
 
+/// What an approval request is for.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ApprovalSource {
+    /// A tool on an MCP server (`server_label` names the server).
+    #[default]
+    Mcp,
+    /// A local tool registered with `ToolDefinition::with_approval`, such as
+    /// `workspace_exec`. `server_label` is empty.
+    LocalTool,
+}
+
+/// A request to approve one tool call. Despite the name, it also covers local
+/// tools that require approval; see `source`.
 #[derive(Debug, Clone, Default)]
 pub struct McpApprovalRequest {
     pub approval_request_id: String,
+    pub source: ApprovalSource,
     pub server_label: String,
     pub tool_name: String,
     pub arguments: Value,
@@ -78,6 +92,25 @@ pub struct McpApprovalRequest {
     pub review: Option<String>,
 }
 
+impl McpApprovalRequest {
+    /// The tool as shown to the user: `server:tool` for MCP, the name for
+    /// local tools.
+    pub fn target(&self) -> String {
+        match self.source {
+            ApprovalSource::Mcp => format!("{}:{}", self.server_label, self.tool_name),
+            ApprovalSource::LocalTool => self.tool_name.clone(),
+        }
+    }
+
+    /// A heading for approval prompts.
+    pub fn heading(&self) -> &'static str {
+        match self.source {
+            ApprovalSource::Mcp => "MCP approval requested",
+            ApprovalSource::LocalTool => "Tool approval requested",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalDecision {
     pub approved: bool,
@@ -85,7 +118,8 @@ pub struct ApprovalDecision {
     pub reason: Option<String>,
 }
 
-/// Decides whether an MCP tool call may run.
+/// Decides whether an MCP tool call, or a local tool that requires approval,
+/// may run.
 #[async_trait]
 pub trait ApprovalHandler: Send + Sync {
     async fn approve(&self, request: McpApprovalRequest) -> Result<bool>;

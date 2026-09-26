@@ -30,6 +30,7 @@ const DEFAULT_READ_BYTES: u64 = 64 * 1024;
 const MAX_LIST_ENTRIES: usize = 1000;
 const MAX_SEARCH_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_SEARCH_LINE_BYTES: usize = 2000;
+const MAX_READ_LINES: u64 = 100_000;
 
 /// Register the workspace file tools into `registry`.
 pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
@@ -54,12 +55,14 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     registry.register_contextual(
         non_strict_definition(
             "workspace_read",
-            "Read a UTF-8 text file in bounded pages (64 KiB by default). Continue from next_offset when truncated; offsets count bytes.",
+            "Read a UTF-8 text file in bounded pages (64 KiB by default). Continue from next_offset when truncated; offsets count bytes. Alternatively pass start_line (1-based, e.g. a line number from workspace_search) and optionally max_lines to read whole lines; continue from next_line. Line reads always return the full-file sha256.",
             json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Relative file path"},
                     "offset": {"type": "integer", "minimum": 0, "description": "Byte offset from a previous next_offset; defaults to 0"},
+                    "start_line": {"type": "integer", "minimum": 1, "description": "First line to read (1-based); cannot be combined with offset"},
+                    "max_lines": {"type": "integer", "minimum": 1, "maximum": MAX_READ_LINES, "description": "Lines to read from start_line; the page also stops at max_bytes"},
                     "max_bytes": {"type": "integer", "minimum": 1, "maximum": MAX_FILE_BYTES}
                 },
                 "required": ["path"],
@@ -179,7 +182,7 @@ pub(super) fn optional_string<'a>(
     }
 }
 
-fn optional_integer(
+pub(super) fn optional_integer(
     arguments: &Value,
     name: &str,
     default: u64,
@@ -284,12 +287,24 @@ async fn workspace_read(arguments: Value, context: &ToolContext) -> Result<Value
         1,
         MAX_FILE_BYTES,
     )?;
-    let offset = optional_integer(&arguments, "offset", 0, 0, u64::MAX)?;
     let file = existing_workspace_path(context, &relative).await?;
     let metadata = tokio::fs::metadata(&file).await?;
     if !metadata.is_file() {
         bail!("workspace path is not a file: {}", relative.display());
     }
+    if arguments
+        .get("start_line")
+        .is_some_and(|value| !value.is_null())
+    {
+        if arguments
+            .get("offset")
+            .is_some_and(|value| !value.is_null())
+        {
+            bail!("pass either offset or start_line, not both");
+        }
+        return read_lines(&arguments, &relative, &file, metadata.len(), max_bytes).await;
+    }
+    let offset = optional_integer(&arguments, "offset", 0, 0, u64::MAX)?;
     if offset > metadata.len() {
         bail!("offset exceeds the {} byte file size", metadata.len());
     }
@@ -319,6 +334,52 @@ async fn workspace_read(arguments: Value, context: &ToolContext) -> Result<Value
         "path": relative, "bytes": content.len(), "content": content,
         "offset": offset, "total_bytes": metadata.len(), "truncated": truncated,
         "next_offset": next_offset, "sha256": sha256
+    }))
+}
+
+/// `workspace_read` by line numbers. The whole file is read, so the result
+/// can report the line count and the full-file hash.
+async fn read_lines(
+    arguments: &Value,
+    relative: &Path,
+    file: &Path,
+    total_bytes: u64,
+    max_bytes: u64,
+) -> Result<Value> {
+    let start_line = optional_integer(arguments, "start_line", 1, 1, u64::MAX)?;
+    let max_lines = optional_integer(arguments, "max_lines", MAX_READ_LINES, 1, MAX_READ_LINES)?;
+    if total_bytes > MAX_FILE_BYTES {
+        bail!("file is larger than {MAX_FILE_BYTES} bytes; read it by offset instead");
+    }
+    let text = String::from_utf8(tokio::fs::read(file).await?)
+        .context("workspace file is not valid UTF-8")?;
+    let lines = text.split_inclusive('\n').collect::<Vec<_>>();
+    let total_lines = lines.len() as u64;
+    if start_line > total_lines.max(1) {
+        bail!("start_line exceeds the file's {total_lines} lines");
+    }
+    let mut content = String::new();
+    let mut end_line = start_line - 1;
+    for line in lines
+        .iter()
+        .skip(start_line as usize - 1)
+        .take(max_lines as usize)
+    {
+        if (content.len() + line.len()) as u64 > max_bytes {
+            if content.is_empty() {
+                bail!("line {start_line} is longer than max_bytes; read it by offset instead");
+            }
+            break;
+        }
+        content.push_str(line);
+        end_line += 1;
+    }
+    let truncated = end_line < total_lines;
+    Ok(json!({
+        "path": relative, "content": content, "start_line": start_line,
+        "end_line": end_line, "total_lines": total_lines, "truncated": truncated,
+        "next_line": truncated.then_some(end_line + 1), "total_bytes": total_bytes,
+        "sha256": digest(text.as_bytes())
     }))
 }
 
@@ -1001,6 +1062,57 @@ mod tests {
             .unwrap();
         assert_eq!(end["content"], "");
         assert_eq!(end["truncated"], false);
+    }
+
+    #[tokio::test]
+    async fn line_reads_page_through_whole_lines_with_the_file_hash() {
+        let workspace = tempfile::tempdir().unwrap();
+        let content = "one\n二\nthree\nfour";
+        std::fs::write(workspace.path().join("note.txt"), content).unwrap();
+        let registry = registry();
+        let context = context(workspace.path(), false);
+        let read = |arguments: serde_json::Value| {
+            let registry = registry.clone();
+            let context = context.clone();
+            async move {
+                registry
+                    .execute_with_context("workspace_read", arguments, &context)
+                    .await
+            }
+        };
+
+        let page = read(json!({"path": "note.txt", "start_line": 2, "max_lines": 2}))
+            .await
+            .unwrap();
+        assert_eq!(page["content"], "二\nthree\n");
+        assert_eq!(page["start_line"], 2);
+        assert_eq!(page["end_line"], 3);
+        assert_eq!(page["total_lines"], 4);
+        assert_eq!(page["next_line"], 4);
+        assert_eq!(page["sha256"], super::digest(content.as_bytes()));
+
+        let last = read(json!({"path": "note.txt", "start_line": 4}))
+            .await
+            .unwrap();
+        assert_eq!(last["content"], "four");
+        assert_eq!(last["truncated"], false);
+        assert!(last["next_line"].is_null());
+
+        // The byte budget ends a page at a line boundary.
+        let bounded = read(json!({"path": "note.txt", "start_line": 1, "max_bytes": 9}))
+            .await
+            .unwrap();
+        assert_eq!(bounded["content"], "one\n二\n");
+        assert_eq!(bounded["next_line"], 3);
+
+        for arguments in [
+            json!({"path": "note.txt", "start_line": 5}),
+            json!({"path": "note.txt", "start_line": 0}),
+            json!({"path": "note.txt", "start_line": 1, "offset": 0}),
+            json!({"path": "note.txt", "start_line": 3, "max_bytes": 2}),
+        ] {
+            assert!(read(arguments.clone()).await.is_err(), "{arguments}");
+        }
     }
 
     #[tokio::test]

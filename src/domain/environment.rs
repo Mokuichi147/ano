@@ -18,6 +18,9 @@ pub struct EnvironmentConfig {
     pub allowed_tools: Option<Vec<String>>,
     pub disabled_tools: Vec<String>,
     pub allow_writes: bool,
+    /// Let `workspace_exec` run arbitrary commands in the workspace. Every
+    /// command still goes through the approval mode.
+    pub allow_exec: bool,
     /// Shorthand for `approval_mode = "allow"`. Kept for existing configs.
     pub auto_approve_mcp: bool,
     /// How MCP approval requests are answered in this environment. Defaults

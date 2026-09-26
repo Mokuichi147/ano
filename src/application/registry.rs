@@ -124,6 +124,14 @@ impl ToolRegistry {
         tools.keys().cloned().collect()
     }
 
+    pub fn definition(&self, name: &str) -> Option<ToolDefinition> {
+        self.tools
+            .read()
+            .ok()?
+            .get(name)
+            .map(|tool| tool.definition.clone())
+    }
+
     pub fn is_registered(&self, name: &str) -> bool {
         self.tools
             .read()

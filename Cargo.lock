@@ -33,6 +33,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "libc",
  "mime_guess",
  "pulldown-cmark",
  "regex",

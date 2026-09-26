@@ -9,6 +9,15 @@ use std::{collections::BTreeMap, path::PathBuf};
 /// Reserved internal tool used to lazily discover registered tools.
 pub const TOOL_SEARCH_NAME: &str = "tool_search";
 
+/// Reserved runtime tool that hands a focused task to a sub-agent.
+pub const DELEGATE_TASK_NAME: &str = "delegate_task";
+
+/// Built-in tool that runs shell commands when `ToolContext::allow_exec` is set.
+pub const WORKSPACE_EXEC_NAME: &str = "workspace_exec";
+/// Default and maximum `timeout_secs` of one `workspace_exec` command.
+pub const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 120;
+pub const EXEC_MAX_TIMEOUT_SECS: u64 = 1800;
+
 /// Prefix reserved for aliases of directly connected MCP tools.
 pub const DIRECT_MCP_PREFIX: &str = "mcp__";
 
@@ -19,6 +28,10 @@ pub struct ToolDefinition {
     pub parameters: Value,
     #[serde(default = "default_strict")]
     pub strict: bool,
+    /// Ask the run's approval handler before every call, as for MCP tools
+    /// that require approval. Not sent to the model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub requires_approval: bool,
 }
 
 fn default_strict() -> bool {
@@ -32,7 +45,14 @@ impl ToolDefinition {
             description: description.into(),
             parameters,
             strict: true,
+            requires_approval: false,
         }
+    }
+
+    /// Require approval before each call of this tool.
+    pub fn with_approval(mut self) -> Self {
+        self.requires_approval = true;
+        self
     }
 
     pub fn as_response_tool(&self) -> Value {
@@ -57,7 +77,17 @@ pub struct ToolContext {
     pub environment: String,
     pub workspace: Option<PathBuf>,
     pub allow_writes: bool,
+    /// Whether `workspace_exec` may run commands in the workspace.
+    pub allow_exec: bool,
     pub checks: BTreeMap<String, CheckConfig>,
+}
+
+impl ToolContext {
+    /// Whether a registered tool can run in this context at all. Tools that
+    /// cannot are neither offered to the model nor sent for approval.
+    pub fn can_run(&self, tool_name: &str) -> bool {
+        tool_name != WORKSPACE_EXEC_NAME || self.allow_exec
+    }
 }
 
 /// Enforce the Responses API function name rules (`^[A-Za-z0-9_-]{1,64}$`).
@@ -69,6 +99,9 @@ pub fn validate_tool_name(name: &str) -> Result<()> {
     }
     if name == TOOL_SEARCH_NAME {
         bail!("tool name '{TOOL_SEARCH_NAME}' is reserved for lazy discovery");
+    }
+    if name == DELEGATE_TASK_NAME {
+        bail!("tool name '{DELEGATE_TASK_NAME}' is reserved for sub-agents");
     }
     if name.starts_with(DIRECT_MCP_PREFIX) {
         bail!("tool name prefix '{DIRECT_MCP_PREFIX}' is reserved for MCP tools");

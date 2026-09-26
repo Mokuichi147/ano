@@ -40,7 +40,8 @@ tool_timeout_secs = 120
 # Files in the workspace root appended to the instructions of every run.
 # Missing files are skipped; set [] to disable.
 # project_instructions = ["AGENTS.md"]
-# How MCP approval requests are answered for runs without --environment:
+# How approval requests (MCP calls and workspace_exec commands) are answered
+# for runs without --environment:
 # "ask" (prompt on the terminal), "auto" (a reviewer model allows low-risk calls
 # within the user's request, denies clearly unsafe ones, and asks about the
 # rest), "allow", or "deny". Override with `--approval-mode`.
@@ -84,6 +85,9 @@ allow_writes = false
 # workspace = "/path/to/my-repository"
 # allowed_tools = ["workspace_*"]
 # allow_writes = true
+# Let workspace_exec run shell commands. Commands are not sandboxed; each one
+# is judged by approval_mode ("deny" by default in environments).
+# allow_exec = true
 # approval_mode = "auto"
 # Explicit opt-in: configured checks execute with ano's OS permissions and
 # may run project code. Register only commands for workspaces you trust.

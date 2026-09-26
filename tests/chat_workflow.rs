@@ -62,7 +62,10 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
         .unwrap();
     let mut stdin = child.stdin.take().unwrap();
     stdin
-        .write_all("最初の質問\n/usage\n\n/unknown\n次の質問\n/exit\nnot sent\n".as_bytes())
+        .write_all(
+            "最初の質問\n/usage\n\n/unknown\n次の質問\n/clear\n三番目\n/exit\nnot sent\n"
+                .as_bytes(),
+        )
         .await
         .unwrap();
     drop(stdin);
@@ -87,7 +90,7 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
     assert!(stderr.contains("tokens"), "{stderr}");
 
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2, "/exit must stop before later lines");
+    assert_eq!(requests.len(), 3, "/exit must stop before later lines");
     assert_eq!(
         requests[0]["reasoning"],
         json!({"effort": "high", "summary": "auto"})
@@ -113,4 +116,9 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
         .collect::<Vec<_>>();
     assert_eq!(texts, vec!["最初の質問", "opaque", "answer 1", "次の質問"]);
     assert_eq!(requests[1]["store"], false);
+
+    // /clear starts a new conversation.
+    let history = requests[2]["input"].as_array().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["content"][0]["text"], "三番目");
 }

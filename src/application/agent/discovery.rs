@@ -6,7 +6,7 @@ use crate::domain::{
     mcp::{McpServerConfig, McpTransport},
     plan::TASK_PLAN_NAME,
     policy::UserPolicy,
-    tool::{ToolDefinition, TOOL_SEARCH_NAME},
+    tool::{ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -23,10 +23,13 @@ pub(super) struct ActiveTools {
 }
 
 impl Agent {
+    /// The tools of the next request. `depth` is the nesting of the run;
+    /// only the top-level run may delegate to a sub-agent.
     pub(super) fn response_tools(
         &self,
         active: &ActiveTools,
         mcp_runtime: &McpRuntime,
+        depth: usize,
     ) -> Result<Vec<Value>> {
         let mut tools = Vec::new();
         if !self.policy.is_disabled(TOOL_SEARCH_NAME) {
@@ -34,6 +37,9 @@ impl Agent {
         }
         if !self.policy.is_disabled(TASK_PLAN_NAME) {
             tools.push(task_plan_definition().as_response_tool());
+        }
+        if depth == 0 && !self.policy.is_disabled(DELEGATE_TASK_NAME) {
+            tools.push(delegate_task_definition().as_response_tool());
         }
 
         tools.extend(
@@ -77,10 +83,13 @@ impl Agent {
         Ok(tools)
     }
 
+    /// Tools that cannot run in `context` (see `ToolContext::can_run`) are
+    /// left out of the results.
     pub(super) fn search_tools(
         &self,
         arguments: &Value,
         mcp_runtime: &McpRuntime,
+        context: &ToolContext,
     ) -> Result<ToolSearchSelection> {
         let query = arguments["query"]
             .as_str()
@@ -95,6 +104,9 @@ impl Agent {
 
         let mut candidates = Vec::new();
         for definition in self.registry.definitions(&self.policy) {
+            if !context.can_run(&definition.name) {
+                continue;
+            }
             if let Some(score) = score_candidate(
                 &terms,
                 &[definition.name.clone(), definition.description.clone()],
@@ -285,6 +297,21 @@ fn truncate_description(description: &str) -> String {
         result.push('…');
     }
     result
+}
+
+pub fn delegate_task_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        DELEGATE_TASK_NAME,
+        "Hand a self-contained task to a sub-agent that works in a fresh conversation with the same tools and permissions, and get back its final report. Use it for broad investigation (such as surveying many files) or independent parts of the work, so your own context stays focused. The sub-agent cannot see this conversation: state the goal, the relevant context, and what the report should contain. Several calls in one response run in parallel; do not give parallel sub-agents overlapping file edits. Sub-agents cannot delegate further.",
+        json!({
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Complete instructions for the sub-agent"}
+            },
+            "required": ["task"],
+            "additionalProperties": false
+        }),
+    )
 }
 
 pub fn task_plan_definition() -> ToolDefinition {

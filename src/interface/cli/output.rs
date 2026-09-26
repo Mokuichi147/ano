@@ -196,6 +196,18 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
         AgentEvent::LocalToolBlocked { name, .. } => {
             eprintln!("[tool blocked] {name}");
         }
+        AgentEvent::LocalToolApproval {
+            name,
+            approved,
+            reason,
+            ..
+        } => {
+            let decision = if *approved { "approved" } else { "denied" };
+            match reason {
+                Some(reason) => eprintln!("[approval] {name} -> {decision} ({reason})"),
+                None => eprintln!("[approval] {name} -> {decision}"),
+            }
+        }
         AgentEvent::McpToolCall {
             server_label,
             tool_name,
@@ -245,6 +257,27 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
         AgentEvent::ToolSearch { query, results, .. } => {
             eprintln!("[tool search] {query} -> {} result(s)", results.len());
         }
+        AgentEvent::SubagentStarted { task, .. } => {
+            let summary = task.lines().next().unwrap_or_default();
+            let summary = match summary.char_indices().nth(80) {
+                Some((index, _)) => format!("{}…", &summary[..index]),
+                None => summary.to_string(),
+            };
+            eprintln!("[subagent] started: {summary}");
+        }
+        AgentEvent::SubagentFinished {
+            outcome,
+            usage,
+            error,
+            ..
+        } => match (outcome, error) {
+            (_, Some(error)) => eprintln!("[subagent] failed: {error}"),
+            (Some(outcome), None) => eprintln!(
+                "[subagent] finished ({outcome:?}, {} tokens)",
+                usage.total_tokens
+            ),
+            (None, None) => eprintln!("[subagent] finished"),
+        },
     }
 }
 

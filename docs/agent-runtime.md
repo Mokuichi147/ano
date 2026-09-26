@@ -1,6 +1,6 @@
 # エージェントの実行モデル
 
-`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・セッション・圧縮・トークン上限・作業計画・tool の遅延公開について説明します。
+`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェントについて説明します。
 
 - [実行ループと上限](#実行ループと上限)
 - [会話セッション](#会話セッション)
@@ -8,6 +8,7 @@
 - [トークン使用量と上限](#トークン使用量と上限)
 - [作業計画と完了判定](#作業計画と完了判定)
 - [tool の遅延公開（tool_search）](#tool-の遅延公開tool_search)
+- [サブエージェント（delegate_task）](#サブエージェントdelegate_task)
 
 ## 実行ループと上限
 
@@ -24,7 +25,7 @@
 | `project_instructions` | `["AGENTS.md"]` | instructions の末尾に追加する workspace 内のファイル（[README](../README.md#プロジェクト指示agentsmd)） |
 
 - モデルが不正な JSON 引数を返した場合や tool が失敗した場合は、実行を中断せず、エラー内容を tool 出力としてモデルへ返します。
-- `workspace_check` は検証ごとの `timeout_secs` を使い、結果回収のために外側の制限へ5秒の猶予を設けます。
+- `workspace_check` は検証ごとの `timeout_secs`、`workspace_exec` は呼び出しの `timeout_secs`（既定120秒、最大1800秒）を使い、結果回収のために外側の制限へ5秒の猶予を設けます。
 - API が `incomplete`・`failed` などの未完了状態を返した場合は、その応答のローカル tool を実行せずにエラーにします。回答拒否（refusal）の説明文はそのまま利用者へ返します。
 - 並行実行した結果は、応答内の順序でモデルへ返します。MCP の承認要求は並行実行中でも1件ずつ承認ハンドラーへ渡すため、CLI の確認プロンプトが混ざることはありません。
 - `Agent::with_event_listener` を使うと、tool 呼び出しなどのイベントを発生時点で受け取れます（CLI はこれで進行状況を stderr に表示し、Webhook はジョブの `recent_events` に記録します）。
@@ -128,10 +129,23 @@ ano run --environment default --session .ano/work.json \
 
 ## tool の遅延公開（tool_search）
 
-tool や MCP server を大量に登録しても、初回の Responses 要求へ全件は送りません。最初は固定サイズの `tool_search` と `task_plan` だけを公開し、モデルが capability を検索した後、上位 `tool_discovery_limit` 件だけを次の要求へ追加します。登録数に比例して tool schema が毎回トークンを消費することを防ぐためです。
+tool や MCP server を大量に登録しても、初回の Responses 要求へ全件は送りません。最初は固定サイズの `tool_search`・`task_plan`・`delegate_task` だけを公開し、モデルが capability を検索した後、上位 `tool_discovery_limit` 件だけを次の要求へ追加します。登録数に比例して tool schema が毎回トークンを消費することを防ぐためです。
 
 - モデルは `tool_search` に「issue を一覧」「ファイルを読む」のように capability を渡します。必要な tool が変わったら再度検索し、新しい検索結果が前回の選択を置き換えます。
 - 同じ応答内で `tool_search` を呼んだ場合、その結果は次の要求から有効になります。同時に呼ばれた他の tool は、モデルがその応答を生成した時点の tool 一覧で判定します。
 - ユーザーの `disabled_tools` に含まれる tool は要求から除外します。万一モデルが直接呼び出しても、実行前にもう一度確認して `tool_disabled` を返します。
 
 MCP tool の検索対象は [MCP の設定](mcp.md#検索カタログtool_catalog) を参照してください。
+
+## サブエージェント（delegate_task）
+
+`delegate_task` は、まとまった作業を新しい会話のサブエージェントに任せ、その最終回答（報告）だけを受け取るランタイム tool です。多数のファイルを調べる調査や独立した部分作業を切り出すことで、元の会話の履歴を小さく保てます。
+
+- サブエージェントは同じモデル設定・tool・ポリシー・workspace・承認ハンドラーで動き、元の会話は見えません。モデルは `task` に目的・前提・報告してほしい内容を書きます。
+- サブエージェントはさらに委任できません（1段まで）。1つの応答に複数の `delegate_task` があれば、他の tool と同じく並行実行します。
+- tool 出力は `report`（最終回答）・`outcome`・`stop_reason` と、サブエージェントが作った計画（`plan`）です。失敗した場合は `subagent_failed` として元のエージェントに返し、実行は続けます。
+- 承認の判定には、モデルが書いた `task` ではなく元のユーザーの依頼文を使います。
+- 使用量は元の実行の `usage` に合算し、セッションにも記録します。`max_total_tokens` はサブエージェントの開始時点の残りを上限として引き継ぎます。並行実行したサブエージェントは互いの消費を見ないため、上限を超えることがあります（ソフト上限）。
+- サブエージェントのイベントは `Agent::with_event_listener` のリスナーに通知されます（CLI の進捗表示にも出ます）が、元の実行の `events` には `subagent_started` / `subagent_finished` だけが入ります。
+- `disabled_tools = ["delegate_task"]` または `--disable-tool delegate_task` で無効化できます。
+

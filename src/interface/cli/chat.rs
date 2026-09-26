@@ -31,6 +31,7 @@ use tokio::sync::oneshot;
 const HELP: &str = "Commands:
   /plan    show the task plan
   /usage   show token usage of this conversation
+  /clear   start a new conversation (not with --session)
   /help    show this help
   /exit    quit (also Ctrl+D)
 Ctrl+C cancels the running turn and keeps the conversation.";
@@ -117,8 +118,10 @@ struct ChatApproval {
 impl ApprovalHandler for ChatApproval {
     async fn approve(&self, request: McpApprovalRequest) -> Result<bool> {
         eprintln!(
-            "\nMCP approval requested: {}:{}\nArguments: {}",
-            request.server_label, request.tool_name, request.arguments
+            "\n{}: {}\nArguments: {}",
+            request.heading(),
+            request.target(),
+            request.arguments
         );
         if let Some(review) = &request.review {
             eprintln!("Automatic review: {review}");
@@ -159,9 +162,10 @@ pub(super) async fn run(
         }),
         interactive,
     )?;
+    let persistent = session.is_some();
     let mut store: Box<dyn ConversationStore> = match session {
         Some(session) => Box::new(session),
-        None => Box::new(MemoryConversation::new(binding)),
+        None => Box::new(MemoryConversation::new(binding.clone())),
     };
     if interactive {
         eprintln!("ano chat — type /help for commands, /exit or Ctrl+D to quit.");
@@ -196,6 +200,15 @@ pub(super) async fn run(
                 }
                 "/plan" => {
                     eprintln!("{}", output::format_plan(&store.data().plan));
+                    continue;
+                }
+                "/clear" => {
+                    if persistent {
+                        eprintln!("/clear is not available with --session; start ano chat with another session file instead");
+                    } else {
+                        store = Box::new(MemoryConversation::new(binding.clone()));
+                        eprintln!("(started a new conversation)");
+                    }
                     continue;
                 }
                 "/usage" => {

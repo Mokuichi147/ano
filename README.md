@@ -18,14 +18,16 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - Responses API の function call を自動実行し、複数の呼び出しを並行処理
 - 工程と進捗を記録する作業計画（`task_plan`）と、未完了工程の継続・完了判定
 - 登録した tool・MCP を検索で必要な分だけ公開する遅延公開（`tool_search`）
+- 調査や独立した作業を新しい会話に切り出すサブエージェント（`delegate_task`）
 - 保存して別プロセスから再開できる会話セッションと、複数ターンの対話モード（`ano chat`）
 - リポジトリの `AGENTS.md` などをプロジェクト固有の指示として自動で読み込み
 - 推論モデルの `reasoning.effort` 指定と、推論の要約の進捗表示
 - 長い会話の自動圧縮と、使用トークン数に応じた実行停止
 
 **tool と MCP**
-- workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り・全文検索（正規表現対応）・書き込み・移動・削除
+- workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り（バイト位置・行番号）・全文検索（正規表現対応）・書き込み・移動・削除
 - 競合検出付きの正確なファイル編集と、設定で登録した検証コマンド（ビルド・テスト）の実行
+- 承認付きのシェルコマンド実行（`workspace_exec`、opt-in）
 - リモート MCP（Responses API 経由、Secure MCP Tunnel 対応）と、ano からの直接接続（stdio / Streamable HTTP。OAuth 認証・ステートレス server 対応）
 - ユーザー・実行環境ごとの tool allowlist / denylist（ワイルドカード対応）と MCP 承認フロー
 
@@ -69,6 +71,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | --- | --- |
 | `--environment NAME` | 設定済みの実行環境（workspace・書き込み権限・MCP 承認方針・model・instructions・検証コマンド）を使う |
 | `--workspace PATH` / `--allow-writes` | 環境を指定しない場合の workspace（既定はカレントディレクトリ）と書き込み許可 |
+| `--allow-exec` | 環境を指定しない場合に、`workspace_exec` でのコマンド実行を許可（[コマンド実行](#コマンド実行workspace_exec)） |
 | `--model NAME` | モデルを変更 |
 | `--reasoning-effort LEVEL` | 推論の深さ（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`。対応範囲はモデルによる） |
 | `--image PATH` / `--audio PATH` | 画像・音声を入力に追加（複数指定可、`run` のみ） |
@@ -101,6 +104,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | --- | --- |
 | テキスト | エージェントへの指示として送信 |
 | `/plan` / `/usage` | 作業計画 / この会話のトークン使用量を表示 |
+| `/clear` | 新しい会話を始める（`--session` 指定時は使えません） |
 | `/help` | コマンド一覧 |
 | ↑ / ↓ | 以前の入力を呼び出す |
 | `/exit`、Ctrl+D | 終了 |
@@ -114,14 +118,15 @@ MCP の tool 呼び出しを毎回確認せずに進めるには、`ano chat --a
 
 ### 実行環境
 
-`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--model` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。
+`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--allow-exec`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--model` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。
 
 ```toml
 [environments.coding]
 workspace = "/path/to/my-repository"
 allowed_tools = ["workspace_*"]
 allow_writes = true
-auto_approve_mcp = false
+allow_exec = true          # workspace_exec を使う（コマンドごとに承認モードで判定）
+approval_mode = "auto"
 
 [environments.coding.checks.test]
 program = "cargo"
@@ -157,7 +162,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | --- | --- | --- |
 | `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ | [ローカル AI](#ローカル-ailm-studioollama-など) |
 | `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
-| `[environments.<name>]` | workspace・許可する tool・書き込み・MCP の承認モード・検証コマンド | [実行環境](#実行環境) |
+| `[environments.<name>]` | workspace・許可する tool・書き込み・コマンド実行・承認モード・検証コマンド | [実行環境](#実行環境) |
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
 | `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](docs/mcp.md) |
 | `[webhook]` | 待ち受けアドレス・署名・ジョブ数とタイムアウト | [docs/webhook.md](docs/webhook.md) |
@@ -210,24 +215,41 @@ model = "ロードしたモデル名"
 | --- | --- | --- |
 | `workspace_list` | ディレクトリ直下を名前順に取得（既定100件、最大1000件）。`next_after` を次の `after` に渡すと続きを取得 | workspace |
 | `workspace_find` | パスのグロブ（`*.rs`、`src/**/*.ts`、`*.{toml,md}`）でファイル・ディレクトリを再帰的に探す（既定200件、最大1000件） | workspace |
-| `workspace_read` | UTF-8 ファイルを `offset`（バイト位置）と `max_bytes`（既定 64 KiB、最大 10 MiB）で分割して読む。`next_offset` で続きを読み、文字の途中では分割しない | workspace |
+| `workspace_read` | UTF-8 ファイルを `offset`（バイト位置）と `max_bytes`（既定 64 KiB、最大 10 MiB）で分割して読む。`next_offset` で続きを読み、文字の途中では分割しない。`start_line`（1始まり）と `max_lines` を指定すると行単位で読み、`next_line`・`total_lines` と全体の `sha256` を返す | workspace |
 | `workspace_search` | UTF-8 テキストを再帰的に検索し、パス・行番号・列番号・抜粋を返す。既定は大文字小文字を区別する文字列検索で、`regex:true`（Rust の正規表現）、`ignore_case:true`、`include`（対象ファイルのグロブ）を指定できる（既定100件、最大1000件） | workspace |
 | `workspace_edit` | 置換対象がちょうど1回だけ出現することと、必要なら `expected_sha256` の一致を確認してから原子的に書き込む。`dry_run:true` で差分とハッシュを確認できる | `allow_writes` |
 | `workspace_write` | UTF-8 テキストをファイルへ書き込む | `allow_writes` |
 | `workspace_move` | ファイル・ディレクトリを移動（リネーム）。既存ファイルの上書きは `overwrite:true` のときだけ | `allow_writes` |
 | `workspace_delete` | ファイル・リンク・空ディレクトリを削除。中身のあるディレクトリは `recursive:true` が必要。取り消しはできない | `allow_writes` |
 | `workspace_check` | 環境の `checks` に登録した検証コマンドを実行。`name:null` で一覧 | `checks` |
+| `workspace_exec` | シェルコマンドを workspace で実行し、終了コードと出力を返す。呼び出しごとに承認が必要（[詳細](#コマンド実行workspace_exec)） | `allow_exec` |
 | `task_plan` | 作業計画の読み書き（[詳細](docs/agent-runtime.md#作業計画と完了判定)） | 常時 |
 | `tool_search` | 登録済み tool・MCP の検索（[詳細](docs/agent-runtime.md#tool-の遅延公開tool_search)） | 常時 |
+| `delegate_task` | 作業をサブエージェントに任せ、報告を受け取る（[詳細](docs/agent-runtime.md#サブエージェントdelegate_task)） | 常時 |
 | `echo` / `unix_time` | 動作確認用 | なし |
 
-実際に使える tool は、ユーザーと環境の `allowed_tools` / `disabled_tools` で決まります。読み取り専用の環境で検索を使うには `allowed_tools` に `workspace_search`・`workspace_find` を加えてください。`workspace_*` は移動・削除も許可する点に注意してください。
+実際に使える tool は、ユーザーと環境の `allowed_tools` / `disabled_tools` で決まります。読み取り専用の環境で検索を使うには `allowed_tools` に `workspace_search`・`workspace_find` を加えてください。`workspace_*` は移動・削除・コマンド実行（`allow_exec` のとき）も許可する点に注意してください。
 
 - **workspace の外には出ません。** 絶対パスや `..` を拒否し、既存の親ディレクトリを1階層ずつ正規化して workspace 内であることを確認します。シンボリックリンクを経由した書き込みも拒否し、リンクの削除・移動ではリンク先に触れません。
 - **`.git` と workspace ルートは移動・削除できません。**
 - **検索量に上限があります。** `workspace_search`・`workspace_find` は 10,000 エントリ（検索はさらに 32 MiB）までを走査し、リンク・バイナリ・10 MiB 超のファイルと、`.git`・`node_modules`・`target` などの生成物ディレクトリを省略します。上限に達したら範囲を狭めて再検索します。
 - **検証コマンドは設定で固定されます。** `workspace_check` のコマンドと引数は設定ファイルで決まり、workspace を作業ディレクトリとして実行し、出力は上限付きで返します。検証ごとの `timeout_secs` を優先し、タイムアウト時も取得済みの出力を返します。Webhook のジョブ全体の制限は引き続き適用されます。
-- **shell 実行 tool はありません。** 必要な場合は、アプリケーション側でより狭い権限の tool を登録してください。
+
+### コマンド実行（workspace_exec）
+
+`git`・ビルド・個別のテスト・プロジェクトのスクリプトなど、他の tool で扱えない操作のために、シェルコマンドを実行できます。既定では無効で、環境の `allow_exec = true` か、環境を指定しない CLI 実行の `--allow-exec` で有効になります。
+
+```sh
+ano chat --allow-writes --allow-exec                          # コマンドごとに [y/N] で確認
+ano run --allow-exec --approval-mode auto "テストを実行して失敗を直して"  # 判定用モデルが審査
+```
+
+- **コマンドごとに承認が必要です。** MCP と同じ[承認モード](docs/mcp.md#承認モード)（`ask`・`auto`・`allow`・`deny`）で判定し、拒否されたコマンドは実行しません。環境の既定は `deny` なので、Webhook などで使う場合は `approval_mode = "auto"` などを設定します。`auto` の判定用モデルは、調査・ビルド・テストを許可し、依頼にない削除・履歴の書き換え・push・インストール・ネットワーク接続などは確認に回します。
+- Unix では `/bin/sh -c`、Windows では `cmd /C` で実行します。作業ディレクトリは workspace（`cwd` で workspace 内のサブディレクトリを指定可）で、stdin は閉じています。
+- `timeout_secs`（既定120秒、最大1800秒）で打ち切り、それまでの出力を返します。Unix ではコマンドを専用のプロセスグループで起動し、終了・タイムアウト・中断（Ctrl+C）の時点で、コマンドが残したバックグラウンドプロセスも停止します。
+- 出力は stdout・stderr それぞれ先頭 16 KiB と末尾 48 KiB を返します（エラーは末尾に出ることが多いため）。`workspace_check` の出力も同じ形式です。
+- 名前に `KEY`・`SECRET`・`TOKEN`・`PASSWORD`・`PASSWD`・`CREDENTIAL` を含む環境変数は、コマンドに渡しません（API キーの読み出し防止）。
+- **サンドボックスではありません。** コマンドは ano を起動したユーザーの権限で動き、workspace の外のファイルやネットワークにもアクセスできます。承認で内容を確認してください。
 
 ## ライブラリとして使う
 
@@ -258,7 +280,8 @@ registry.register(
 ```
 
 - 実行環境（user・environment・workspace・書き込み許可）を受け取る tool は `register_contextual` で登録し、`ToolContext` から参照します。
-- tool 名は Responses API の関数名規則に合わせて ASCII 英数字・`_`・`-` の64文字以内です。`tool_search`・`task_plan` と `mcp__` で始まる名前は予約されています。
+- tool 名は Responses API の関数名規則に合わせて ASCII 英数字・`_`・`-` の64文字以内です。`tool_search`・`task_plan`・`delegate_task` と `mcp__` で始まる名前は予約されています。
+- 影響の大きい tool は `ToolDefinition::new(...).with_approval()` で登録すると、呼び出しごとに `ApprovalHandler` へ確認します（`McpApprovalRequest::source` が `ApprovalSource::LocalTool` になります）。
 - 直接接続の MCP を使う場合は `McpPool` を1つ作り、`Arc` で各 `Agent` に渡すと接続を共有できます。終了時に `shutdown().await` を呼んでください。
 - `Agent` は外部依存をトレイト（`ResponsesApi`・`McpGateway`・`ConversationStore`・`ApprovalHandler`）で受け取るため、別の API クライアントや保存先に差し替えられます。構成は [docs/architecture.md](docs/architecture.md) を参照してください。
 
@@ -266,7 +289,7 @@ registry.register(
 
 | ドキュメント | 内容 |
 | --- | --- |
-| [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開 |
+| [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント |
 | [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、承認、ポリシーの名前空間、検索カタログ |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
@@ -283,7 +306,8 @@ cargo test
 
 ## セキュリティ上の注意
 
-- ano は起動したユーザーの OS 権限で動きます。`allow_writes`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。
+- ano は起動したユーザーの OS 権限で動きます。`allow_writes`・`allow_exec`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。
+- `allow_exec` と `approval_mode = "allow"` を併用すると、モデルが任意のコマンドを確認なしで実行できます。使い捨てのコンテナなど、壊れても復元できる環境に限ってください。
 - リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` と `approval_mode = "allow"` は信頼済みの server に限ってください。`auto` モードの判定は補助的な安全策で、完全ではありません。
 - Webhook は必ず secret を設定して公開します。未認証での起動は loopback アドレスに限られます（[docs/webhook.md](docs/webhook.md#セキュリティ)）。
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。

@@ -41,7 +41,7 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 | `ResponsesApi` | `/responses` と `/responses/compact` の呼び出し | `infrastructure::openai::OpenAiClient` |
 | `McpGateway` / `DirectMcpServer` | 直接接続 MCP の接続管理と tool 呼び出し | `infrastructure::mcp::McpPool` |
 | `ConversationStore` | 会話の保持（変更ごとに保存） | `infrastructure::session_store::Session`（ファイル）、`infrastructure::memory_store::MemoryConversation`（メモリ） |
-| `ApprovalHandler` | MCP 呼び出しの承認 | `AlwaysApprove`・`DenyApproval`・`AutoApproval`（application）、`InteractiveApproval`・対話モードの確認（interface/cli） |
+| `ApprovalHandler` | MCP 呼び出しと、承認が必要なローカル tool（`workspace_exec` など）の承認 | `AlwaysApprove`・`DenyApproval`・`AutoApproval`（application）、`InteractiveApproval`・対話モードの確認（interface/cli） |
 
 テストや別の保存先・API を使う場合は、これらのトレイトを実装して `Agent` に渡せます。
 
@@ -68,7 +68,7 @@ src/
 │   ├── ports.rs            外部依存のトレイト
 │   ├── agent/
 │   │   ├── mod.rs          実行ループ（Agent::run / run_in_session）
-│   │   ├── dispatch.rs     function call・MCP 呼び出し・承認の実行
+│   │   ├── dispatch.rs     function call・MCP 呼び出し・承認・サブエージェントの実行
 │   │   ├── discovery.rs    tool_search による遅延公開
 │   │   ├── mcp_runtime.rs  1回の実行で使う MCP 接続とポリシー適用
 │   │   ├── events.rs       AgentEvent と逐次通知
@@ -92,7 +92,9 @@ src/
 │       ├── manage.rs       move・delete
 │       ├── walk.rs         上限付きのディレクトリ走査
 │       ├── glob.rs         パスのグロブ照合
-│       └── checks.rs       workspace_check
+│       ├── checks.rs       workspace_check
+│       ├── exec.rs         workspace_exec（シェルコマンド）
+│       └── process.rs      子プロセスの実行（期限・出力上限・プロセスグループの停止）
 └── interface/
     ├── cli/                clap による CLI（run・chat・tools・session・serve）、進捗表示、端末での承認
     └── webhook/            署名付き Webhook、ジョブ管理
@@ -103,7 +105,7 @@ src/
 1. `interface`（CLI または Webhook）が設定から `ExecutionProfile`（モデル設定・有効なポリシー・`ToolContext`）を解決し、workspace の `AGENTS.md` を instructions に加え、アダプターを組み立てて `Agent` を作ります。
 2. `Agent::run` は入力を Responses API の `input` に変換し、`McpGateway` からポリシーで許可された MCP 接続を借ります。
 3. 各ラウンドで `ResponsesApi::create_response` を呼び、返ってきた `function_call`・`mcp_approval_request` を `dispatch` が並行実行します。セッションがあれば、実行前に呼び出しを、完了するたびに結果を `ConversationStore` へ保存します。
-4. `tool_search` の結果は次のラウンドから tool 一覧に反映されます（`discovery`）。
+4. `tool_search` の結果は次のラウンドから tool 一覧に反映されます（`discovery`）。`delegate_task` は同じ `Agent` の実行ループを新しい会話で1段だけ再帰的に動かし、最終回答を tool 出力として返します。
 5. 最終回答で未完了の計画工程が残っていれば継続を促し、完了・中断・上限到達のいずれかで `AgentResult` を返します。
 
 ## 設計上の判断

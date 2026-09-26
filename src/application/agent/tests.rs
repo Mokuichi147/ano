@@ -10,7 +10,7 @@ use crate::{
     application::{
         approval::{AlwaysApprove, DenyApproval},
         input::InputPart,
-        ports::{ApprovalDecision, ApprovalHandler, McpApprovalRequest},
+        ports::{ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest},
         registry::ToolRegistry,
         settings::AgentSettings,
     },
@@ -21,6 +21,7 @@ use crate::{
         policy::UserPolicy,
         session::SessionBinding,
         tool::{ToolContext, ToolDefinition},
+        usage::{StopReason, UsageSummary},
     },
     infrastructure::{
         mcp::McpPool, openai::OpenAiClient, session_store::Session, tools::register_builtin_tools,
@@ -44,6 +45,7 @@ async fn with_scope<T>(active: &ActiveTools, body: impl AsyncFnOnce(RoundScope<'
     let runtime = McpRuntime::default();
     let events = EventLog::new(None);
     let plan = Mutex::new(TaskPlan::default());
+    let delegated_usage = Mutex::new(UsageSummary::default());
     body(RoundScope {
         round: 0,
         user_request: "",
@@ -52,6 +54,9 @@ async fn with_scope<T>(active: &ActiveTools, body: impl AsyncFnOnce(RoundScope<'
         mcp_runtime: &runtime,
         events: &events,
         plan: &plan,
+        depth: 0,
+        token_budget: None,
+        delegated_usage: &delegated_usage,
     })
     .await
 }
@@ -219,11 +224,19 @@ fn initial_tool_payload_is_constant_size() {
     );
 
     let tools = agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default())
+        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0)
+        .unwrap();
+    let names = tools
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["tool_search", "task_plan", "delegate_task"]);
+
+    // Sub-agents cannot delegate further.
+    let tools = agent
+        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 1)
         .unwrap();
     assert_eq!(tools.len(), 2);
-    assert_eq!(tools[0]["name"], "tool_search");
-    assert_eq!(tools[1]["name"], "task_plan");
 }
 
 #[test]
@@ -237,7 +250,11 @@ fn search_loads_only_matching_tools() {
     );
 
     let selection = agent
-        .search_tools(&json!({"query": "read file"}), &McpRuntime::default())
+        .search_tools(
+            &json!({"query": "read file"}),
+            &McpRuntime::default(),
+            &ToolContext::default(),
+        )
         .unwrap();
     assert!(selection.active.local.contains("read_file"));
     assert!(!selection.active.local.contains("send_email"));
@@ -256,7 +273,11 @@ fn search_returns_up_to_the_discovery_limit() {
     );
 
     let selection = agent
-        .search_tools(&json!({"query": "read"}), &McpRuntime::default())
+        .search_tools(
+            &json!({"query": "read"}),
+            &McpRuntime::default(),
+            &ToolContext::default(),
+        )
         .unwrap();
     assert_eq!(selection.results.len(), 3);
 }
@@ -283,7 +304,11 @@ fn server_description_alone_does_not_select_every_tool_on_the_server() {
     );
     let search = |query: &str| {
         let selection = agent
-            .search_tools(&json!({ "query": query }), &McpRuntime::default())
+            .search_tools(
+                &json!({ "query": query }),
+                &McpRuntime::default(),
+                &ToolContext::default(),
+            )
             .unwrap();
         selection
             .results
@@ -496,7 +521,7 @@ async fn disabled_task_plan_cannot_be_called_or_exposed() {
     let mut agent = agent(ToolRegistry::new(), vec![]);
     agent.policy = UserPolicy::new(vec!["task_plan".into()], None);
     assert!(!agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default())
+        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0)
         .unwrap()
         .iter()
         .any(|tool| tool["name"] == "task_plan"));
@@ -995,4 +1020,221 @@ fn selected_mcp_tool_is_the_only_tool_sent_to_the_endpoint() {
 
     assert_eq!(value["allowed_tools"], serde_json::json!(["search"]));
     assert_eq!(value["require_approval"], "always");
+}
+
+fn approval_agent(registry: ToolRegistry, approval: Arc<dyn ApprovalHandler>) -> Agent {
+    Agent::new(
+        OpenAiClient::new("test", "http://127.0.0.1:1234/v1"),
+        AgentSettings::default(),
+        Arc::new(McpPool::new(Vec::new())),
+        registry,
+        UserPolicy::default(),
+        approval,
+    )
+}
+
+#[tokio::test]
+async fn local_tools_that_require_approval_run_only_when_approved() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let registry = ToolRegistry::new();
+    let counter = Arc::clone(&runs);
+    registry
+        .register(
+            ToolDefinition::new(
+                "deploy",
+                "Deploy the site",
+                json!({"type": "object", "properties": {}}),
+            )
+            .with_approval(),
+            move |_arguments| {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(json!({"deployed": true}))
+                }
+            },
+        )
+        .unwrap();
+    let active = selected_local_tools(&["deploy"]);
+
+    let denying = Arc::new(ExplainingApproval {
+        seen: Mutex::new(Vec::new()),
+    });
+    let agent = approval_agent(registry.clone(), denying.clone());
+    let (output, _) = with_scope(&active, async |scope| {
+        agent
+            .handle_function_call("deploy", &json!({}), scope)
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(output["error"], "approval_denied");
+    assert!(output["message"]
+        .as_str()
+        .unwrap()
+        .contains("not part of the request"));
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    let seen = denying.seen.lock().unwrap()[0].clone();
+    assert_eq!(seen.source, ApprovalSource::LocalTool);
+    assert_eq!(seen.target(), "deploy");
+    assert_eq!(seen.tool_description.as_deref(), Some("Deploy the site"));
+
+    let agent = approval_agent(registry, Arc::new(AlwaysApprove));
+    let (output, _) = with_scope(&active, async |scope| {
+        agent
+            .handle_function_call("deploy", &json!({}), scope)
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(output["deployed"], true);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn exec_is_neither_offered_nor_approved_without_allow_exec() {
+    let registry = ToolRegistry::new();
+    register_builtin_tools(&registry).unwrap();
+    let approval = Arc::new(ExplainingApproval {
+        seen: Mutex::new(Vec::new()),
+    });
+    let agent = approval_agent(registry, approval.clone());
+
+    let search = |context: &ToolContext| {
+        agent
+            .search_tools(
+                &json!({"query": "run shell command"}),
+                &McpRuntime::default(),
+                context,
+            )
+            .unwrap()
+            .active
+            .local
+    };
+    assert!(!search(&ToolContext::default()).contains("workspace_exec"));
+    let enabled = ToolContext {
+        allow_exec: true,
+        ..ToolContext::default()
+    };
+    assert!(search(&enabled).contains("workspace_exec"));
+
+    let active = selected_local_tools(&["workspace_exec"]);
+    let (output, _) = with_scope(&active, async |scope| {
+        agent
+            .handle_function_call("workspace_exec", &json!({"command": "true"}), scope)
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(output["error"], "tool_unavailable");
+    assert!(approval.seen.lock().unwrap().is_empty());
+}
+
+fn with_usage(mut response: Value, total: u64) -> Value {
+    response["usage"] =
+        json!({"input_tokens": total - 5, "output_tokens": 5, "total_tokens": total});
+    response
+}
+
+fn delegate_response(id: &str, task: &str) -> Value {
+    json!({
+        "id": id,
+        "status": "completed",
+        "output": [{
+            "type": "function_call",
+            "call_id": format!("{id}_delegate"),
+            "name": "delegate_task",
+            "arguments": json!({"task": task}).to_string()
+        }]
+    })
+}
+
+#[tokio::test]
+async fn delegated_tasks_run_in_a_fresh_sub_agent_and_return_its_report() {
+    let server = mock_responses(vec![
+        with_usage(delegate_response("parent", "Survey the files"), 15),
+        with_usage(text_response("sub", "Found three files"), 25),
+        with_usage(text_response("done", "All done"), 35),
+    ])
+    .await;
+    let mut agent = agent(ToolRegistry::new(), Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    agent.settings.max_total_tokens = Some(1000);
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "All done");
+    assert_eq!(result.usage.total_tokens, 75);
+    assert_eq!(result.usage.responses, 3);
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SubagentStarted { task, .. } if task == "Survey the files"
+    )));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SubagentFinished { usage, error: None, .. } if usage.total_tokens == 25
+    )));
+    let requests = server.requests.lock().unwrap();
+    let sub = &requests[1];
+    assert!(sub["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("You are a sub-agent"));
+    assert!(sub["input"].to_string().contains("Survey the files"));
+    assert!(!sub["input"].to_string().contains("Do the requested work"));
+    assert!(sub["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|tool| tool["name"] != "delegate_task"));
+    let report: Value =
+        serde_json::from_str(requests[2]["input"][0]["output"].as_str().unwrap()).unwrap();
+    assert_eq!(report["report"], "Found three files");
+    assert_eq!(report["outcome"], "completed");
+}
+
+#[tokio::test]
+async fn sub_agents_share_the_parent_token_budget() {
+    let server = mock_responses(vec![
+        with_usage(delegate_response("parent", "Survey the files"), 15),
+        with_usage(text_response("sub", "Partial survey"), 25),
+    ])
+    .await;
+    let mut agent = agent(ToolRegistry::new(), Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    agent.settings.max_total_tokens = Some(20);
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.stop_reason, StopReason::TokenLimit);
+    assert_eq!(result.usage.total_tokens, 40);
+    assert_eq!(server.requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn sub_agents_cannot_delegate_further() {
+    let agent = agent(ToolRegistry::new(), Vec::new());
+    let context = ToolContext::default();
+    let runtime = McpRuntime::default();
+    let events = EventLog::new(None);
+    let plan = Mutex::new(TaskPlan::default());
+    let delegated_usage = Mutex::new(UsageSummary::default());
+    let active = ActiveTools::default();
+    let scope = RoundScope {
+        round: 0,
+        user_request: "",
+        tool_context: &context,
+        active: &active,
+        mcp_runtime: &runtime,
+        events: &events,
+        plan: &plan,
+        depth: 1,
+        token_budget: None,
+        delegated_usage: &delegated_usage,
+    };
+    let (output, _) = agent
+        .handle_function_call("delegate_task", &json!({"task": "More"}), scope)
+        .await
+        .unwrap();
+    assert_eq!(output["error"], "tool_disabled");
 }

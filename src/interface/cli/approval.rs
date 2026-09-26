@@ -1,4 +1,4 @@
-//! Terminal prompt for MCP tool approval.
+//! Terminal prompt for tool approval.
 
 use crate::application::ports::{ApprovalHandler, McpApprovalRequest};
 use anyhow::{Context, Result};
@@ -17,8 +17,10 @@ impl ApprovalHandler for InteractiveApproval {
             .map(|review| format!("Automatic review: {review}\n"))
             .unwrap_or_default();
         let prompt = format!(
-            "\nMCP approval requested: {}:{}\nArguments: {}\n{review}Allow this call? [y/N] ",
-            request.server_label, request.tool_name, request.arguments
+            "\n{}: {}\nArguments: {}\n{review}Allow this call? [y/N] ",
+            request.heading(),
+            request.target(),
+            request.arguments
         );
         tokio::task::spawn_blocking(move || {
             use std::io::{self, Write};
@@ -32,7 +34,7 @@ impl ApprovalHandler for InteractiveApproval {
             ))
         })
         .await
-        .context("interactive MCP approval task failed")?
-        .context("failed to read MCP approval response")
+        .context("interactive approval task failed")?
+        .context("failed to read approval response")
     }
 }

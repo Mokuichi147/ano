@@ -30,8 +30,8 @@ pub use application::{
     approval::{AlwaysApprove, DenyApproval},
     input::{build_user_input, InputPart},
     ports::{
-        ApprovalHandler, ConversationStore, DirectMcpServer, DirectMcpTool, McpApprovalRequest,
-        McpGateway, ResponsesApi,
+        ApprovalHandler, ApprovalSource, ConversationStore, DirectMcpServer, DirectMcpTool,
+        McpApprovalRequest, McpGateway, ResponsesApi,
     },
     profile::ExecutionProfile,
     registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
@@ -45,7 +45,9 @@ pub use domain::{
     plan::{PlanStep, RunOutcome, StepStatus, TaskPlan, TASK_PLAN_NAME},
     policy::UserPolicy,
     session::{SessionBinding, SessionData, SessionStatus},
-    tool::{ToolContext, ToolDefinition, TOOL_SEARCH_NAME},
+    tool::{
+        ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME, WORKSPACE_EXEC_NAME,
+    },
     usage::{ApiOperation, StopReason, UsageSummary},
 };
 pub use infrastructure::{

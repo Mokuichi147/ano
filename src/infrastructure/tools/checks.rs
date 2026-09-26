@@ -1,18 +1,14 @@
 //! `workspace_check`: run a validation command fixed by the environment.
 
+use super::process::run_bounded;
 use crate::{
     application::registry::ToolRegistry,
     domain::tool::{ToolContext, ToolDefinition},
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
-use std::{process::Stdio, time::Duration};
-use tokio::{
-    io::{AsyncRead, AsyncReadExt},
-    process::Command,
-};
-
-const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+use std::time::Duration;
+use tokio::process::Command;
 
 pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     registry.register_contextual(ToolDefinition::new(
@@ -46,74 +42,28 @@ async fn run_check(arguments: Value, context: &ToolContext) -> Result<Value> {
     )
     .await?;
     let mut command = Command::new(&check.program);
-    command
-        .args(&check.args)
-        .current_dir(workspace)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    #[cfg(windows)]
-    command.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    let mut child = command
-        .spawn()
+    command.args(&check.args).current_dir(workspace);
+    let output = run_bounded(command, Duration::from_secs(check.timeout_secs))
+        .await
         .with_context(|| format!("failed to start configured check '{name}'"))?;
-    let stdout = child.stdout.take().context("check stdout unavailable")?;
-    let stderr = child.stderr.take().context("check stderr unavailable")?;
-    let mut out = Vec::new();
-    let mut err = Vec::new();
-    let mut out_total = 0;
-    let mut err_total = 0;
-    let result = tokio::time::timeout(Duration::from_secs(check.timeout_secs), async {
-        tokio::try_join!(
-            child.wait(),
-            capture(stdout, &mut out, &mut out_total),
-            capture(stderr, &mut err, &mut err_total)
-        )
-    })
-    .await;
-    let (status, timed_out) = match result {
-        Ok(Ok((status, (), ()))) => (Some(status), false),
-        Ok(Err(error)) => {
-            child.kill().await.ok();
-            return Err(error).context("failed to capture check output");
-        }
-        Err(_) => {
-            child.kill().await.ok();
-            (None, true)
-        }
-    };
-    let success = status.is_some_and(|status| status.success());
-    let mut output = json!({"name":name,"success":success,"exit_code":status.and_then(|status| status.code()),
-        "timed_out":timed_out, "stdout":String::from_utf8_lossy(&out),"stderr":String::from_utf8_lossy(&err),
-        "stdout_truncated":out_total > MAX_OUTPUT_BYTES,"stderr_truncated":err_total > MAX_OUTPUT_BYTES});
-    if !success {
-        output["error"] = json!(if timed_out {
+    let mut result = json!({
+        "name": name,
+        "success": output.success(),
+        "exit_code": output.exit_code(),
+        "timed_out": output.timed_out(),
+        "stdout": output.stdout.text(),
+        "stderr": output.stderr.text(),
+        "stdout_truncated": output.stdout.truncated(),
+        "stderr_truncated": output.stderr.truncated(),
+    });
+    if !output.success() {
+        result["error"] = json!(if output.timed_out() {
             "check_timed_out"
         } else {
             "check_failed"
         });
     }
-    Ok(output)
-}
-
-async fn capture(
-    mut reader: impl AsyncRead + Unpin,
-    kept: &mut Vec<u8>,
-    total: &mut usize,
-) -> std::io::Result<()> {
-    let mut buffer = [0_u8; 8192];
-    loop {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(());
-        }
-        *total = total.saturating_add(read);
-        let take = read.min(MAX_OUTPUT_BYTES - kept.len());
-        kept.extend_from_slice(&buffer[..take]);
-        // Continue draining after the cap, so a verbose child cannot deadlock
-        // while trying to fill an unread pipe.
-    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -161,18 +111,6 @@ mod tests {
         assert_eq!(result["success"], false);
         assert_eq!(result["error"], "check_failed");
         assert!(!result["stderr"].as_str().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn output_is_bounded_but_pipe_is_fully_drained() {
-        let source = vec![b'x'; MAX_OUTPUT_BYTES * 3];
-        let mut kept = Vec::new();
-        let mut total = 0;
-        capture(source.as_slice(), &mut kept, &mut total)
-            .await
-            .unwrap();
-        assert_eq!(kept.len(), MAX_OUTPUT_BYTES);
-        assert_eq!(total, source.len());
     }
 
     #[test]

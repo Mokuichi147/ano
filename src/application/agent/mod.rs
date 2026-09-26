@@ -63,6 +63,24 @@ pub struct AgentResult {
     pub stop_reason: StopReason,
 }
 
+/// Appended to the instructions of a sub-agent started by `delegate_task`.
+const SUBAGENT_INSTRUCTIONS: &str = "You are a sub-agent. Another agent delegated the task in the user message to you; it sees only your final answer, not your tool calls. Work on that task alone with the available tools and do not ask questions, since nobody can answer them. Finish with a concise, self-contained report: what you found or changed (with file paths and line numbers where useful), what you verified, and anything left unresolved.";
+
+/// How a run was started: by the caller, or by `delegate_task` in another run.
+#[derive(Default)]
+pub(super) struct RunOrigin<'a> {
+    /// 0 for the caller's run, 1 for a sub-agent. Sub-agents cannot delegate.
+    pub depth: usize,
+    /// The token budget. A sub-agent gets what remains of its parent's.
+    pub token_limit: Option<u64>,
+    /// The user's request that led to a sub-agent. Approval handlers judge
+    /// calls against it rather than against the task text the model wrote.
+    pub user_request: Option<String>,
+    /// Receives every usage delta of this run, so a parent counts what its
+    /// sub-agent spent even when the sub-agent fails.
+    pub usage_sink: Option<&'a Mutex<UsageSummary>>,
+}
+
 pub struct Agent {
     client: Arc<dyn ResponsesApi>,
     settings: AgentSettings,
@@ -106,7 +124,14 @@ impl Agent {
     }
 
     pub async fn run(&self, request: RunRequest) -> Result<AgentResult> {
-        self.run_inner(request, None).await
+        self.run_inner(request, None, self.top_level_origin()).await
+    }
+
+    fn top_level_origin(&self) -> RunOrigin<'static> {
+        RunOrigin {
+            token_limit: self.settings.max_total_tokens,
+            ..RunOrigin::default()
+        }
     }
 
     /// Continue a locally persisted conversation. Current tool policy is
@@ -120,7 +145,9 @@ impl Agent {
         {
             bail!("run context does not match this session");
         }
-        let result = self.run_inner(request, Some(&mut *session)).await;
+        let result = self
+            .run_inner(request, Some(&mut *session), self.top_level_origin())
+            .await;
         if let Err(error) = &result {
             if session.data().status == SessionStatus::Running {
                 session
@@ -135,20 +162,31 @@ impl Agent {
         &self,
         request: RunRequest,
         mut session: Option<&mut (dyn ConversationStore + '_)>,
+        origin: RunOrigin<'_>,
     ) -> Result<AgentResult> {
         self.settings.validate()?;
 
         let user_input = build_user_input(&request.input).await?;
         // Shown to approval handlers to judge whether a call fits the request.
-        let user_request = request
-            .input
-            .iter()
-            .filter_map(|part| match part {
-                InputPart::Text(text) => Some(text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let user_request = origin.user_request.clone().unwrap_or_else(|| {
+            request
+                .input
+                .iter()
+                .filter_map(|part| match part {
+                    InputPart::Text(text) => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        let base_instructions = if origin.depth > 0 {
+            format!("{}\n\n{SUBAGENT_INSTRUCTIONS}", self.settings.instructions)
+        } else {
+            self.settings.instructions.clone()
+        };
+        let token_limit = origin.token_limit;
+        // Usage of sub-agents started during the current round.
+        let delegated_usage = Mutex::new(UsageSummary::default());
         if let Some(session) = session.as_deref_mut() {
             session.begin_turn(&user_input)?;
         }
@@ -197,6 +235,7 @@ impl Agent {
                         &mut usage,
                         session.as_deref_mut(),
                         &events,
+                        origin.usage_sink,
                     )?;
                     let (history, mut record) = compacted_history(
                         &compacted,
@@ -209,7 +248,7 @@ impl Agent {
                         local_history = Some(history);
                     }
                     events.push(AgentEvent::ContextCompacted { round, record });
-                    if let Some(reason) = usage.stop_reason(self.settings.max_total_tokens) {
+                    if let Some(reason) = usage.stop_reason(token_limit) {
                         return finish_limited(
                             reason,
                             usage,
@@ -226,16 +265,15 @@ impl Agent {
             let final_round = round + 1 == self.settings.max_tool_rounds;
             let instructions = if final_round {
                 format!(
-                    "{}\n\nThis is the final response within the execution budget. No tools are available. Summarize what has actually been completed, clearly state anything unfinished, and do not claim unperformed work succeeded.",
-                    self.settings.instructions
+                    "{base_instructions}\n\nThis is the final response within the execution budget. No tools are available. Summarize what has actually been completed, clearly state anything unfinished, and do not claim unperformed work succeeded."
                 )
             } else {
-                self.settings.instructions.clone()
+                base_instructions.clone()
             };
             let tools = if final_round {
                 Vec::new()
             } else {
-                self.response_tools(&active, &mcp_runtime)?
+                self.response_tools(&active, &mcp_runtime, origin.depth)?
             };
             let mut payload = json!({
                 "model": self.settings.model,
@@ -266,6 +304,7 @@ impl Agent {
                 &mut usage,
                 session.as_deref_mut(),
                 &events,
+                origin.usage_sink,
             )?;
             if let Some(error) = response["error"]["message"].as_str() {
                 bail!("Responses API returned an error: {error}");
@@ -322,7 +361,7 @@ impl Agent {
             if let Some(history) = local_history.as_mut() {
                 history.extend_from_slice(&items);
             }
-            if let Some(reason) = usage.stop_reason(self.settings.max_total_tokens) {
+            if let Some(reason) = usage.stop_reason(token_limit) {
                 return finish_limited(reason, usage, response_id, &plan, events, session);
             }
             let (continuation, selection) = self
@@ -336,10 +375,33 @@ impl Agent {
                         mcp_runtime: &mcp_runtime,
                         events: &events,
                         plan: &plan,
+                        depth: origin.depth,
+                        token_budget: token_limit
+                            .map(|limit| limit.saturating_sub(usage.total_tokens)),
+                        delegated_usage: &delegated_usage,
                     },
                     session.as_deref_mut(),
                 )
                 .await?;
+            let delegated = std::mem::take(
+                &mut *delegated_usage
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
+            if delegated != UsageSummary::default() {
+                usage.add(&delegated);
+                if let Some(session) = session.as_deref_mut() {
+                    session.record_usage(&delegated)?;
+                }
+                if let Some(sink) = origin.usage_sink {
+                    sink.lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .add(&delegated);
+                }
+                if let Some(reason) = usage.stop_reason(token_limit) {
+                    return finish_limited(reason, usage, response_id, &plan, events, session);
+                }
+            }
             if let Some(history) = local_history.as_mut() {
                 history.extend_from_slice(&continuation);
             }
@@ -437,9 +499,15 @@ fn observe_usage(
     usage: &mut UsageSummary,
     session: Option<&mut (dyn ConversationStore + '_)>,
     events: &EventLog<'_>,
+    sink: Option<&Mutex<UsageSummary>>,
 ) -> Result<()> {
     let delta = UsageSummary::from_response(response, operation);
     usage.add(&delta);
+    if let Some(sink) = sink {
+        sink.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .add(&delta);
+    }
     if let Some(session) = session {
         session.record_usage(&delta)?;
     }
