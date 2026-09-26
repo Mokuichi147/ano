@@ -5,6 +5,7 @@
 
 pub mod agent;
 pub mod approval;
+pub mod auto_approval;
 pub mod input;
 pub mod ports;
 pub mod profile;

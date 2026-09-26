@@ -1,10 +1,13 @@
 //! `ano chat`: a multi-turn conversation on the terminal.
 //!
-//! One thread reads stdin and hands out lines, so the prompt and MCP approval
-//! questions never compete for input. Ctrl+C cancels the running turn and
-//! keeps the conversation; `/exit` or end of input quits.
+//! One thread reads stdin on request, so the prompt and MCP approval
+//! questions never compete for input. On a terminal it uses a line editor
+//! that knows the display width of wide characters, so editing Japanese text
+//! (including IME input) redraws correctly, and ↑/↓ recall earlier prompts.
+//! Ctrl+C cancels the running turn and keeps the conversation; `/exit` or
+//! end of input quits.
 
-use super::{approval_for, output, prepare_agent, AgentOptions, PreparedAgent};
+use super::{output, prepare_agent, AgentOptions, PreparedAgent};
 use crate::{
     application::{
         agent::RunRequest,
@@ -18,11 +21,12 @@ use crate::{
 };
 use anyhow::Result;
 use async_trait::async_trait;
+use rustyline::{error::ReadlineError, DefaultEditor};
 use std::{
     io::{BufRead, IsTerminal, Write},
-    sync::Arc,
+    sync::{mpsc, Arc},
 };
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::oneshot;
 
 const HELP: &str = "Commands:
   /plan    show the task plan
@@ -31,32 +35,76 @@ const HELP: &str = "Commands:
   /exit    quit (also Ctrl+D)
 Ctrl+C cancels the running turn and keeps the conversation.";
 
-/// Lines from stdin, read by a dedicated thread.
+enum Input {
+    Line(String),
+    /// Ctrl+C while editing a line on the terminal.
+    Interrupted,
+    /// Ctrl+D, end of piped input, or an unreadable terminal.
+    Eof,
+}
+
+struct ReadRequest {
+    prompt: String,
+    /// Keep the line for ↑/↓ recall. Approval answers are not kept.
+    remember: bool,
+    reply: oneshot::Sender<Input>,
+}
+
+/// Reads one line per request on a dedicated thread. Nothing is read ahead,
+/// so the terminal is free for progress output while a turn runs.
 struct LineReader {
-    lines: Mutex<mpsc::UnboundedReceiver<String>>,
+    requests: mpsc::Sender<ReadRequest>,
 }
 
 impl LineReader {
-    fn spawn() -> Arc<Self> {
-        let (sender, lines) = mpsc::unbounded_channel();
+    fn spawn(interactive: bool) -> Arc<Self> {
+        let (requests, received) = mpsc::channel::<ReadRequest>();
         // A plain thread, not a runtime blocking task: it may stay blocked on
         // stdin at exit without holding up runtime shutdown.
         std::thread::spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                let Ok(line) = line else { break };
-                if sender.send(line).is_err() {
-                    break;
-                }
+            let mut editor = if interactive {
+                DefaultEditor::new().ok()
+            } else {
+                None
+            };
+            for request in received {
+                let input = match editor.as_mut() {
+                    Some(editor) => match editor.readline(&request.prompt) {
+                        Ok(line) => {
+                            if request.remember && !line.trim().is_empty() {
+                                editor.add_history_entry(line.as_str()).ok();
+                            }
+                            Input::Line(line)
+                        }
+                        Err(ReadlineError::Interrupted) => Input::Interrupted,
+                        Err(_) => Input::Eof,
+                    },
+                    None => {
+                        let mut line = String::new();
+                        match std::io::stdin().lock().read_line(&mut line) {
+                            Ok(0) | Err(_) => Input::Eof,
+                            Ok(_) => Input::Line(line.trim_end_matches(['\n', '\r']).to_string()),
+                        }
+                    }
+                };
+                // The requester may have stopped waiting; that is fine.
+                request.reply.send(input).ok();
             }
         });
-        Arc::new(Self {
-            lines: Mutex::new(lines),
-        })
+        Arc::new(Self { requests })
     }
 
-    /// The next line, or `None` at end of input.
-    async fn next_line(&self) -> Option<String> {
-        self.lines.lock().await.recv().await
+    async fn read(&self, prompt: &str, remember: bool) -> Input {
+        let (reply, response) = oneshot::channel();
+        let request = ReadRequest {
+            prompt: prompt.to_string(),
+            remember,
+            reply,
+        };
+        if self.requests.send(request).is_err() {
+            return Input::Eof;
+        }
+        response.await.unwrap_or(Input::Eof)
     }
 }
 
@@ -68,14 +116,22 @@ struct ChatApproval {
 #[async_trait]
 impl ApprovalHandler for ChatApproval {
     async fn approve(&self, request: McpApprovalRequest) -> Result<bool> {
-        eprint!(
-            "\nMCP approval requested: {}:{}\nArguments: {}\nAllow this call? [y/N] ",
+        eprintln!(
+            "\nMCP approval requested: {}:{}\nArguments: {}",
             request.server_label, request.tool_name, request.arguments
         );
+        if let Some(review) = &request.review {
+            eprintln!("Automatic review: {review}");
+        }
         std::io::stderr().flush().ok();
-        Ok(self.lines.next_line().await.is_some_and(|answer| {
-            matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
-        }))
+        Ok(
+            match self.lines.read("Allow this call? [y/N] ", false).await {
+                Input::Line(answer) => {
+                    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+                }
+                Input::Interrupted | Input::Eof => false,
+            },
+        )
     }
 }
 
@@ -86,22 +142,23 @@ pub(super) async fn run(
     registry: ToolRegistry,
 ) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
-    let lines = LineReader::spawn();
-    let approval = approval_for(
-        &config,
-        &options,
-        interactive,
-        Arc::new(ChatApproval {
-            lines: Arc::clone(&lines),
-        }),
-    )?;
+    let lines = LineReader::spawn(interactive);
     let PreparedAgent {
         agent,
         context,
         binding,
         session,
         mcp,
-    } = prepare_agent(&config, &user_id, &options, registry, approval)?;
+    } = prepare_agent(
+        &config,
+        &user_id,
+        &options,
+        registry,
+        Arc::new(ChatApproval {
+            lines: Arc::clone(&lines),
+        }),
+        interactive,
+    )?;
     let mut store: Box<dyn ConversationStore> = match session {
         Some(session) => Box::new(session),
         None => Box::new(MemoryConversation::new(binding)),
@@ -112,18 +169,23 @@ pub(super) async fn run(
 
     let result = async {
         loop {
-            if interactive {
-                eprint!("> ");
-                std::io::stderr().flush().ok();
-            }
-            let line = tokio::select! {
-                line = lines.next_line() => line,
-                _ = tokio::signal::ctrl_c() => {
-                    eprintln!("\n(use /exit or Ctrl+D to quit)");
-                    continue;
+            let input = if interactive {
+                // The line editor reads Ctrl+C itself while a line is edited.
+                lines.read("> ", true).await
+            } else {
+                tokio::select! {
+                    input = lines.read("", false) => input,
+                    _ = tokio::signal::ctrl_c() => Input::Eof,
                 }
             };
-            let Some(line) = line else { break };
+            let line = match input {
+                Input::Line(line) => line,
+                Input::Interrupted => {
+                    eprintln!("(use /exit or Ctrl+D to quit)");
+                    continue;
+                }
+                Input::Eof => break,
+            };
             let prompt = line.trim();
             match prompt {
                 "" => continue,

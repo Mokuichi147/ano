@@ -74,14 +74,50 @@ server がタスク間で状態を持ち、別のユーザーやジョブと共�
 | `always`（既定） | 呼び出しごとに承認が必要 |
 | `never` | 信頼済みサーバーを完全自動で実行 |
 
-承認の方法は実行方法によって決まります。
+### 承認モード
 
-| 実行方法 | 承認 |
+承認が必要な呼び出しにどう答えるかは、承認モードで決まります。
+
+| モード | 動作 |
 | --- | --- |
-| `ano run`（端末から、環境指定なし） | 端末で確認（`[y/N]`） |
-| `ano run --auto-approve-mcp` | 自動承認 |
-| `ano run --non-interactive`、stdin が端末でない場合 | 拒否 |
-| `ano run --environment NAME`、Webhook ジョブ | 環境の `auto_approve_mcp = true` なら自動承認、それ以外は拒否 |
+| `ask` | ユーザーに確認する（`[y/N]`）。確認できない場合（stdin が端末でない、Webhook）は拒否 |
+| `auto` | 判定用モデルが呼び出しを審査する。依頼の範囲内で危険の少ない呼び出しは自動承認、明らかに不適切な呼び出しは自動拒否し、それ以外は `ask` と同じく確認する |
+| `allow` | すべて承認 |
+| `deny` | すべて拒否 |
+
+どのモードを使うかは、次の順で決まります。
+
+| 実行方法 | 承認モード |
+| --- | --- |
+| `--non-interactive` / `--auto-approve-mcp` | `deny` / `allow` |
+| `--approval-mode MODE` | 指定したモード |
+| `--environment NAME`、Webhook ジョブ | 環境の `approval_mode`。未指定なら `auto_approve_mcp = true` で `allow`、それ以外は `deny` |
+| 上記以外の `ano run` / `ano chat` | `[agent] approval_mode`（既定 `ask`） |
+
+環境の権限を CLI から広げられないよう、`--approval-mode` と `--auto-approve-mcp` は `--environment` と併用できません。環境で自動承認を使う場合は、設定ファイルに `approval_mode = "auto"` を書きます。
+
+### 自動承認（auto）
+
+`auto` モードでは、承認が必要になるたびに判定用モデルへ「ユーザーの依頼文・サーバー名・tool 名・tool の説明・引数」を送り、`allow` / `deny` / `ask` と理由を返させます。
+
+```toml
+[agent]
+approval_mode = "auto"
+approval_model = "判定用のモデル名"   # 省略時は agent.model。速く安価なモデルが向く
+
+[environments.coding]
+approval_mode = "auto"          # Webhook では ask 判定は拒否になる
+```
+
+- 読み取り・検索のように依頼に沿った低リスクの呼び出しは確認なしで実行します。依頼と無関係な呼び出し、秘密情報の送信、指示の注入が疑われる呼び出しは拒否し、理由をモデルに返します。
+- 送信・公開・削除・購入など影響が大きい操作は、依頼で明示されていない限り `ask` とし、ユーザーに確認します。確認画面には判定の理由が表示されます。
+- 判定用 API がエラーになった、または応答を解釈できなかった場合も `ask` として扱い、判定できないまま承認することはありません。
+- 同じ実行中の同じ呼び出し（サーバー・tool・引数が一致）は、`allow` / `deny` の判定結果を再利用します。
+- 判定の理由は `mcp_approval` イベントの `reason` に記録され、CLI の進捗にも表示されます。
+- 判定用モデルには構造化出力（JSON Schema）と instructions の両方で JSON での回答を求めます。構造化出力を無視するローカルサーバーでも、本文中の JSON か、先頭の単語が `allow` / `deny` / `ask` の回答（例: `**allow** — 理由`）を解釈します。どちらでもない回答は `ask` として扱います。
+- 確認が必要になった場合は、`Allow this call? [y/N]` の前に `Automatic review:` として判定の理由が表示されます。判定に失敗した場合もその内容が表示されるので、毎回確認される場合はこの行を確認してください。
+- 判定の要求は1回ごとに API を呼び出し、トークンを消費します。この消費量は結果の `usage` と `max_total_tokens` には含まれません。
+- 判定は補助的な安全策であり、完全ではありません。信頼できない MCP server は登録しないでください。
 
 Responses API 側から届いた承認要求も、ユーザーポリシーと直前の `tool_search` の選択に含まれない tool であれば、承認ハンドラーに渡さずに拒否します。
 

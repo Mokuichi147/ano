@@ -5,6 +5,7 @@
 //! layer. Conversation items use the Responses API JSON format as-is, so
 //! history, compaction, and usage are expressed in that format.
 
+pub mod approval;
 pub mod compaction;
 pub mod environment;
 pub mod mcp;

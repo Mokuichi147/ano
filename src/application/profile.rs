@@ -3,10 +3,14 @@
 use crate::{
     application::{
         approval::{AlwaysApprove, DenyApproval},
-        ports::ApprovalHandler,
+        auto_approval::AutoApproval,
+        ports::{ApprovalHandler, ResponsesApi},
         settings::AgentSettings,
     },
-    domain::{environment::EnvironmentConfig, policy::UserPolicy, tool::ToolContext},
+    domain::{
+        approval::ApprovalMode, environment::EnvironmentConfig, policy::UserPolicy,
+        tool::ToolContext,
+    },
 };
 use std::sync::Arc;
 
@@ -17,7 +21,7 @@ pub struct ExecutionProfile {
     pub settings: AgentSettings,
     pub policy: UserPolicy,
     pub context: ToolContext,
-    pub auto_approve_mcp: bool,
+    pub approval_mode: ApprovalMode,
 }
 
 impl ExecutionProfile {
@@ -50,17 +54,27 @@ impl ExecutionProfile {
                 allow_writes: environment.allow_writes,
                 checks: environment.checks.clone(),
             },
-            auto_approve_mcp: environment.auto_approve_mcp,
+            approval_mode: environment.effective_approval_mode(),
         }
     }
 
-    /// Approval for runs without an interactive terminal: deny unless the
-    /// environment explicitly opts in.
-    pub fn unattended_approval(&self) -> Arc<dyn ApprovalHandler> {
-        if self.auto_approve_mcp {
-            Arc::new(AlwaysApprove)
-        } else {
-            Arc::new(DenyApproval)
+    /// Build the approval handler for this run. `ask` defers to `ask_user`,
+    /// which is a denial for runs nobody can answer; `auto` reviews with
+    /// `client` and passes uncertain calls to `ask_user`.
+    pub fn approval_handler(
+        &self,
+        client: Arc<dyn ResponsesApi>,
+        ask_user: Arc<dyn ApprovalHandler>,
+    ) -> Arc<dyn ApprovalHandler> {
+        match self.approval_mode {
+            ApprovalMode::Allow => Arc::new(AlwaysApprove),
+            ApprovalMode::Deny => Arc::new(DenyApproval),
+            ApprovalMode::Ask => ask_user,
+            ApprovalMode::Auto => Arc::new(AutoApproval::new(
+                client,
+                self.settings.reviewer_model(),
+                ask_user,
+            )),
         }
     }
 }

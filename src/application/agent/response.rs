@@ -103,5 +103,6 @@ pub(super) fn parse_mcp_approval(item: &Value) -> Result<McpApprovalRequest> {
         server_label,
         tool_name,
         arguments,
+        ..McpApprovalRequest::default()
     })
 }

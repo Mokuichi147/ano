@@ -8,7 +8,9 @@ use super::{
     Agent,
 };
 use crate::{
-    application::ports::{ConversationStore, DirectMcpServer, DirectMcpTool, McpApprovalRequest},
+    application::ports::{
+        ApprovalDecision, ConversationStore, DirectMcpServer, DirectMcpTool, McpApprovalRequest,
+    },
     domain::{
         mcp::McpTransport,
         plan::{TaskPlan, TASK_PLAN_NAME},
@@ -27,6 +29,7 @@ use std::{collections::BTreeSet, future::Future, sync::Mutex, time::Duration};
 #[derive(Clone, Copy)]
 pub(super) struct RoundScope<'a> {
     pub round: usize,
+    pub user_request: &'a str,
     pub tool_context: &'a ToolContext,
     pub active: &'a ActiveTools,
     pub mcp_runtime: &'a McpRuntime,
@@ -113,7 +116,8 @@ impl Agent {
                 })
             }
             "mcp_approval_request" => {
-                let approval_request = parse_mcp_approval(item)?;
+                let mut approval_request = parse_mcp_approval(item)?;
+                approval_request.user_request = scope.user_request.to_string();
                 let approved = self
                     .approve_responses_mcp_call(&approval_request, scope)
                     .await?;
@@ -149,6 +153,7 @@ impl Agent {
             mcp_runtime,
             events,
             plan,
+            ..
         } = scope;
         let arguments = match parse_arguments(raw_arguments) {
             Ok(arguments) => arguments,
@@ -316,9 +321,9 @@ impl Agent {
     }
 
     /// Ask the approval handler, one request at a time.
-    async fn request_approval(&self, request: McpApprovalRequest) -> Result<bool> {
+    async fn request_approval(&self, request: McpApprovalRequest) -> Result<ApprovalDecision> {
         let _guard = self.approval_lock.lock().await;
-        self.approval_handler.approve(request).await
+        self.approval_handler.decide(request).await
     }
 
     async fn with_tool_timeout<F>(&self, future: F, timeout_secs: u64) -> Result<Value>
@@ -345,36 +350,46 @@ impl Agent {
             events,
             ..
         } = scope;
-        let permitted = self
-            .mcp
-            .configs()
-            .iter()
-            .find(|server| {
-                server.transport == McpTransport::Responses && server.label == request.server_label
-            })
+        let server = self.mcp.configs().iter().find(|server| {
+            server.transport == McpTransport::Responses && server.label == request.server_label
+        });
+        let permitted = server
             .is_some_and(|server| server.is_tool_allowed(&self.policy, &request.tool_name))
             && active
                 .responses_mcp
                 .get(&request.server_label)
                 .is_some_and(|names| names.contains(&request.tool_name));
 
-        let approved = if permitted {
-            self.request_approval(request.clone()).await?
+        let decision = if permitted {
+            let mut request = request.clone();
+            request.tool_description = server.and_then(|server| {
+                server
+                    .tool_catalog
+                    .iter()
+                    .flatten()
+                    .find(|tool| tool.name == request.tool_name)
+                    .and_then(|tool| tool.description.clone())
+            });
+            self.request_approval(request).await?
         } else {
             events.push(AgentEvent::McpToolBlocked {
                 round,
                 server_label: request.server_label.clone(),
                 tool_name: request.tool_name.clone(),
             });
-            false
+            ApprovalDecision {
+                approved: false,
+                reason: None,
+            }
         };
         events.push(AgentEvent::McpApproval {
             round,
             server_label: request.server_label.clone(),
             tool_name: request.tool_name.clone(),
-            approved,
+            approved: decision.approved,
+            reason: decision.reason,
         });
-        Ok(approved)
+        Ok(decision.approved)
     }
 
     async fn execute_direct_mcp_tool(
@@ -421,18 +436,26 @@ impl Agent {
                 server_label: server_label.clone(),
                 tool_name: tool_name.clone(),
                 arguments: arguments.clone(),
+                tool_description: Some(tool.description.clone()),
+                user_request: scope.user_request.to_string(),
+                review: None,
             };
-            let approved = self.request_approval(approval_request).await?;
+            let decision = self.request_approval(approval_request).await?;
             events.push(AgentEvent::McpApproval {
                 round,
                 server_label: server_label.clone(),
                 tool_name: tool_name.clone(),
-                approved,
+                approved: decision.approved,
+                reason: decision.reason.clone(),
             });
-            if !approved {
+            if !decision.approved {
+                let message = match decision.reason {
+                    Some(reason) => format!("This MCP tool call was denied: {reason}"),
+                    None => "The user denied this MCP tool call.".to_string(),
+                };
                 let output = json!({
                     "error": "mcp_approval_denied",
-                    "message": "The user denied this MCP tool call."
+                    "message": message
                 });
                 events.push(AgentEvent::McpToolResult {
                     round,

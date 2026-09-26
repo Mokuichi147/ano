@@ -74,7 +74,8 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `--disable-tool NAME` | この実行だけ tool を無効化（複数指定可） |
 | `--session PATH` / `--recover-session` | 会話を保存・再開（[セッション](docs/agent-runtime.md#会話セッション)） |
 | `--compact-threshold-bytes N` / `--max-total-tokens N` | 履歴の圧縮とトークン上限（[圧縮と上限](docs/agent-runtime.md#履歴の圧縮)） |
-| `--auto-approve-mcp` / `--non-interactive` | MCP 承認を自動承認 / 確認せず拒否 |
+| `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査し、迷うものだけ確認）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
+| `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |
 | `--quiet` / `--verbose` | 進捗ログを省略 / 引数と結果を含めて詳しく表示 |
 
@@ -99,10 +100,11 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | テキスト | エージェントへの指示として送信 |
 | `/plan` / `/usage` | 作業計画 / この会話のトークン使用量を表示 |
 | `/help` | コマンド一覧 |
+| ↑ / ↓ | 以前の入力を呼び出す |
 | `/exit`、Ctrl+D | 終了 |
 | Ctrl+C | 実行中のターンだけを中断し、会話は続ける（完了した操作は巻き戻しません） |
 
-`--session` を付けない場合、会話はプロセス内のメモリだけに保持されます。MCP の承認は同じ端末で確認します。stdin をパイプで渡すと、1行ずつ指示として処理します（承認は拒否されます）。
+MCP の tool 呼び出しを毎回確認せずに進めるには、`ano chat --approval-mode auto` か、設定の `[agent] approval_mode = "auto"` を使います。判定用モデルが依頼の範囲内で危険の少ない呼び出しを自動で承認し、影響の大きい操作だけを確認します（[自動承認](docs/mcp.md#自動承認auto)）。端末では全角文字の表示幅を考慮する行編集を使うため、IME での日本語入力や削除も正しく表示されます。`--session` を付けない場合、会話はプロセス内のメモリだけに保持されます。MCP の承認は同じ端末で確認します。stdin をパイプで渡すと、1行ずつ指示として処理します（承認は拒否されます）。
 
 ### 画像・音声入力
 
@@ -110,7 +112,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 
 ### 実行環境
 
-`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--auto-approve-mcp` との併用はエラーになります。`--model` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。
+`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--model` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。
 
 ```toml
 [environments.coding]
@@ -152,8 +154,8 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | セクション | 内容 | 詳細 |
 | --- | --- | --- |
 | `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ | [ローカル AI](#ローカル-ailm-studioollama-など) |
-| `[agent]` | モデル・instructions・推論設定・プロジェクト指示・実行ラウンド数・並行数・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
-| `[environments.<name>]` | workspace・許可する tool・書き込み・MCP 自動承認・検証コマンド | [実行環境](#実行環境) |
+| `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
+| `[environments.<name>]` | workspace・許可する tool・書き込み・MCP の承認モード・検証コマンド | [実行環境](#実行環境) |
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
 | `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](docs/mcp.md) |
 | `[webhook]` | 待ち受けアドレス・署名・ジョブ数とタイムアウト | [docs/webhook.md](docs/webhook.md) |
@@ -280,7 +282,7 @@ cargo test
 ## セキュリティ上の注意
 
 - ano は起動したユーザーの OS 権限で動きます。`allow_writes`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。
-- リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` は信頼済みの server に限ってください。
+- リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` と `approval_mode = "allow"` は信頼済みの server に限ってください。`auto` モードの判定は補助的な安全策で、完全ではありません。
 - Webhook は必ず secret を設定して公開します。未認証での起動は loopback アドレスに限られます（[docs/webhook.md](docs/webhook.md#セキュリティ)）。
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。
 - `AGENTS.md` はモデルへの指示として送られます。信頼できないリポジトリを扱う環境では `project_instructions = []` にしてください。

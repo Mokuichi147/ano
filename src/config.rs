@@ -103,13 +103,9 @@ impl AppConfig {
                     .validate()
                     .with_context(|| format!("invalid environments.{name}.checks.{check_name}"))?;
             }
-            if environment
-                .model
-                .as_ref()
-                .is_some_and(|model| model.trim().is_empty())
-            {
-                bail!("environments.{name}.model must not be empty");
-            }
+            environment
+                .validate()
+                .with_context(|| format!("invalid environments.{name}"))?;
         }
         let mut labels = HashSet::new();
         for server in &self.mcp_servers {

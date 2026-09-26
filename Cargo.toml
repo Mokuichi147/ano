@@ -29,3 +29,4 @@ toml = "0.8"
 uuid = { version = "1.10", features = ["v4", "serde"] }
 tempfile = "3.13"
 regex = "1"
+rustyline = { version = "18.0.1", default-features = false }

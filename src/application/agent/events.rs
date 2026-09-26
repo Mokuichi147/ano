@@ -72,6 +72,9 @@ pub enum AgentEvent {
         server_label: String,
         tool_name: String,
         approved: bool,
+        /// Present when the decision was explained, e.g. by automatic review.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     ToolSearch {
         round: usize,

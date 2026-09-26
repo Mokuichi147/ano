@@ -1,5 +1,6 @@
 //! Settings of the agent run loop.
 
+use crate::domain::approval::ApprovalMode;
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::path::{Component, Path};
@@ -44,6 +45,11 @@ pub struct AgentSettings {
     /// Files in the workspace root (for example `AGENTS.md`) whose contents
     /// are appended to the instructions of every run. Missing files are skipped.
     pub project_instructions: Vec<String>,
+    /// How MCP approval requests are answered for CLI runs without a named
+    /// environment.
+    pub approval_mode: ApprovalMode,
+    /// Reviewer model for `approval_mode = "auto"`; defaults to `model`.
+    pub approval_model: Option<String>,
 }
 
 impl Default for AgentSettings {
@@ -62,6 +68,8 @@ impl Default for AgentSettings {
             reasoning_effort: None,
             reasoning_summary: None,
             project_instructions: vec!["AGENTS.md".to_string()],
+            approval_mode: ApprovalMode::Ask,
+            approval_model: None,
         }
     }
 }
@@ -120,6 +128,13 @@ impl AgentSettings {
                 );
             }
         }
+        if self
+            .approval_model
+            .as_ref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            bail!("agent.approval_model must not be empty");
+        }
         for name in &self.project_instructions {
             let path = Path::new(name);
             if name.is_empty()
@@ -131,6 +146,11 @@ impl AgentSettings {
             }
         }
         Ok(())
+    }
+
+    /// The model that reviews tool calls in `auto` approval mode.
+    pub fn reviewer_model(&self) -> &str {
+        self.approval_model.as_deref().unwrap_or(&self.model)
     }
 
     /// The `reasoning` request parameter, when any reasoning option is set.

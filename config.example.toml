@@ -40,6 +40,13 @@ tool_timeout_secs = 120
 # Files in the workspace root appended to the instructions of every run.
 # Missing files are skipped; set [] to disable.
 # project_instructions = ["AGENTS.md"]
+# How MCP approval requests are answered for runs without --environment:
+# "ask" (prompt on the terminal), "auto" (a reviewer model allows low-risk calls
+# within the user's request, denies clearly unsafe ones, and asks about the
+# rest), "allow", or "deny". Override with `--approval-mode`.
+# approval_mode = "ask"
+# Reviewer model for auto mode; defaults to model.
+# approval_model = "a-fast-reviewer-model"
 # Omit instructions to use the built-in plan -> inspect -> edit -> verify workflow.
 # Setting this replaces the built-in instructions.
 # instructions = "Your task-agent instructions..."
@@ -67,7 +74,9 @@ job_timeout_secs = 1800
 workspace = "."
 allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_find", "workspace_check"]
 allow_writes = false
-auto_approve_mcp = false
+# Environments default to "deny" because webhook jobs have nobody to ask.
+# "auto" allows what the reviewer approves and denies the rest when unattended.
+# approval_mode = "auto"
 
 # Example writable coding environment. workspace_* also allows
 # workspace_move and workspace_delete, which cannot be undone.
@@ -75,7 +84,7 @@ auto_approve_mcp = false
 # workspace = "/path/to/my-repository"
 # allowed_tools = ["workspace_*"]
 # allow_writes = true
-# auto_approve_mcp = false
+# approval_mode = "auto"
 # Explicit opt-in: configured checks execute with ano's OS permissions and
 # may run project code. Register only commands for workspaces you trust.
 # [environments.coding.checks.test]

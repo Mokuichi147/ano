@@ -139,6 +139,16 @@ impl Agent {
         self.settings.validate()?;
 
         let user_input = build_user_input(&request.input).await?;
+        // Shown to approval handlers to judge whether a call fits the request.
+        let user_request = request
+            .input
+            .iter()
+            .filter_map(|part| match part {
+                InputPart::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         if let Some(session) = session.as_deref_mut() {
             session.begin_turn(&user_input)?;
         }
@@ -320,6 +330,7 @@ impl Agent {
                     &items,
                     RoundScope {
                         round,
+                        user_request: &user_request,
                         tool_context: &request.context,
                         active: &active,
                         mcp_runtime: &mcp_runtime,

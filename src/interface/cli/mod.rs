@@ -11,14 +11,17 @@ pub use approval::InteractiveApproval;
 use crate::{
     application::{
         agent::{Agent, RunRequest},
-        approval::{AlwaysApprove, DenyApproval},
+        approval::DenyApproval,
         input::InputPart,
         ports::{ApprovalHandler, McpGateway},
         profile::ExecutionProfile,
         registry::ToolRegistry,
     },
     config::AppConfig,
-    domain::{mcp::McpTransport, plan::TASK_PLAN_NAME, session::SessionBinding, tool::ToolContext},
+    domain::{
+        approval::ApprovalMode, mcp::McpTransport, plan::TASK_PLAN_NAME, session::SessionBinding,
+        tool::ToolContext,
+    },
     infrastructure::{
         mcp::McpPool, openai::OpenAiClient, project::read_project_instructions,
         session_store::Session, tools::register_builtin_tools,
@@ -109,7 +112,15 @@ struct AgentOptions {
     )]
     reasoning_effort: Option<String>,
 
-    #[arg(long, conflicts_with_all = ["non_interactive", "environment"], help = "Approve remote MCP calls automatically")]
+    #[arg(
+        long,
+        value_name = "MODE",
+        conflicts_with_all = ["auto_approve_mcp", "non_interactive", "environment"],
+        help = "How MCP approval requests are answered: ask, auto (a reviewer model decides and asks only when unsure), allow, or deny"
+    )]
+    approval_mode: Option<ApprovalMode>,
+
+    #[arg(long, conflicts_with_all = ["non_interactive", "environment"], help = "Approve remote MCP calls automatically (same as --approval-mode allow)")]
     auto_approve_mcp: bool,
 
     #[arg(long, help = "Deny remote MCP approval requests without prompting")]
@@ -348,15 +359,32 @@ fn prepare_agent(
     user_id: &str,
     options: &AgentOptions,
     registry: ToolRegistry,
-    approval: Arc<dyn ApprovalHandler>,
+    ask_user: Arc<dyn ApprovalHandler>,
+    stdin_is_terminal: bool,
 ) -> Result<PreparedAgent> {
+    let profile = resolve_run_context(config, user_id, options)?;
+    let client = Arc::new(OpenAiClient::from_api_settings(&config.api)?);
+    let ask_user: Arc<dyn ApprovalHandler> = if stdin_is_terminal {
+        ask_user
+    } else {
+        match profile.approval_mode {
+            ApprovalMode::Ask => eprintln!(
+                "warning: stdin is not a terminal; MCP approval requests will be denied (use --approval-mode auto or allow)"
+            ),
+            ApprovalMode::Auto => eprintln!(
+                "warning: stdin is not a terminal; MCP calls that automatic review does not allow will be denied"
+            ),
+            ApprovalMode::Allow | ApprovalMode::Deny => {}
+        }
+        Arc::new(DenyApproval)
+    };
+    let approval = profile.approval_handler(client.clone(), ask_user);
     let ExecutionProfile {
         settings,
         policy,
         context,
         ..
-    } = resolve_run_context(config, user_id, options)?;
-    let client = OpenAiClient::from_api_settings(&config.api)?;
+    } = profile;
     let binding = SessionBinding::new(&context, client.base_url())?;
     let session = options
         .session
@@ -386,35 +414,6 @@ fn prepare_agent(
     })
 }
 
-/// Choose how MCP approval requests are answered. `interactive` is the
-/// handler used when the user can be asked on the terminal.
-fn approval_for(
-    config: &AppConfig,
-    options: &AgentOptions,
-    stdin_is_terminal: bool,
-    interactive: Arc<dyn ApprovalHandler>,
-) -> Result<Arc<dyn ApprovalHandler>> {
-    let auto_approve_mcp = match &options.environment {
-        Some(name) => config.environment_for(name)?.auto_approve_mcp,
-        None => options.auto_approve_mcp,
-    };
-    Ok(if options.non_interactive {
-        Arc::new(DenyApproval)
-    } else if auto_approve_mcp {
-        Arc::new(AlwaysApprove)
-    } else if options.environment.is_some() {
-        // Named environments have the same approval behavior as webhook jobs.
-        Arc::new(DenyApproval)
-    } else if !stdin_is_terminal {
-        eprintln!(
-            "warning: stdin is not a terminal; MCP approval requests will be denied (use --auto-approve-mcp to allow them)"
-        );
-        Arc::new(DenyApproval)
-    } else {
-        interactive
-    })
-}
-
 async fn run_agent(
     config: AppConfig,
     user_id: String,
@@ -422,12 +421,8 @@ async fn run_agent(
     registry: ToolRegistry,
 ) -> Result<()> {
     let stdin_is_terminal = std::io::stdin().is_terminal();
-    let approval = approval_for(
-        &config,
-        &args.agent,
-        stdin_is_terminal,
-        Arc::new(InteractiveApproval),
-    )?;
+    // Validate options that need no network before reading a piped prompt.
+    resolve_run_context(&config, &user_id, &args.agent)?;
     let prompt = match args.prompt {
         Some(prompt) => Some(prompt),
         // Only read a piped prompt; never block waiting on an interactive
@@ -444,7 +439,14 @@ async fn run_agent(
         mut session,
         mcp,
         ..
-    } = prepare_agent(&config, &user_id, &args.agent, registry, approval)?;
+    } = prepare_agent(
+        &config,
+        &user_id,
+        &args.agent,
+        registry,
+        Arc::new(InteractiveApproval),
+        stdin_is_terminal,
+    )?;
 
     let mut input = Vec::new();
     if let Some(prompt) = prompt {
@@ -487,9 +489,16 @@ fn resolve_run_context(
                 allow_writes: args.allow_writes,
                 checks: Default::default(),
             },
-            auto_approve_mcp: args.auto_approve_mcp,
+            approval_mode: config.agent.approval_mode,
         },
     };
+    if args.non_interactive {
+        profile.approval_mode = ApprovalMode::Deny;
+    } else if args.auto_approve_mcp {
+        profile.approval_mode = ApprovalMode::Allow;
+    } else if let Some(mode) = args.approval_mode {
+        profile.approval_mode = mode;
+    }
     let settings = &mut profile.settings;
     if let Some(threshold) = args.compact_threshold_bytes {
         settings.compact_threshold_bytes = Some(threshold);
@@ -583,7 +592,7 @@ mod tests {
             settings,
             policy,
             context,
-            auto_approve_mcp: auto_approve,
+            approval_mode,
         } = resolve_run_context(&config, "default", &args.agent).unwrap();
         assert_eq!(settings.model, "profile-model");
         assert_eq!(settings.instructions, "Review only");
@@ -595,7 +604,7 @@ mod tests {
         assert_eq!(context.environment, "review");
         assert!(context.workspace.is_none());
         assert!(!context.allow_writes);
-        assert!(!auto_approve);
+        assert_eq!(approval_mode, ApprovalMode::Deny);
     }
 
     #[test]

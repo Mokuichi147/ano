@@ -10,7 +10,7 @@ use crate::{
     application::{
         approval::{AlwaysApprove, DenyApproval},
         input::InputPart,
-        ports::{ApprovalHandler, McpApprovalRequest},
+        ports::{ApprovalDecision, ApprovalHandler, McpApprovalRequest},
         registry::ToolRegistry,
         settings::AgentSettings,
     },
@@ -46,6 +46,7 @@ async fn with_scope<T>(active: &ActiveTools, body: impl AsyncFnOnce(RoundScope<'
     let plan = Mutex::new(TaskPlan::default());
     body(RoundScope {
         round: 0,
+        user_request: "",
         tool_context: &context,
         active,
         mcp_runtime: &runtime,
@@ -723,6 +724,88 @@ impl ApprovalHandler for CountingApproval {
     }
 }
 
+/// Records the request it receives and explains its decision.
+struct ExplainingApproval {
+    seen: Mutex<Vec<McpApprovalRequest>>,
+}
+
+#[async_trait]
+impl ApprovalHandler for ExplainingApproval {
+    async fn approve(&self, _request: McpApprovalRequest) -> Result<bool> {
+        unreachable!("the agent asks for a decision with a reason")
+    }
+
+    async fn decide(&self, request: McpApprovalRequest) -> Result<ApprovalDecision> {
+        self.seen.lock().unwrap().push(request);
+        Ok(ApprovalDecision {
+            approved: false,
+            reason: Some("auto: not part of the request".into()),
+        })
+    }
+}
+
+#[tokio::test]
+async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
+    let server = McpServerConfig {
+        label: "github".into(),
+        transport: McpTransport::Responses,
+        url: Some("https://example.test/mcp".into()),
+        tunnel_id: None,
+        command: None,
+        args: vec![],
+        cwd: None,
+        env_vars: Default::default(),
+        description: None,
+        authorization_env: None,
+        allowed_tools: None,
+        tool_catalog: Some(vec![McpToolCatalog {
+            name: "close_issue".into(),
+            description: Some("Close an issue".into()),
+        }]),
+        require_approval: McpApprovalMode::Always,
+        reuse_connection: true,
+    };
+    let server_mock = mock_responses(vec![
+        search_response("r1", "close issue"),
+        json!({"id": "r2", "status": "completed", "output": [{
+            "type": "mcp_approval_request", "id": "approval_1", "server_label": "github",
+            "name": "close_issue", "arguments": "{\"number\":7}"
+        }]}),
+        text_response("r3", "Not closed."),
+    ])
+    .await;
+    let handler = Arc::new(ExplainingApproval {
+        seen: Mutex::new(Vec::new()),
+    });
+    let agent = Agent::new(
+        OpenAiClient::new("test", &server_mock.url),
+        AgentSettings::default(),
+        Arc::new(McpPool::new(vec![server])),
+        ToolRegistry::new(),
+        UserPolicy::default(),
+        handler.clone(),
+    );
+    let result = agent
+        .run(RunRequest::new(vec![InputPart::Text(
+            "Summarize issue 7".into(),
+        )]))
+        .await
+        .unwrap();
+
+    let seen = handler.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].user_request, "Summarize issue 7");
+    assert_eq!(seen[0].tool_description.as_deref(), Some("Close an issue"));
+    assert_eq!(seen[0].arguments, json!({"number": 7}));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::McpApproval { approved: false, reason: Some(reason), .. }
+            if reason == "auto: not part of the request"
+    )));
+    let requests = server_mock.requests.lock().unwrap();
+    assert_eq!(requests[2]["input"][0]["approve"], false);
+}
+
 #[tokio::test]
 async fn responses_mcp_approval_requires_policy_and_selection() {
     let server = McpServerConfig {
@@ -750,6 +833,7 @@ async fn responses_mcp_approval_requires_policy_and_selection() {
         server_label: "github".into(),
         tool_name: tool.into(),
         arguments: json!({}),
+        ..McpApprovalRequest::default()
     };
 
     let empty = ActiveTools::default();

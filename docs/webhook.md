@@ -184,5 +184,5 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/jobs/$jobId/cancel" `
 ## セキュリティ
 
 - secret を設定せずに起動する `--allow-unauthenticated` は loopback アドレスへの bind でだけ使えます。secret の環境変数が空文字の場合は起動を拒否します。
-- Webhook 実行は対話端末を持たないため、MCP の承認は既定で拒否されます。信頼済みの環境だけ `auto_approve_mcp = true` にしてください。
+- Webhook 実行は対話端末を持たないため、MCP の承認は既定で拒否されます。環境に `approval_mode = "auto"` を設定すると、判定用モデルが承認した呼び出しだけを実行し、確認が必要と判定されたものは拒否します。すべて承認する `approval_mode = "allow"`（`auto_approve_mcp = true`）は信頼済みの環境だけにしてください。
 - 書き込みは `allow_writes = true` の環境でだけ可能です。

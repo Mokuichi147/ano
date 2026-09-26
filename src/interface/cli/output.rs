@@ -112,12 +112,16 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
             server_label,
             tool_name,
             approved,
+            reason,
             ..
         } => {
-            eprintln!(
-                "[mcp approval] {server_label}:{tool_name} -> {}",
-                if *approved { "approved" } else { "denied" }
-            );
+            let decision = if *approved { "approved" } else { "denied" };
+            match reason {
+                Some(reason) => {
+                    eprintln!("[mcp approval] {server_label}:{tool_name} -> {decision} ({reason})")
+                }
+                None => eprintln!("[mcp approval] {server_label}:{tool_name} -> {decision}"),
+            }
         }
         AgentEvent::ToolSearch { query, results, .. } => {
             eprintln!("[tool search] {query} -> {} result(s)", results.len());

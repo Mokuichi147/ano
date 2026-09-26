@@ -41,7 +41,7 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 | `ResponsesApi` | `/responses` と `/responses/compact` の呼び出し | `infrastructure::openai::OpenAiClient` |
 | `McpGateway` / `DirectMcpServer` | 直接接続 MCP の接続管理と tool 呼び出し | `infrastructure::mcp::McpPool` |
 | `ConversationStore` | 会話の保持（変更ごとに保存） | `infrastructure::session_store::Session`（ファイル）、`infrastructure::memory_store::MemoryConversation`（メモリ） |
-| `ApprovalHandler` | MCP 呼び出しの承認 | `AlwaysApprove`・`DenyApproval`（application）、`InteractiveApproval`（interface/cli） |
+| `ApprovalHandler` | MCP 呼び出しの承認 | `AlwaysApprove`・`DenyApproval`・`AutoApproval`（application）、`InteractiveApproval`・対話モードの確認（interface/cli） |
 
 テストや別の保存先・API を使う場合は、これらのトレイトを実装して `Agent` に渡せます。
 
@@ -55,6 +55,7 @@ src/
 ├── main.rs                 バイナリ。interface::cli::run を呼ぶだけ
 ├── config.rs               config.toml の読み込み（各層の設定を集約）
 ├── domain/
+│   ├── approval.rs         承認モード（ask・auto・allow・deny）
 │   ├── plan.rs             作業計画と完了判定（RunOutcome）
 │   ├── usage.rs            トークン使用量と停止理由
 │   ├── policy.rs           ユーザー別の tool allowlist / denylist
@@ -76,6 +77,7 @@ src/
 │   ├── profile.rs          実行環境から1回の実行設定を解決
 │   ├── settings.rs         AgentSettings
 │   ├── approval.rs         非対話の承認ポリシー
+│   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── infrastructure/
 │   ├── openai.rs           Responses API クライアント（リトライ付き）

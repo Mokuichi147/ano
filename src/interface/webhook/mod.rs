@@ -12,6 +12,7 @@ pub use settings::WebhookSettings;
 use crate::{
     application::{
         agent::{Agent, AgentResult, RunRequest},
+        approval::DenyApproval,
         input::InputPart,
         ports::{McpGateway, ResponsesApi},
         registry::ToolRegistry,
@@ -460,9 +461,9 @@ async fn execute_job(
                 .context("project instructions task failed")??;
         profile.settings.append_project_instructions(&sources);
     }
-    // A webhook has no interactive terminal. The secure default is to deny
-    // approval requests unless the named environment opts in.
-    let approval = profile.unattended_approval();
+    // A webhook has nobody to ask: requests that would go to the user, and
+    // those automatic review does not clearly allow, are denied.
+    let approval = profile.approval_handler(Arc::clone(&state.client), Arc::new(DenyApproval));
     let agent = Agent::new(
         Arc::clone(&state.client),
         profile.settings,

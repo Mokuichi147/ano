@@ -63,18 +63,41 @@ pub trait ConversationStore: Send + Sync {
     fn fail(&mut self, error: &str) -> Result<()>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct McpApprovalRequest {
     pub approval_request_id: String,
     pub server_label: String,
     pub tool_name: String,
     pub arguments: Value,
+    /// The tool's description, when known, to judge what the call does.
+    pub tool_description: Option<String>,
+    /// Text the user gave for the current run, to judge whether the call is
+    /// within the request.
+    pub user_request: String,
+    /// Why an automatic review passed this request on to the user.
+    pub review: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalDecision {
+    pub approved: bool,
+    /// Explanation shown to the user and, for a denial, to the model.
+    pub reason: Option<String>,
 }
 
 /// Decides whether an MCP tool call may run.
 #[async_trait]
 pub trait ApprovalHandler: Send + Sync {
     async fn approve(&self, request: McpApprovalRequest) -> Result<bool>;
+
+    /// Decide with an optional reason. Override this to explain decisions;
+    /// the default wraps `approve`.
+    async fn decide(&self, request: McpApprovalRequest) -> Result<ApprovalDecision> {
+        Ok(ApprovalDecision {
+            approved: self.approve(request).await?,
+            reason: None,
+        })
+    }
 }
 
 /// A tool offered by a directly connected MCP server.
