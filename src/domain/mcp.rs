@@ -62,6 +62,12 @@ pub struct McpServerConfig {
     pub env_vars: HashMap<String, String>,
     pub description: Option<String>,
     pub authorization_env: Option<String>,
+    /// `streamable_http` only: authorize with OAuth using the credentials
+    /// saved by `ano mcp login <label>`.
+    #[serde(default)]
+    pub oauth: bool,
+    /// Scopes requested at login. Defaults to the scopes the server advertises.
+    pub oauth_scopes: Option<Vec<String>>,
     pub allowed_tools: Option<Vec<String>>,
     /// Optional lightweight metadata used by lazy tool discovery. When this
     /// is omitted, names from `allowed_tools` are used without descriptions.
@@ -93,6 +99,17 @@ impl McpServerConfig {
             || !self.args.is_empty()
             || self.cwd.is_some()
             || !self.env_vars.is_empty();
+        if self.oauth_scopes.is_some() && !self.oauth {
+            bail!("MCP server '{label}' sets `oauth_scopes` without `oauth = true`");
+        }
+        if self.oauth {
+            if self.transport != McpTransport::StreamableHttp {
+                bail!("MCP server '{label}' can use `oauth` only with `transport = \"streamable_http\"`");
+            }
+            if self.authorization_env.is_some() {
+                bail!("MCP server '{label}' must not set both `oauth` and `authorization_env`");
+            }
+        }
 
         match self.transport {
             McpTransport::Responses => {

@@ -3,6 +3,7 @@
 
 pub(crate) mod fs;
 pub mod mcp;
+pub mod mcp_oauth;
 pub mod memory_store;
 pub mod openai;
 pub mod project;

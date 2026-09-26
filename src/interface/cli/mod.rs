@@ -4,6 +4,7 @@
 
 mod approval;
 mod chat;
+mod mcp;
 mod output;
 
 pub use approval::InteractiveApproval;
@@ -67,6 +68,8 @@ enum Command {
     Serve(ServeArgs),
     /// Inspect saved conversation state without contacting the model.
     Session(SessionArgs),
+    /// Manage the authorization of MCP servers.
+    Mcp(mcp::McpArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -264,6 +267,7 @@ pub async fn run() -> Result<()> {
         Command::Run(args) => run_agent(config, cli.user, args, registry).await,
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
+        Command::Mcp(args) => mcp::run(&config, args).await,
     }
 }
 
@@ -323,8 +327,9 @@ fn list_tools(
                 server.command.as_deref().unwrap_or("(missing command)")
             ),
             McpTransport::StreamableHttp => format!(
-                "streamable_http: {}",
-                server.url.as_deref().unwrap_or("(missing URL)")
+                "streamable_http: {}{}",
+                server.url.as_deref().unwrap_or("(missing URL)"),
+                if server.oauth { " (OAuth)" } else { "" }
             ),
         };
         println!("  {} ({:?}) -> {}", server.label, server.transport, target);

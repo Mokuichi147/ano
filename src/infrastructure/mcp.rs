@@ -11,6 +11,7 @@ use crate::{
         policy::UserPolicy,
         tool::DIRECT_MCP_PREFIX,
     },
+    infrastructure::mcp_oauth::OAuthStore,
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -45,6 +46,7 @@ pub struct McpPool {
     configs: Vec<McpServerConfig>,
     /// One slot per entry in `configs`.
     slots: Vec<Mutex<Option<Arc<ConnectedMcpServer>>>>,
+    oauth: OAuthStore,
     shutdown_signal: watch::Sender<bool>,
 }
 
@@ -55,8 +57,15 @@ impl McpPool {
         Self {
             configs,
             slots,
+            oauth: OAuthStore::default_location(),
             shutdown_signal,
         }
+    }
+
+    /// Use `store` for the credentials of servers with `oauth = true`.
+    pub fn with_oauth_store(mut self, store: OAuthStore) -> Self {
+        self.oauth = store;
+        self
     }
 
     pub fn configs(&self) -> &[McpServerConfig] {
@@ -134,7 +143,7 @@ impl McpPool {
         let config = &self.configs[index];
         if !config.reuse_connection {
             return Ok(Arc::new(
-                ConnectedMcpServer::connect(index, config, CONNECTION_TIMEOUT).await?,
+                ConnectedMcpServer::connect(index, config, &self.oauth, CONNECTION_TIMEOUT).await?,
             ));
         }
 
@@ -144,8 +153,9 @@ impl McpPool {
         if let Some(server) = slot.as_ref().filter(|server| server.is_healthy()) {
             return Ok(Arc::clone(server));
         }
-        let server =
-            Arc::new(ConnectedMcpServer::connect(index, config, CONNECTION_TIMEOUT).await?);
+        let server = Arc::new(
+            ConnectedMcpServer::connect(index, config, &self.oauth, CONNECTION_TIMEOUT).await?,
+        );
         *slot = Some(Arc::clone(&server));
         Ok(server)
     }
@@ -162,9 +172,10 @@ impl ConnectedMcpServer {
     async fn connect(
         server_index: usize,
         config: &McpServerConfig,
+        oauth: &OAuthStore,
         timeout: Duration,
     ) -> Result<Self> {
-        tokio::time::timeout(timeout, Self::connect_inner(server_index, config))
+        tokio::time::timeout(timeout, Self::connect_inner(server_index, config, oauth))
             .await
             .with_context(|| {
                 format!(
@@ -175,7 +186,11 @@ impl ConnectedMcpServer {
             })?
     }
 
-    async fn connect_inner(server_index: usize, config: &McpServerConfig) -> Result<Self> {
+    async fn connect_inner(
+        server_index: usize,
+        config: &McpServerConfig,
+        oauth: &OAuthStore,
+    ) -> Result<Self> {
         config.validate()?;
         let service = match config.transport {
             McpTransport::Responses => {
@@ -223,9 +238,24 @@ impl ConnectedMcpServer {
                     })?;
                     transport_config = transport_config.auth_header(token);
                 }
-                let transport = StreamableHttpClientTransport::from_config(transport_config);
-                ().serve(transport).await.with_context(|| {
-                    format!("failed to initialize MCP server '{}'", config.label)
+                let initialized = if config.oauth {
+                    let client = oauth.authorized_client(config).await?;
+                    ().serve(StreamableHttpClientTransport::with_client(
+                        client,
+                        transport_config,
+                    ))
+                    .await
+                } else {
+                    ().serve(StreamableHttpClientTransport::from_config(transport_config))
+                        .await
+                };
+                initialized.with_context(|| {
+                    let label = &config.label;
+                    if config.oauth {
+                        format!("failed to initialize MCP server '{label}' (if its authorization expired, run `ano mcp login {label}`)")
+                    } else {
+                        format!("failed to initialize MCP server '{label}'")
+                    }
                 })?
             }
         };
@@ -329,9 +359,12 @@ impl McpGateway for McpPool {
 #[cfg(test)]
 mod tests {
     use super::{ConnectedMcpServer, McpPool};
-    use crate::domain::{
-        mcp::{McpApprovalMode, McpServerConfig, McpTransport},
-        policy::UserPolicy,
+    use crate::{
+        domain::{
+            mcp::{McpApprovalMode, McpServerConfig, McpTransport},
+            policy::UserPolicy,
+        },
+        infrastructure::mcp_oauth::OAuthStore,
     };
     use std::{sync::Arc, time::Duration};
     use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
@@ -348,6 +381,8 @@ mod tests {
             env_vars: Default::default(),
             description: None,
             authorization_env: None,
+            oauth: false,
+            oauth_scopes: None,
             allowed_tools: None,
             tool_catalog: None,
             require_approval: McpApprovalMode::Always,
@@ -391,7 +426,13 @@ mod tests {
     #[tokio::test]
     async fn connection_to_an_unresponsive_server_times_out() {
         let (config, server, _) = stalled_http_server().await;
-        let result = ConnectedMcpServer::connect(0, &config, Duration::from_millis(20)).await;
+        let result = ConnectedMcpServer::connect(
+            0,
+            &config,
+            &OAuthStore::default_location(),
+            Duration::from_millis(20),
+        )
+        .await;
         server.abort();
 
         let error = result.err().expect("connection should time out");

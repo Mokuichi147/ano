@@ -47,12 +47,36 @@ env_vars = { FILES_API_TOKEN = "FILES_API_TOKEN" }
 allowed_tools = ["read_file", "list_files"]
 ```
 
-- Streamable HTTP は `url` に接続先を指定し、必要なら `authorization_env` にトークンが入った環境変数名を設定します。
+- Streamable HTTP は `url` に接続先を指定し、必要なら `authorization_env` にトークンが入った環境変数名を設定します。OAuth が必要な server は `oauth = true` を指定します（[OAuth 認証](#oauth-認証)）。セッション ID を返さないステートレスな server にも接続できます。
 - stdio は `command`・`args`・任意の `cwd` でローカルプロセスを起動します。`cwd` の相対パスは設定ファイルのディレクトリを基準に解決します。`cwd` と `command` の先頭の `~`（`~` と `~/...`）はホームディレクトリに展開します。`args` は展開しないため、ホーム以下のファイルを渡す場合は絶対パスで書いてください。
 - 子プロセスは ano の環境変数を継承します。`env_vars` は「子プロセスへ渡す環境変数名 = ano 側で値を読む環境変数名」の対応表で、値を追加・上書きします。
 - stdio プロセスは ano と同じ OS ユーザー権限で実行され、継承した環境変数にもアクセスできます。信頼できる MCP server だけを登録してください。
 
 直接接続では、接続時に MCP server から tool 名・説明・schema を取得しますが、モデルへは検索カタログの名前と説明だけを使います。`tool_search` が選んだ関数の schema だけを次の Responses 要求に含めます。`allowed_tools` とユーザー別 `disabled_tools` の両方を適用し、Webhook ジョブも同じ制限・承認フローを使います。
+
+### OAuth 認証
+
+OAuth（MCP Authorization）が必要な Streamable HTTP の server は、`oauth = true` を指定して一度 `ano mcp login` を実行します。
+
+```toml
+[[mcp_servers]]
+label = "annict"
+transport = "streamable_http"
+url = "https://mcp.example.invalid/mcp"
+oauth = true
+# oauth_scopes = ["read"]   # 省略時は server が公開している scope
+```
+
+```sh
+ano mcp login annict     # ブラウザで認可し、トークンを保存
+ano mcp logout annict    # 保存したトークンを削除
+```
+
+- `ano mcp login` は server の Protected Resource Metadata から認可サーバーを見つけ、動的クライアント登録（Dynamic Client Registration）と PKCE 付きの認可コードフローを行います。認可後のリダイレクトは `127.0.0.1` の一時ポートで受け取るため、ブラウザは ano と同じマシンで開いてください。`--no-browser` を付けると URL の表示だけを行います。
+- トークンは `~/.ano/oauth/<label>-<URL のハッシュ>.json` に本人だけが読める権限で保存します。`url` を変えると別の server として扱い、再ログインが必要です。
+- 実行時は保存したアクセストークンを送り、期限切れや server に拒否された場合はリフレッシュトークンで自動更新します。更新にも失敗した場合は接続エラーになるので、`ano mcp login` をやり直してください。
+- `ano serve` でも同じ保存先を使います。サーバーを起動するユーザーで事前に `ano mcp login` を実行してください。
+- `oauth` は `transport = "streamable_http"` でだけ使え、`authorization_env` とは併用できません。Responses API 管理方式（既定の `transport`）では OpenAI 側が接続するため ano の OAuth は使えません。
 
 ### 接続の再利用
 

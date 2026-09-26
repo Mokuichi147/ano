@@ -26,7 +26,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 **tool と MCP**
 - workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り・全文検索（正規表現対応）・書き込み・移動・削除
 - 競合検出付きの正確なファイル編集と、設定で登録した検証コマンド（ビルド・テスト）の実行
-- リモート MCP（Responses API 経由、Secure MCP Tunnel 対応）と、ano からの直接接続（stdio / Streamable HTTP）
+- リモート MCP（Responses API 経由、Secure MCP Tunnel 対応）と、ano からの直接接続（stdio / Streamable HTTP。OAuth 認証・ステートレス server 対応）
 - ユーザー・実行環境ごとの tool allowlist / denylist（ワイルドカード対応）と MCP 承認フロー
 
 **入出力と連携**
@@ -59,6 +59,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
 | `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
+| `ano mcp login LABEL` | OAuth が必要な MCP server を認可し、トークンを保存します（`ano mcp logout LABEL` で削除。[OAuth 認証](docs/mcp.md#oauth-認証)） |
 
 共通オプションは `--config PATH`（設定ファイル）と `--user NAME`（`[users]` のユーザー、既定 `default`）です。
 
@@ -265,7 +266,7 @@ registry.register(
 | ドキュメント | 内容 |
 | --- | --- |
 | [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開 |
-| [docs/mcp.md](docs/mcp.md) | MCP の接続方式、接続の再利用、承認、ポリシーの名前空間、検索カタログ |
+| [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、承認、ポリシーの名前空間、検索カタログ |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
 

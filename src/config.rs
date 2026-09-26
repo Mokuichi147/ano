@@ -213,6 +213,21 @@ mod tests {
     }
 
     #[test]
+    fn oauth_requires_streamable_http_without_a_static_token() {
+        let server = |extra: &str| {
+            format!("[[mcp_servers]]\nlabel = 'a'\ntransport = 'streamable_http'\nurl = 'https://x.test/mcp'\n{extra}")
+        };
+        assert!(AppConfig::parse(&server("oauth = true\noauth_scopes = ['read']")).is_ok());
+        for text in [
+            server("oauth = true\nauthorization_env = 'TOKEN'"),
+            server("oauth_scopes = ['read']"),
+            "[[mcp_servers]]\nlabel = 'a'\nurl = 'https://x.test/mcp'\noauth = true".into(),
+        ] {
+            assert!(AppConfig::parse(&text).is_err(), "accepted {text}");
+        }
+    }
+
+    #[test]
     fn missing_explicit_config_file_is_an_error() {
         assert!(AppConfig::load("definitely-missing-ano-config.toml").is_err());
         assert!(AppConfig::load_or_default("definitely-missing-ano-config.toml").is_ok());

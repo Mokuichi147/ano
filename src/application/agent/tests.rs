@@ -757,6 +757,8 @@ async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
         env_vars: Default::default(),
         description: None,
         authorization_env: None,
+        oauth: false,
+        oauth_scopes: None,
         allowed_tools: None,
         tool_catalog: Some(vec![McpToolCatalog {
             name: "close_issue".into(),
@@ -819,6 +821,8 @@ async fn responses_mcp_approval_requires_policy_and_selection() {
         env_vars: Default::default(),
         description: None,
         authorization_env: None,
+        oauth: false,
+        oauth_scopes: None,
         allowed_tools: None,
         tool_catalog: Some(vec![McpToolCatalog {
             name: "list_issues".into(),
@@ -904,6 +908,8 @@ fn remote_server(label: &str) -> McpServerConfig {
         env_vars: Default::default(),
         description: None,
         authorization_env: None,
+        oauth: false,
+        oauth_scopes: None,
         allowed_tools: None,
         tool_catalog: None,
         require_approval: McpApprovalMode::Always,

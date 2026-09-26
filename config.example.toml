@@ -132,6 +132,15 @@ allow_writes = false
 # allowed_tools = ["search_docs", "read_page"]
 # require_approval = "always"
 
+# A Streamable HTTP server that requires OAuth. Run `ano mcp login docs_oauth`
+# once; the tokens are saved under ~/.ano/oauth and refreshed automatically.
+# [[mcp_servers]]
+# label = "docs_oauth"
+# transport = "streamable_http"
+# url = "https://mcp.example.com/mcp"
+# oauth = true
+# oauth_scopes = ["read"]    # optional; defaults to the scopes the server advertises
+
 # Launch a local MCP server over stdio. env_vars maps the child-process
 # variable name to the name of an environment variable available to ano.
 # [[mcp_servers]]
