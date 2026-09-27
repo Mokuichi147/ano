@@ -17,7 +17,7 @@ use crate::{
     },
     domain::{
         mcp::McpTransport,
-        plan::{TaskPlan, TASK_PLAN_NAME},
+        plan::{PlanChange, RunOutcome, TaskPlan, TASK_PLAN_NAME},
         tool::{
             ToolContext, DELEGATE_TASK_NAME, EXEC_DEFAULT_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS,
             TOOL_SEARCH_NAME, WORKSPACE_EXEC_NAME,
@@ -193,14 +193,14 @@ impl Agent {
             }
             let mut plan = plan.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             return Ok(match plan.apply(&arguments) {
-                Ok(changed) => {
-                    if changed {
+                Ok(change) => {
+                    if change == PlanChange::Updated {
                         events.push(AgentEvent::PlanUpdated {
                             round,
                             plan: plan.clone(),
                         });
                     }
-                    (json!({"plan":*plan,"outcome":plan.outcome()}), None)
+                    (plan_result(&plan, change), None)
                 }
                 Err(error) => (
                     json!({"error":"invalid_plan","message":format!("{error:#}"),"plan":*plan}),
@@ -236,10 +236,17 @@ impl Agent {
                             query: selection.query,
                             results: selection.results.clone(),
                         });
+                        // A model can send its web query here, which matches
+                        // no tool, and then give up on the capability.
+                        let message = if selection.results.is_empty() {
+                            "No tool matched. tool_search finds tools by their names and descriptions, usually written in English; it does not search the web. Search again with short English words for the capability you need, such as \"web search\" or \"fetch page\"."
+                        } else {
+                            "The returned tools are available from the next step; tool_search and task_plan remain available unless disabled. Call tool_search again when another capability is needed."
+                        };
                         (
                             json!({
                                 "tools": selection.results,
-                                "message": "The returned tools are available from the next step; tool_search and task_plan remain available unless disabled. Call tool_search again when another capability is needed."
+                                "message": message
                             }),
                             Some(selection.active),
                         )
@@ -661,6 +668,33 @@ impl Agent {
         });
         Ok(output)
     }
+}
+
+/// The `task_plan` result. It says in words that the call succeeded and what
+/// to do next: models have taken an "incomplete" plan status for a failed
+/// call and resent the same plan instead of doing the work.
+fn plan_result(plan: &TaskPlan, change: PlanChange) -> Value {
+    let recorded = match change {
+        PlanChange::Read => format!("This is the current plan (revision {}).", plan.revision),
+        PlanChange::Unchanged => format!(
+            "Nothing changed: the plan already has these steps (revision {}). Sending the same plan again does not advance the work.",
+            plan.revision
+        ),
+        PlanChange::Updated => format!(
+            "The plan was saved as revision {}. This call succeeded.",
+            plan.revision
+        ),
+    };
+    let next = match plan.outcome() {
+        RunOutcome::Incomplete => "Work remains: carry it out now with the other tools, and call task_plan again only when a step or criterion changes status. If no available tool can do it, mark it blocked with the reason and tell the user what is missing.",
+        RunOutcome::Blocked => "The remaining work is blocked; tell the user what was done and what is blocked.",
+        RunOutcome::Completed => "All recorded work is finished.",
+    };
+    json!({
+        "plan": plan,
+        "changed": change == PlanChange::Updated,
+        "message": format!("{recorded} {next}"),
+    })
 }
 
 /// Tell the model that a call was denied and must not simply be retried.

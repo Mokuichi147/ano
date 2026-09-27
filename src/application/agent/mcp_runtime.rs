@@ -1,3 +1,4 @@
+use super::discovery::ActiveTools;
 use crate::{
     application::ports::{DirectMcpServer, DirectMcpTool},
     domain::policy::UserPolicy,
@@ -32,6 +33,27 @@ impl McpRuntime {
     pub fn find_tool(&self, function_name: &str) -> Option<(&dyn DirectMcpServer, &DirectMcpTool)> {
         self.tools()
             .find(|(_, tool)| tool.function_name == function_name)
+    }
+
+    /// The server of the direct MCP function `function_name` and the names
+    /// of its other tools that `active` does not load.
+    pub fn unloaded_siblings(
+        &self,
+        function_name: &str,
+        active: &ActiveTools,
+    ) -> (Option<&str>, Vec<String>) {
+        let Some((server, _)) = self.find_tool(function_name) else {
+            return (None, Vec::new());
+        };
+        let label = server.config().label.as_str();
+        let unloaded = self
+            .tools()
+            .filter(|(other, tool)| {
+                other.config().label == label && !active.direct_mcp.contains(&tool.function_name)
+            })
+            .map(|(_, tool)| tool.name.clone())
+            .collect();
+        (Some(label), unloaded)
     }
 
     pub async fn call_tool(&self, function_name: &str, arguments: &Value) -> Result<Value> {

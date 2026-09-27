@@ -22,6 +22,57 @@ pub(super) struct ActiveTools {
     pub direct_mcp: BTreeSet<String>,
 }
 
+impl ActiveTools {
+    /// The selection of the last `tool_search` in a conversation's history,
+    /// so a new turn can still call the tools that earlier turns loaded.
+    /// Without it the model sees its past calls but not the tools, and may
+    /// announce a capability it can no longer call. Policy and availability
+    /// are checked again when the request's tools are built.
+    pub(super) fn from_history(history: &[Value]) -> Self {
+        let searches: BTreeSet<&str> = history
+            .iter()
+            .filter(|item| item["type"] == "function_call" && item["name"] == TOOL_SEARCH_NAME)
+            .filter_map(|item| item["call_id"].as_str())
+            .collect();
+        let Some(results) = history.iter().rev().find_map(|item| {
+            if item["type"] != "function_call_output"
+                || !item["call_id"]
+                    .as_str()
+                    .is_some_and(|id| searches.contains(id))
+            {
+                return None;
+            }
+            let output: Value = serde_json::from_str(item["output"].as_str()?).ok()?;
+            output["tools"].as_array().cloned()
+        }) else {
+            return Self::default();
+        };
+        let mut active = Self::default();
+        for result in results {
+            let Some(name) = result["name"].as_str() else {
+                continue;
+            };
+            match (
+                result["server_label"].as_str(),
+                result["function_name"].as_str(),
+            ) {
+                (Some(_), Some(function_name)) => {
+                    active.direct_mcp.insert(function_name.to_string());
+                }
+                (Some(label), None) => active
+                    .responses_mcp
+                    .entry(label.to_string())
+                    .or_default()
+                    .push(name.to_string()),
+                (None, _) => {
+                    active.local.insert(name.to_string());
+                }
+            }
+        }
+        active
+    }
+}
+
 impl Agent {
     /// The tools of the next request. `depth` is the nesting of the run;
     /// only the top-level run may delegate to a sub-agent.
@@ -316,7 +367,7 @@ pub fn delegate_task_definition() -> ToolDefinition {
 
 pub fn task_plan_definition() -> ToolDefinition {
     ToolDefinition::new(TASK_PLAN_NAME,
-        "Read or update this task's plan and goal. Use steps=null and goal=null to read. To update, send the current expected_revision (initially 0) with all steps and/or the whole goal; a null field keeps its current value. Use stable ids, at most one in_progress step, and detail for blocked reasons or completion evidence. The goal states the end state (objective) and acceptance criteria that show it is reached; for non-trivial work, define one with concrete, checkable criteria. Mark a criterion met only after verifying it (for example by running a check or reading the result), with the evidence; mark it blocked with the reason if it cannot be met. objective=null keeps the current objective; the objective of a goal set by the user is always kept, so send null and define criteria that cover every condition it states. Changing the goal or dropping steps or criteria requires an explanation. Plans persist with a session. Plan state is not proof that verification passed.",
+        "Read or update this task's plan and goal. Use steps=null and goal=null to read. To update, send the current expected_revision (initially 0) with all steps and/or the whole goal; a null field keeps its current value. Use stable ids, at most one in_progress step, and detail for blocked reasons or completion evidence. Only the user sets a goal (its objective); do not create one yourself, and send goal=null unless the plan already has a goal. For a goal the user set, define concrete, checkable acceptance criteria that cover every condition its objective states; send objective=null, as the user's objective is always kept. Mark a criterion met only after verifying it (for example by running a check or reading the result), with the evidence; mark it blocked with the reason if it cannot be met. Changing or dropping steps or criteria requires an explanation. Plans persist with a session. Plan state is not proof that verification passed.",
         json!({"type":"object","properties":{
             "expected_revision":{"type":["integer","null"],"minimum":0},
             "explanation":{"type":["string","null"]},

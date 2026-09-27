@@ -1397,3 +1397,143 @@ fn the_continuation_notice_names_unverified_criteria_and_open_steps() {
     assert!(!notice.contains("lint"));
     assert!(notice.contains("pending or in_progress steps"));
 }
+
+#[tokio::test]
+async fn repeating_one_tool_asks_the_model_to_change_approach() {
+    let repeat =
+        |id: &str| json!({"id": id, "status": "completed", "output": calls(&["record_action"])});
+    let server = mock_responses(vec![
+        search_response("search", "record_action"),
+        repeat("r1"),
+        repeat("r2"),
+        repeat("r3"),
+        text_response("done", "Stopped repeating"),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Stopped repeating");
+    assert_eq!(count.load(Ordering::SeqCst), 3);
+    let requests = server.requests.lock().unwrap();
+    let is_notice = |item: &Value| {
+        item["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Runtime notice: you have called record_action"))
+    };
+    // Only the third call in a row gets the notice, after its output.
+    for request in &requests[..4] {
+        assert!(!request["input"].as_array().unwrap().iter().any(is_notice));
+    }
+    let input = requests[4]["input"].as_array().unwrap();
+    assert_eq!(input[0]["type"], "function_call_output");
+    assert!(is_notice(&input[1]));
+}
+
+#[test]
+fn the_repetition_notice_names_unloaded_tools_of_the_server() {
+    let unloaded = vec!["tavily_extract".to_string(), "tavily_crawl".to_string()];
+    let notice = super::repetition_notice("mcp__web__tavily_search", 3, Some("web"), &unloaded);
+    assert!(notice.contains("in 3 consecutive steps"));
+    assert!(notice
+        .contains("Tools on server 'web' that are not loaded now: tavily_extract, tavily_crawl."));
+    assert!(!super::repetition_notice("record_action", 3, None, &[]).contains("not loaded now"));
+}
+
+#[test]
+fn a_tool_search_or_another_tool_resets_the_repetition() {
+    let round = |names: &[&str]| calls(names);
+    let mut repetition = super::Repetition::default();
+    assert_eq!(repetition.observe(&round(&["a"])), None);
+    assert_eq!(repetition.observe(&round(&["a", "task_plan"])), None);
+    assert_eq!(repetition.observe(&round(&["tool_search"])), None);
+    assert_eq!(repetition.observe(&round(&["a"])), None);
+    assert_eq!(repetition.observe(&round(&["a"])), None);
+    assert_eq!(repetition.observe(&round(&["a", "b"])), None);
+    assert_eq!(repetition.observe(&round(&["a"])), None);
+    assert_eq!(repetition.observe(&round(&["a"])), None);
+    assert_eq!(repetition.observe(&round(&["a"])), Some(3));
+    assert_eq!(repetition.observe(&round(&["a"])), None);
+    assert_eq!(repetition.observe(&round(&["a"])), None);
+    assert_eq!(repetition.observe(&round(&["a"])), Some(6));
+}
+
+#[test]
+fn calling_only_task_plan_repeatedly_gets_a_notice() {
+    let round = |names: &[&str]| calls(names);
+    let mut repetition = super::Repetition::default();
+    assert_eq!(repetition.observe(&round(&["task_plan"])), None);
+    assert_eq!(repetition.observe(&round(&["task_plan"])), None);
+    assert_eq!(repetition.observe(&round(&["task_plan"])), Some(3));
+    // Work between plan updates ends the streak.
+    assert_eq!(
+        repetition.observe(&round(&["web_fetch", "task_plan"])),
+        None
+    );
+    assert_eq!(repetition.observe(&round(&["task_plan"])), None);
+    let notice = super::repetition_notice("task_plan", 3, None, &[]);
+    assert!(notice.contains("called only task_plan in 3 consecutive steps"));
+    assert!(notice.contains("were not errors"));
+}
+
+#[tokio::test]
+async fn a_new_turn_keeps_the_tools_loaded_in_earlier_turns() {
+    let server = mock_responses(vec![
+        search_response("search", "record_action"),
+        text_response("first", "Found it."),
+        json!({"id": "act", "status": "completed", "output": calls(&["record_action"])}),
+        text_response("second", "Recorded."),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    let binding = SessionBinding::new(&ToolContext::default(), &server.url).unwrap();
+    let mut store = crate::infrastructure::memory_store::MemoryConversation::new(binding);
+
+    agent.run_in_session(request(), &mut store).await.unwrap();
+    let result = agent.run_in_session(request(), &mut store).await.unwrap();
+
+    assert_eq!(result.text, "Recorded.");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+    let requests = server.requests.lock().unwrap();
+    // The second turn starts with the tool the first turn's search loaded.
+    assert!(requests[2]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "record_action"));
+}
+
+#[test]
+fn tool_selection_is_restored_from_the_last_search_only() {
+    let search = |id: &str, tools: Value| {
+        [
+            json!({"type":"function_call","call_id":id,"name":"tool_search","arguments":"{}"}),
+            json!({"type":"function_call_output","call_id":id,"output":json!({"tools":tools}).to_string()}),
+        ]
+    };
+    let mut history = Vec::new();
+    history.extend(search("old", json!([{"kind":"local","name":"old_tool"}])));
+    history.extend(search(
+        "new",
+        json!([
+            {"kind":"local","name":"workspace_read"},
+            {"kind":"mcp","name":"search","server_label":"web","function_name":"mcp__web__search"},
+            {"kind":"mcp","name":"list","server_label":"remote"}
+        ]),
+    ));
+    // Another tool's output is not a selection, even with a `tools` field.
+    history.push(json!({"type":"function_call","call_id":"other","name":"echo","arguments":"{}"}));
+    history.push(json!({"type":"function_call_output","call_id":"other","output":json!({"tools":[{"name":"x"}]}).to_string()}));
+
+    let active = ActiveTools::from_history(&history);
+
+    assert_eq!(active.local, ["workspace_read".to_string()].into());
+    assert_eq!(active.direct_mcp, ["mcp__web__search".to_string()].into());
+    assert_eq!(active.responses_mcp["remote"], ["list"]);
+    assert!(ActiveTools::from_history(&[]).local.is_empty());
+}

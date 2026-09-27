@@ -4,6 +4,8 @@
 //! A plan can carry a goal: the state the work must reach and the acceptance
 //! criteria that show it has. With a goal, the work is complete only when
 //! every criterion is verified as met, not merely when the steps are done.
+//! Only the user sets a goal (e.g. `/goal`); the agent defines and records
+//! its criteria but cannot create, change, or drop one.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,7 +57,8 @@ pub struct TaskGoal {
     /// The state the work must reach.
     pub objective: String,
     pub acceptance: Vec<AcceptanceCriterion>,
-    /// Set by the user. The agent cannot change the objective.
+    /// Set by the user. Always true for new goals; `false` only in sessions
+    /// saved when the agent could set its own goal, which runs drop.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub by_user: bool,
 }
@@ -134,6 +137,17 @@ pub struct TaskPlan {
     pub goal: Option<TaskGoal>,
 }
 
+/// What a `task_plan` call did to the plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanChange {
+    /// The call only read the plan.
+    Read,
+    /// The update sent the steps and goal the plan already has.
+    Unchanged,
+    /// The update was accepted as a new revision.
+    Updated,
+}
+
 /// Describes the recorded plan, not an independent assessment of task quality.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -156,7 +170,8 @@ struct PlanArguments {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GoalArguments {
-    /// `None` keeps the current objective.
+    /// Ignored: the objective the user set is kept.
+    #[allow(dead_code)]
     objective: Option<String>,
     acceptance: Vec<AcceptanceCriterion>,
 }
@@ -183,6 +198,16 @@ impl TaskPlan {
             steps: Vec::new(),
             goal: Some(goal),
         }
+    }
+
+    /// The plan with only a goal the user set. Sessions saved when the agent
+    /// could set its own goal may carry one; it is dropped so it no longer
+    /// keeps the run going.
+    pub fn with_user_goal_only(mut self) -> Self {
+        if self.goal.as_ref().is_some_and(|goal| !goal.by_user) {
+            self.goal = None;
+        }
+        self
     }
 
     /// The same plan without its goal, e.g. when the user clears it.
@@ -277,18 +302,17 @@ impl TaskPlan {
         Ok(())
     }
 
-    /// Returns whether this call changed the plan. Invalid updates never mutate it.
-    pub(crate) fn apply(&mut self, arguments: &Value) -> Result<bool> {
+    /// Invalid updates never mutate the plan.
+    ///
+    /// An update with the steps and goal the plan already has is not a new
+    /// revision: a model that resends the same plan every step, e.g. while
+    /// taking the result for a failure, would otherwise keep "updating" it
+    /// without doing the work.
+    pub(crate) fn apply(&mut self, arguments: &Value) -> Result<PlanChange> {
         let arguments: PlanArguments =
             serde_json::from_value(arguments.clone()).context("invalid task_plan arguments")?;
         if arguments.steps.is_none() && arguments.goal.is_none() {
-            return Ok(false);
-        }
-        let expected = arguments.expected_revision.context(
-            "read task_plan with steps=null and goal=null, then provide expected_revision when updating",
-        )?;
-        if expected != self.revision {
-            bail!("plan conflict: expected revision {expected}, current revision {}; read the plan and retry", self.revision);
+            return Ok(PlanChange::Read);
         }
         let steps = match arguments.steps {
             Some(steps) if steps.is_empty() => {
@@ -302,6 +326,15 @@ impl TaskPlan {
             Some(goal) => Some(self.next_goal(goal)?),
             None => self.goal.clone(),
         };
+        if steps == self.steps && goal == self.goal {
+            return Ok(PlanChange::Unchanged);
+        }
+        let expected = arguments.expected_revision.context(
+            "read task_plan with steps=null and goal=null, then provide expected_revision when updating",
+        )?;
+        if expected != self.revision {
+            bail!("plan conflict: expected revision {expected}, current revision {}; read the plan and retry", self.revision);
+        }
         let next = Self {
             revision: self
                 .revision
@@ -343,26 +376,23 @@ impl TaskPlan {
             bail!("changing or removing existing steps, the goal, or its criteria requires an explanation");
         }
         *self = next;
-        Ok(true)
+        Ok(PlanChange::Updated)
     }
 
-    /// The goal after an update from the agent. The objective of a goal set
-    /// by the user cannot change; the agent defines and records the criteria.
+    /// The goal after an update from the agent. Only the user sets a goal,
+    /// so without one the update is rejected; with one, the agent defines
+    /// and records the criteria but cannot change the objective.
     ///
-    /// The objective of a user's goal is kept whatever the agent sends, so a
-    /// model that cannot echo it exactly is not stuck on rejected updates.
+    /// The objective is kept whatever the agent sends, so a model that
+    /// cannot echo it exactly is not stuck on rejected updates.
     fn next_goal(&self, arguments: GoalArguments) -> Result<TaskGoal> {
-        let by_user = self.goal.as_ref().is_some_and(|goal| goal.by_user);
-        let objective = match (&self.goal, arguments.objective) {
-            (Some(current), _) if current.by_user => current.objective.clone(),
-            (_, Some(objective)) => objective.trim().to_string(),
-            (Some(current), None) => current.objective.clone(),
-            (None, None) => bail!("a new goal needs an objective"),
+        let Some(current) = self.goal.as_ref().filter(|goal| goal.by_user) else {
+            bail!("no goal is set: only the user sets a goal, so send goal=null");
         };
         Ok(TaskGoal {
-            objective,
+            objective: current.objective.clone(),
             acceptance: arguments.acceptance,
-            by_user,
+            by_user: true,
         })
     }
 }
@@ -393,13 +423,43 @@ mod tests {
             assert!(plan.apply(&arguments).is_err());
             assert_eq!(plan, saved);
         }
-        assert!(!plan.apply(&json!({"steps":null})).unwrap());
+        assert_eq!(
+            plan.apply(&json!({"steps":null})).unwrap(),
+            PlanChange::Read
+        );
         assert_eq!(plan.outcome(), RunOutcome::Incomplete);
         plan.apply(&json!({"expected_revision":1,"steps":[{"id":"verify","description":"Verify the change","status":"blocked","detail":"Test database unavailable"}]})).unwrap();
         assert_eq!(plan.outcome(), RunOutcome::Blocked);
         plan.apply(&json!({"expected_revision":2,"steps":[step("verify","completed")]}))
             .unwrap();
         assert_eq!(plan.outcome(), RunOutcome::Completed);
+    }
+
+    #[test]
+    fn resending_the_same_plan_is_not_a_new_revision() {
+        let mut plan = TaskPlan::default();
+        let steps = json!([step("search", "in_progress"), step("report", "pending")]);
+        assert_eq!(
+            plan.apply(&json!({"expected_revision":0,"steps":steps}))
+                .unwrap(),
+            PlanChange::Updated
+        );
+        let saved = plan.clone();
+        // Same steps, even with another explanation or a stale revision.
+        for arguments in [
+            json!({"expected_revision":1,"explanation":null,"steps":steps,"goal":null}),
+            json!({"expected_revision":0,"explanation":"retry","steps":steps}),
+        ] {
+            assert_eq!(plan.apply(&arguments).unwrap(), PlanChange::Unchanged);
+            assert_eq!(plan, saved);
+        }
+        let done = json!([step("search", "completed"), step("report", "in_progress")]);
+        assert_eq!(
+            plan.apply(&json!({"expected_revision":1,"steps":done}))
+                .unwrap(),
+            PlanChange::Updated
+        );
+        assert_eq!(plan.revision, 2);
     }
 
     fn criterion(id: &str, status: &str, evidence: Option<&str>) -> Value {
@@ -412,8 +472,9 @@ mod tests {
 
     #[test]
     fn a_goal_is_complete_only_when_every_criterion_is_verified() {
-        let mut plan = TaskPlan::default();
-        plan.apply(&json!({"expected_revision":0,"explanation":null,"steps":[step("fix","completed")],
+        let mut plan =
+            TaskPlan::default().for_user_goal(TaskGoal::from_user("Tests pass").unwrap());
+        plan.apply(&json!({"expected_revision":1,"explanation":null,"steps":[step("fix","completed")],
             "goal":goal("Tests pass",vec![criterion("tests","pending",None),criterion("lint","pending",None)])}))
             .unwrap();
         // Finished steps do not complete an unverified goal.
@@ -422,31 +483,59 @@ mod tests {
         // Met or blocked needs evidence; invalid updates change nothing.
         let saved = plan.clone();
         for arguments in [
-            json!({"expected_revision":1,"steps":null,"goal":goal("Tests pass",vec![criterion("tests","met",None),criterion("lint","pending",None)])}),
-            json!({"expected_revision":1,"steps":null,"goal":goal("Tests pass",vec![])}),
-            json!({"expected_revision":1,"steps":null,"goal":goal("Tests pass",vec![criterion("x","pending",None),criterion("x","pending",None)])}),
-            // Dropping a criterion or changing the objective needs a reason.
-            json!({"expected_revision":1,"steps":null,"goal":goal("Tests pass",vec![criterion("tests","pending",None)])}),
-            json!({"expected_revision":1,"steps":null,"goal":goal("Something else",vec![criterion("tests","pending",None),criterion("lint","pending",None)])}),
+            json!({"expected_revision":2,"steps":null,"goal":goal("Tests pass",vec![criterion("tests","met",None),criterion("lint","pending",None)])}),
+            json!({"expected_revision":2,"steps":null,"goal":goal("Tests pass",vec![])}),
+            json!({"expected_revision":2,"steps":null,"goal":goal("Tests pass",vec![criterion("x","pending",None),criterion("x","pending",None)])}),
+            // Dropping a criterion needs a reason.
+            json!({"expected_revision":2,"steps":null,"goal":goal("Tests pass",vec![criterion("tests","pending",None)])}),
         ] {
             assert!(plan.apply(&arguments).is_err(), "{arguments}");
             assert_eq!(plan, saved);
         }
 
         // A goal-only update keeps the steps.
-        plan.apply(&json!({"expected_revision":1,"steps":null,"goal":goal("Tests pass",vec![
+        plan.apply(&json!({"expected_revision":2,"steps":null,"goal":goal("Tests pass",vec![
             criterion("tests","met",Some("cargo test: 42 passed")),criterion("lint","blocked",Some("clippy is not installed"))])}))
             .unwrap();
         assert_eq!(plan.steps.len(), 1);
         assert_eq!(plan.outcome(), RunOutcome::Blocked);
-        plan.apply(&json!({"expected_revision":2,"steps":null,"goal":goal("Tests pass",vec![
+        plan.apply(&json!({"expected_revision":3,"steps":null,"goal":goal("Tests pass",vec![
             criterion("tests","met",Some("cargo test: 42 passed")),criterion("lint","met",Some("clippy: no warnings"))])}))
             .unwrap();
         assert_eq!(plan.outcome(), RunOutcome::Completed);
         // Steps left open still keep the work incomplete.
-        plan.apply(&json!({"expected_revision":3,"steps":[step("fix","completed"),step("docs","pending")]}))
+        plan.apply(&json!({"expected_revision":4,"steps":[step("fix","completed"),step("docs","pending")]}))
             .unwrap();
         assert_eq!(plan.outcome(), RunOutcome::Incomplete);
+    }
+
+    #[test]
+    fn only_the_user_sets_a_goal() {
+        // Without a goal from the user, the agent cannot set one; its steps
+        // are kept unchanged too.
+        let mut plan = TaskPlan::default();
+        plan.apply(&json!({"expected_revision":0,"steps":[step("fix","pending")]}))
+            .unwrap();
+        let saved = plan.clone();
+        let error = plan
+            .apply(
+                &json!({"expected_revision":1,"explanation":null,"steps":null,
+                "goal":goal("Tests pass",vec![criterion("tests","pending",None)])}),
+            )
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("only the user sets a goal"));
+        assert_eq!(plan, saved);
+
+        // A goal the agent set in an older session is dropped.
+        let mut old = saved.clone();
+        old.goal = Some(TaskGoal {
+            objective: "Tests pass".into(),
+            acceptance: Vec::new(),
+            by_user: false,
+        });
+        assert_eq!(old.with_user_goal_only(), saved);
+        let user = saved.for_user_goal(TaskGoal::from_user("Tests pass").unwrap());
+        assert_eq!(user.clone().with_user_goal_only(), user);
     }
 
     #[test]
@@ -493,14 +582,6 @@ mod tests {
             "README を直し、リンク切れをなくす"
         );
         assert_eq!(plan.outcome(), RunOutcome::Completed);
-        // An agent's own new goal needs an objective.
-        let mut own = TaskPlan::default();
-        assert!(own
-            .apply(
-                &json!({"expected_revision":0,"explanation":null,"steps":null,
-                "goal":{"objective":null,"acceptance":[criterion("x","pending",None)]}})
-            )
-            .is_err());
 
         let cleared = plan.without_goal();
         assert!(cleared.goal.is_none());

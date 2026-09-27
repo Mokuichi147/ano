@@ -27,7 +27,7 @@ use crate::{
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
-        tool::ToolContext,
+        tool::{ToolContext, TOOL_SEARCH_NAME},
         usage::{ApiOperation, StopReason, UsageSummary},
     },
 };
@@ -331,7 +331,7 @@ impl Agent {
         let events = EventLog::new(self.event_listener.as_ref());
         let mut initial_plan = session
             .as_ref()
-            .map(|session| session.data().plan.clone())
+            .map(|session| session.data().plan.clone().with_user_goal_only())
             .unwrap_or_default();
         if let Some(goal) = goal {
             initial_plan = initial_plan.for_user_goal(goal);
@@ -344,7 +344,11 @@ impl Agent {
             });
         }
         let plan = Mutex::new(initial_plan);
-        let mut active = ActiveTools::default();
+        let mut active = session
+            .as_ref()
+            .map(|session| ActiveTools::from_history(&session.data().history))
+            .unwrap_or_default();
+        let mut repetition = Repetition::default();
         let text_listener = self.text_listener.as_ref().filter(|_| origin.depth == 0);
         let streamed = text_listener.is_some();
 
@@ -505,7 +509,7 @@ impl Agent {
             if let Some(reason) = usage.stop_reason(token_limit) {
                 return finish_limited(reason, usage, response_id, &plan, events, session);
             }
-            let (continuation, selection) = self
+            let (mut continuation, selection) = self
                 .handle_output_items(
                     &items,
                     RoundScope {
@@ -542,6 +546,20 @@ impl Agent {
                 if let Some(reason) = usage.stop_reason(token_limit) {
                     return finish_limited(reason, usage, response_id, &plan, events, session);
                 }
+            }
+            if let Some(count) = repetition.observe(&items) {
+                let name = repetition.name.as_str();
+                let (server, unloaded) = mcp_runtime.unloaded_siblings(name, &active);
+                let notice = json!([{"role":"user","content":[{"type":"input_text","text":repetition_notice(name, count, server, &unloaded)}]}]);
+                if let Some(session) = session.as_deref_mut() {
+                    session.record_runtime_input(&notice)?;
+                }
+                continuation.extend(notice.as_array().unwrap().iter().cloned());
+                events.push(AgentEvent::AssistantProgress {
+                    round,
+                    text: format!("{name} was called in {count} consecutive steps; asking for a different approach."),
+                    streamed: false,
+                });
             }
             if let Some(history) = local_history.as_mut() {
                 history.extend_from_slice(&continuation);
@@ -678,6 +696,81 @@ fn continuation_notice(plan: &TaskPlan) -> String {
         text.push_str("The plan also has pending or in_progress steps; finish them or mark them blocked with a reason. ");
     }
     text.push_str("If something cannot be done, mark it blocked with a concrete reason. Do not mark a criterion met or work completed without doing and verifying it.");
+    text
+}
+
+/// Rounds in a row that call the same tool before the model is told to
+/// change approach, and again after every further run of this length.
+const REPETITION_NOTICE_ROUNDS: usize = 3;
+
+/// Consecutive rounds whose tool calls all went to one tool. A model can
+/// keep calling the one loaded tool while its own text says it will use
+/// another capability, e.g. a search tool while planning to crawl a page.
+#[derive(Default)]
+struct Repetition {
+    name: String,
+    count: usize,
+}
+
+impl Repetition {
+    /// Record the tool calls of one response and return the streak length
+    /// when the model should be told to change approach. `task_plan` calls
+    /// beside other tools are ignored, but a response that only calls
+    /// `task_plan` counts: a model can keep resending its plan instead of
+    /// doing the work. A `tool_search` ends the streak.
+    fn observe(&mut self, items: &[Value]) -> Option<usize> {
+        let mut names = items
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .filter_map(|item| item["name"].as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        if names.len() > 1 {
+            names.remove(TASK_PLAN_NAME);
+        }
+        let single = names
+            .first()
+            .copied()
+            .filter(|name| names.len() == 1 && *name != TOOL_SEARCH_NAME);
+        match single {
+            Some(name) if name == self.name => self.count += 1,
+            Some(name) => {
+                self.name = name.to_string();
+                self.count = 1;
+            }
+            None => {
+                *self = Self::default();
+                return None;
+            }
+        }
+        self.count
+            .is_multiple_of(REPETITION_NOTICE_ROUNDS)
+            .then_some(self.count)
+    }
+}
+
+/// Ask the model to stop repeating one tool. `unloaded` are tools on the
+/// same MCP server that the last `tool_search` did not load.
+fn repetition_notice(
+    name: &str,
+    count: usize,
+    server: Option<&str>,
+    unloaded: &[String],
+) -> String {
+    if name == TASK_PLAN_NAME {
+        return format!(
+            "Runtime notice: you have called only task_plan in {count} consecutive steps. Its results were not errors; the plan is recorded, and updating it again does not do the work. Stop calling task_plan now. Carry out the in_progress step with another tool (call tool_search to load one that fits). If no available tool can do it, answer the user with what you have and what is still missing."
+        );
+    }
+    let mut text = format!(
+        "Runtime notice: you have called {name} in {count} consecutive steps. Calling the same tool again with small variations is not making progress. Only the tools sent with this request can be called; saying that you will use another capability (such as crawling or extracting a page) does not make it available. "
+    );
+    if let (Some(server), false) = (server, unloaded.is_empty()) {
+        text.push_str(&format!(
+            "Tools on server '{server}' that are not loaded now: {}. ",
+            unloaded.join(", ")
+        ));
+    }
+    text.push_str("Change approach: call tool_search to load a tool that fits, work from the results you already have, or, if no available tool can get the answer, tell the user what you found and what is still missing.");
     text
 }
 
