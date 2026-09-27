@@ -89,7 +89,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査し、迷うものだけ確認）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
 | `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |
-| `--quiet` / `--verbose` | 進捗ログを省略 / 引数と結果を含めて詳しく表示 |
+| `--quiet` / `--verbose` | 進捗ログを省略 / 途中経過もすべて残し、引数と結果を含めて詳しく表示 |
 | `--raw` | 回答の Markdown を整形せずにそのまま出力。stdout が端末のときは、既定で回答を生成しながら表示し、見出し・太字・リスト・表を端末向けに整形します（パイプ先や `--json` では完了後にそのまま出力。`NO_COLOR` を設定すると色と文字装飾を省略。[ストリーミング](docs/agent-runtime.md#回答のストリーミング)） |
 
 ```sh

@@ -179,7 +179,7 @@ struct AgentOptions {
     #[arg(
         long,
         short = 'v',
-        help = "Include tool arguments and full results in progress logs"
+        help = "Keep every step in the progress log, with tool arguments and full results"
     )]
     verbose: bool,
 
@@ -562,6 +562,7 @@ async fn run_agent(
         Some(session) => agent.run_in_session(request, session).await,
         None => agent.run(request).await,
     };
+    output::clear_status();
     // Stop stdio MCP server processes before exiting, even on failure.
     mcp.shutdown().await;
     let result = result?;

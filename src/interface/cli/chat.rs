@@ -186,6 +186,8 @@ pub(super) async fn run(
 
     let result = async {
         loop {
+            // The status line of the last turn gives way to the prompt.
+            output::clear_status();
             let input = if interactive {
                 // The line editor reads Ctrl+C itself while a line is edited.
                 lines.read("> ", true).await
@@ -305,6 +307,7 @@ pub(super) async fn run(
                 result = agent.run_in_session(request, store.as_mut()) => Some(result),
                 _ = tokio::signal::ctrl_c() => None,
             };
+            output::clear_status();
             match outcome {
                 Some(Ok(result)) => {
                     let format = output::TextFormat::for_stdout(options.raw);
