@@ -72,13 +72,15 @@ ano serve                      # --bind / --path で設定を上書きできま�
   "user": "default",
   "environment": "coding",
   "images": [{"data": "<base64>", "mime_type": "image/png"}],
-  "audio": [{"data": "<base64>", "format": "wav"}]
+  "audio": [{"data": "<base64>", "format": "wav"}],
+  "goal": "cargo test がすべて通り、警告が増えていない"
 }
 ```
 
 - `user` は `[users]` に定義済みの名前（または `default`）だけを受け付けます。省略時は `default` です。
 - `environment` は省略時 `default` です。未知の環境は `400` になります。
 - `images` と `audio` は任意です。音声は文字起こしせず、native `input_audio`（`mp3` / `wav`）としてそのままモデルへ渡します。
+- `goal` は任意の文字列です。指定すると、モデルがゴールから定めた完了条件をすべて確認するまで作業を続けます（[ゴール](agent-runtime.md#ゴールと完了条件)）。空のゴールは `400` になります。
 - 未知のフィールド（`workspace` など）を含む body は `400` になります。`task` は空にできず、100,000 バイトまでです。
 
 成功すると `202 Accepted` と `job_id`・`status_url`・`cancel_url` を返します。

@@ -604,3 +604,25 @@ fn evicts_oldest_finished_jobs_only() {
     assert_eq!(jobs.len(), 1);
     assert!(jobs.contains_key("running"));
 }
+
+#[tokio::test]
+async fn goals_are_validated_before_a_job_is_accepted() {
+    let state = Arc::new(state());
+    // Keep accepted work queued so the test never contacts the API.
+    let _permit = state.job_slots.acquire().await.unwrap();
+    for (goal, expected) in [
+        (json!(" "), StatusCode::BAD_REQUEST),
+        (json!({"objective": "Tests pass"}), StatusCode::BAD_REQUEST),
+        (json!("cargo test がすべて通る"), StatusCode::ACCEPTED),
+    ] {
+        let payload =
+            Bytes::from(serde_json::to_vec(&json!({"task": "fix", "goal": goal})).unwrap());
+        let response = create_job(
+            State(Arc::clone(&state)),
+            signed_headers(unix_now(), &payload),
+            payload,
+        )
+        .await;
+        assert_eq!(response.status(), expected, "{goal}");
+    }
+}

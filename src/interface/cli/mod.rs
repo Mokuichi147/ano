@@ -22,7 +22,7 @@ use crate::{
     domain::{
         approval::ApprovalMode,
         mcp::McpTransport,
-        plan::TASK_PLAN_NAME,
+        plan::{TaskGoal, TASK_PLAN_NAME},
         session::SessionBinding,
         tool::{ToolContext, DELEGATE_TASK_NAME, WEB_FETCH_NAME, WORKSPACE_EXEC_NAME},
     },
@@ -206,6 +206,13 @@ struct RunArgs {
 
     #[arg(long, help = "Print the result, response ID, and events as JSON")]
     json: bool,
+
+    #[arg(
+        long,
+        value_name = "TEXT",
+        help = "Set the goal (the end state, with any conditions it must meet) and keep working until it is verified; the prompt may then be omitted"
+    )]
+    goal: Option<String>,
 }
 
 #[derive(Debug, Args)]
@@ -278,7 +285,7 @@ pub async fn run() -> Result<()> {
                 if let Some(error) = session.last_error {
                     println!("Last error: {error}");
                 }
-                if !session.plan.steps.is_empty() {
+                if !session.plan.steps.is_empty() || session.plan.goal.is_some() {
                     println!("{}", output::format_plan(&session.plan));
                 }
                 println!(
@@ -511,8 +518,14 @@ async fn run_agent(
         None if !stdin_is_terminal => read_stdin_prompt()?,
         None => None,
     };
-    if prompt.is_none() && args.images.is_empty() && args.audio.is_empty() {
-        anyhow::bail!("provide a prompt, --image, or --audio");
+    let goal = args
+        .goal
+        .as_deref()
+        .map(TaskGoal::from_user)
+        .transpose()
+        .context("invalid --goal")?;
+    if prompt.is_none() && args.images.is_empty() && args.audio.is_empty() && goal.is_none() {
+        anyhow::bail!("provide a prompt, --goal, --image, or --audio");
     }
     let PreparedAgent {
         agent,
@@ -540,7 +553,11 @@ async fn run_agent(
     input.extend(args.images.into_iter().map(InputPart::Image));
     input.extend(args.audio.into_iter().map(InputPart::Audio));
 
-    let request = RunRequest { input, context };
+    let request = RunRequest {
+        input,
+        context,
+        goal,
+    };
     let result = match &mut session {
         Some(session) => agent.run_in_session(request, session).await,
         None => agent.run(request).await,

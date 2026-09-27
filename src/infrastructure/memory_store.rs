@@ -50,6 +50,11 @@ impl ConversationStore for MemoryConversation {
         Ok(())
     }
 
+    fn replace_plan(&mut self, plan: &TaskPlan) -> Result<()> {
+        self.data.replace_plan(plan);
+        Ok(())
+    }
+
     fn record_runtime_input(&mut self, input: &Value) -> Result<()> {
         self.data.record_runtime_input(input)
     }

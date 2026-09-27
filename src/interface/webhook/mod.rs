@@ -18,7 +18,7 @@ use crate::{
         registry::ToolRegistry,
     },
     config::AppConfig,
-    domain::plan::RunOutcome,
+    domain::plan::{RunOutcome, TaskGoal},
     infrastructure::project::read_project_instructions,
 };
 use anyhow::{bail, Context, Result};
@@ -63,6 +63,9 @@ struct WebhookTaskRequest {
     images: Vec<WebhookImage>,
     #[serde(default)]
     audio: Vec<WebhookAudio>,
+    /// Keep working until this goal is verified as reached.
+    #[serde(default)]
+    goal: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -206,6 +209,9 @@ async fn create_job(
     }
     if request.task.len() > MAX_TASK_BYTES {
         return error_response(StatusCode::BAD_REQUEST, "task is too long");
+    }
+    if let Some(Err(error)) = request.goal.as_deref().map(TaskGoal::from_user) {
+        return error_response(StatusCode::BAD_REQUEST, &format!("invalid goal: {error:#}"));
     }
     if !state.config.has_user(&request.user) {
         return error_response(StatusCode::BAD_REQUEST, "unknown user");
@@ -497,6 +503,11 @@ async fn execute_job(
         .run(RunRequest {
             input,
             context: profile.context,
+            goal: request
+                .goal
+                .as_deref()
+                .map(TaskGoal::from_user)
+                .transpose()?,
         })
         .await
 }

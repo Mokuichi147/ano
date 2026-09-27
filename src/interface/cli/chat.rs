@@ -19,7 +19,7 @@ use crate::{
         registry::ToolRegistry,
     },
     config::AppConfig,
-    domain::session::SessionStatus,
+    domain::{plan::TaskGoal, session::SessionStatus},
     infrastructure::memory_store::MemoryConversation,
 };
 use anyhow::Result;
@@ -33,6 +33,9 @@ use tokio::sync::oneshot;
 
 const HELP: &str = "Commands:
   /plan    show the task plan
+  /goal TEXT
+           set a goal and work until it is verified as reached
+  /goal    show the goal;  /goal clear  clear it
   /usage   show token usage of this conversation
   /compact compact the conversation now (summarize it to save context)
   /clear   start a new conversation (not with --session)
@@ -201,6 +204,7 @@ pub(super) async fn run(
                 Input::Eof => break,
             };
             let prompt = line.trim();
+            let mut goal = None;
             match prompt {
                 "" => continue,
                 "/exit" | "/quit" => break,
@@ -250,6 +254,36 @@ pub(super) async fn run(
                     }
                     continue;
                 }
+                command if command == "/goal" || command.starts_with("/goal ") => {
+                    match command["/goal".len()..].trim() {
+                        "" => {
+                            match &store.data().plan.goal {
+                                Some(goal) => eprintln!("{}", output::format_goal(goal)),
+                                None => eprintln!(
+                                    "(no goal; set one with /goal TEXT)"
+                                ),
+                            }
+                            continue;
+                        }
+                        "clear" => {
+                            if store.data().plan.goal.is_some() {
+                                let plan = store.data().plan.without_goal();
+                                store.replace_plan(&plan)?;
+                                eprintln!("(goal cleared)");
+                            } else {
+                                eprintln!("(no goal to clear)");
+                            }
+                            continue;
+                        }
+                        text => match TaskGoal::from_user(text) {
+                            Ok(parsed) => goal = Some(parsed),
+                            Err(error) => {
+                                eprintln!("error: {error:#}");
+                                continue;
+                            }
+                        },
+                    }
+                }
                 command if command.starts_with('/') => {
                     eprintln!("unknown command {command}; type /help");
                     continue;
@@ -258,8 +292,14 @@ pub(super) async fn run(
             }
 
             let request = RunRequest {
-                input: vec![InputPart::Text(prompt.to_string())],
+                // The goal notice states the request.
+                input: if goal.is_some() {
+                    Vec::new()
+                } else {
+                    vec![InputPart::Text(prompt.to_string())]
+                },
                 context: context.clone(),
+                goal,
             };
             let outcome = tokio::select! {
                 result = agent.run_in_session(request, store.as_mut()) => Some(result),

@@ -115,3 +115,95 @@ async fn unfinished_plans_continue_within_budget_and_resume_across_cli_processes
     assert_eq!(read_plan["plan"]["steps"][0]["status"], "in_progress");
     server.abort();
 }
+
+fn goal_call(revision: u64) -> Value {
+    json!({"type":"function_call","call_id":"goal","name":"task_plan","arguments":json!({
+        "expected_revision":revision,"explanation":null,"steps":null,
+        "goal":{"objective":"Docs are updated","acceptance":[
+            {"id":"c1","description":"README mentions goals","status":"met","evidence":"README.md line 12"}]}
+    }).to_string()})
+}
+
+/// A goal from the command line is saved with the session, reported with the
+/// answer, and needs no prompt.
+#[tokio::test]
+async fn run_with_a_goal_reports_verified_criteria() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&requests);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(payload): Json<Value>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                let mut requests = captured.lock().unwrap();
+                requests.push(payload);
+                let round = requests.len();
+                let item = match round {
+                    1 => goal_call(1),
+                    _ => final_message("README に追記しました"),
+                };
+                Json(json!({"id":format!("response_{round}"),"status":"completed","output":[item]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    let ano = |arguments: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+        command
+            .current_dir(directory.path())
+            .env("OPENAI_BASE_URL", &endpoint)
+            .env("OPENAI_API_KEY", "fixture-key")
+            .args(arguments)
+            // Without a prompt, a piped stdin would be read as one.
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        async move {
+            tokio::time::timeout(Duration::from_secs(15), command.output())
+                .await
+                .unwrap()
+                .unwrap()
+        }
+    };
+
+    let output = ano(&[
+        "run",
+        "--session",
+        ".ano/goal.json",
+        "--goal",
+        "Docs are updated",
+    ])
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("README に追記しました"), "{stdout}");
+    assert!(
+        stdout.contains("Goal (set by the user): Docs are updated"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("[met] c1: README mentions goals — README.md line 12"),
+        "{stdout}"
+    );
+
+    let inspected = ano(&["session", ".ano/goal.json"]).await;
+    let inspected = String::from_utf8_lossy(&inspected.stdout);
+    assert!(inspected.contains("Plan: Completed"), "{inspected}");
+    assert!(inspected.contains("[met] c1"), "{inspected}");
+    server.abort();
+
+    let requests = requests.lock().unwrap();
+    let input = requests[0]["input"].as_array().unwrap();
+    assert_eq!(input.len(), 1);
+    assert_eq!(input[0]["content"].as_array().unwrap().len(), 1);
+    assert!(input[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Objective: Docs are updated\n"));
+}

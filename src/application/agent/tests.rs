@@ -17,7 +17,7 @@ use crate::{
     domain::{
         environment::CheckConfig,
         mcp::{McpApprovalMode, McpServerConfig, McpToolCatalog, McpTransport},
-        plan::TaskPlan,
+        plan::{RunOutcome, TaskGoal, TaskPlan},
         policy::UserPolicy,
         session::SessionBinding,
         tool::{ToolContext, ToolDefinition},
@@ -1304,4 +1304,96 @@ async fn large_tool_outputs_are_cut_to_head_and_tail() {
     assert!(output["original_bytes"].as_u64().unwrap() > 30_000);
     assert!(output["head"].as_str().unwrap().contains("BEGIN"));
     assert!(output["tail"].as_str().unwrap().contains("END"));
+}
+
+#[tokio::test]
+async fn a_user_goal_keeps_the_run_going_until_its_criteria_are_verified() {
+    let verify = json!({
+        "id": "verify", "status": "completed",
+        "output": [{
+            "type": "function_call", "call_id": "plan1", "name": "task_plan",
+            "arguments": json!({"expected_revision": 1, "explanation": null, "steps": null,
+                "goal": {"objective": "Tests pass", "acceptance": [
+                    {"id": "c1", "description": "cargo test succeeds", "status": "met", "evidence": "42 passed"}
+                ]}}).to_string()
+        }]
+    });
+    let server = mock_responses(vec![
+        text_response("claim", "Done."),
+        verify,
+        text_response("done", "Verified: 42 tests passed."),
+    ])
+    .await;
+    let mut agent = agent(ToolRegistry::new(), Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    let goal = TaskGoal::from_user("Tests pass").unwrap();
+
+    let result = agent
+        .run(RunRequest::new(Vec::new()).with_goal(goal))
+        .await
+        .unwrap();
+
+    assert_eq!(result.text, "Verified: 42 tests passed.");
+    assert_eq!(result.outcome, RunOutcome::Completed);
+    let goal = result.plan.goal.unwrap();
+    assert_eq!(goal.acceptance[0].evidence.as_deref(), Some("42 passed"));
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    let notice = requests[0]["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(notice.starts_with("Goal set by the user"));
+    assert!(notice.contains("Objective: Tests pass\n"));
+    assert!(notice.contains("define concrete, checkable acceptance criteria"));
+    // Claiming completion without verification is not accepted.
+    let continuation = requests[1]["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(continuation.contains("It has no acceptance criteria"));
+}
+
+#[tokio::test]
+async fn an_unverified_goal_ends_incomplete_at_the_round_limit() {
+    let server = mock_responses(vec![
+        text_response("claim", "Done."),
+        text_response("final", "Could not verify."),
+    ])
+    .await;
+    let mut agent = agent(ToolRegistry::new(), Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    agent.settings.max_tool_rounds = 2;
+    let goal = TaskGoal::from_user("Docs are updated").unwrap();
+
+    let result = agent
+        .run(RunRequest::new(vec![InputPart::Text("Update the docs".into())]).with_goal(goal))
+        .await
+        .unwrap();
+
+    assert_eq!(result.outcome, RunOutcome::Incomplete);
+    assert_eq!(result.stop_reason, StopReason::RoundLimit);
+    let requests = server.requests.lock().unwrap();
+    let notice = requests[0]["input"][0]["content"][1]["text"]
+        .as_str()
+        .unwrap();
+    assert!(notice.contains("Objective: Docs are updated"));
+    assert!(requests[1]["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("It has no acceptance criteria"));
+}
+
+#[test]
+fn the_continuation_notice_names_unverified_criteria_and_open_steps() {
+    let mut plan = TaskPlan::default().for_user_goal(TaskGoal::from_user("Tests pass").unwrap());
+    plan.apply(&json!({"expected_revision": 1, "explanation": null,
+        "steps": [{"id": "fix", "description": "Fix", "status": "in_progress", "detail": null}],
+        "goal": {"objective": "Tests pass", "acceptance": [
+            {"id": "tests", "description": "cargo test succeeds", "status": "pending", "evidence": null},
+            {"id": "lint", "description": "clippy is clean", "status": "met", "evidence": "no warnings"}
+        ]}}))
+        .unwrap();
+    let notice = super::continuation_notice(&plan);
+    assert!(notice.contains("not verified: tests (cargo test succeeds)."));
+    assert!(!notice.contains("lint"));
+    assert!(notice.contains("pending or in_progress steps"));
 }

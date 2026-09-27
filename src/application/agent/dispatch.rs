@@ -444,6 +444,7 @@ impl Agent {
         let request = RunRequest {
             input: vec![InputPart::Text(task.to_string())],
             context: scope.tool_context.clone(),
+            goal: None,
         };
         let origin = RunOrigin {
             depth: scope.depth + 1,

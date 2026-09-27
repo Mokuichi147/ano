@@ -24,7 +24,7 @@ use crate::{
             compacted_history, compaction_due, summarized_history, summary_transcript,
             CompactionMethod, CompactionRecord,
         },
-        plan::{RunOutcome, TaskPlan, TASK_PLAN_NAME},
+        plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
         tool::ToolContext,
@@ -44,6 +44,11 @@ use std::sync::{Arc, Mutex};
 pub struct RunRequest {
     pub input: Vec<InputPart>,
     pub context: ToolContext,
+    /// A goal the user sets for this run, e.g. from `TaskGoal::from_user`.
+    /// It replaces the conversation's plan, and the run keeps working until
+    /// its acceptance criteria are verified as met or blocked, or the
+    /// budget runs out. `input` may then be empty.
+    pub goal: Option<TaskGoal>,
 }
 
 impl RunRequest {
@@ -51,7 +56,13 @@ impl RunRequest {
         Self {
             input,
             context: ToolContext::default(),
+            goal: None,
         }
+    }
+
+    pub fn with_goal(mut self, goal: TaskGoal) -> Self {
+        self.goal = Some(goal);
+        self
     }
 }
 
@@ -274,11 +285,15 @@ impl Agent {
     ) -> Result<AgentResult> {
         self.settings.validate()?;
 
-        let user_input = build_user_input(&request.input).await?;
+        let goal = request.goal.clone().filter(|_| origin.depth == 0);
+        let mut input = request.input.clone();
+        if let Some(goal) = &goal {
+            input.push(InputPart::Text(goal_notice(goal)));
+        }
+        let user_input = build_user_input(&input).await?;
         // Shown to approval handlers to judge whether a call fits the request.
         let user_request = origin.user_request.clone().unwrap_or_else(|| {
-            request
-                .input
+            input
                 .iter()
                 .filter_map(|part| match part {
                     InputPart::Text(text) => Some(text.as_str()),
@@ -314,12 +329,21 @@ impl Agent {
         let mut next_input = user_input;
         let mut previous_response_id: Option<String> = None;
         let events = EventLog::new(self.event_listener.as_ref());
-        let plan = Mutex::new(
-            session
-                .as_ref()
-                .map(|session| session.data().plan.clone())
-                .unwrap_or_default(),
-        );
+        let mut initial_plan = session
+            .as_ref()
+            .map(|session| session.data().plan.clone())
+            .unwrap_or_default();
+        if let Some(goal) = goal {
+            initial_plan = initial_plan.for_user_goal(goal);
+            if let Some(session) = session.as_deref_mut() {
+                session.replace_plan(&initial_plan)?;
+            }
+            events.push(AgentEvent::PlanUpdated {
+                round: 0,
+                plan: initial_plan.clone(),
+            });
+        }
+        let plan = Mutex::new(initial_plan);
         let mut active = ActiveTools::default();
         let text_listener = self.text_listener.as_ref().filter(|_| origin.depth == 0);
         let streamed = text_listener.is_some();
@@ -560,7 +584,7 @@ impl Agent {
                     && !final_round
                     && !self.policy.is_disabled(TASK_PLAN_NAME)
                 {
-                    next_input = json!([{"role":"user","content":[{"type":"input_text","text":"Runtime notice: your recorded task plan still has pending or in_progress steps. Continue the requested work and update task_plan before giving the final answer. If a step cannot proceed, mark it blocked with a concrete reason. Do not mark unperformed work completed just to end the run."}]}]);
+                    next_input = json!([{"role":"user","content":[{"type":"input_text","text":continuation_notice(&plan)}]}]);
                     if let Some(session) = session.as_deref_mut() {
                         session.record_runtime_input(&next_input)?;
                     }
@@ -569,7 +593,12 @@ impl Agent {
                     }
                     events.push(AgentEvent::AssistantProgress {
                         round,
-                        text: "Continuing unfinished plan steps.".into(),
+                        text: if plan.goal.is_some() {
+                            "Continuing until the goal's acceptance criteria are verified."
+                        } else {
+                            "Continuing unfinished plan steps."
+                        }
+                        .into(),
                         streamed: false,
                     });
                     continue;
@@ -609,6 +638,47 @@ impl Agent {
 
         bail!("agent reached max_tool_rounds")
     }
+}
+
+/// Tell the model about a goal the user set for this run.
+fn goal_notice(goal: &TaskGoal) -> String {
+    format!(
+        "Goal set by the user. It is recorded in task_plan and replaces any earlier plan; the objective cannot be changed, so send objective=null when you update the goal.\nObjective: {}\nFirst define concrete, checkable acceptance criteria for it in task_plan, including every condition the objective states. Then work until every criterion is verified as met, and record each verification with its evidence in task_plan. If a criterion cannot be met, mark it blocked with the reason.",
+        goal.objective
+    )
+}
+
+/// Ask the model to go on when it answered with the work unfinished.
+fn continuation_notice(plan: &TaskPlan) -> String {
+    let steps_open = plan.steps.iter().any(|step| {
+        matches!(
+            step.status,
+            crate::domain::plan::StepStatus::Pending | crate::domain::plan::StepStatus::InProgress
+        )
+    });
+    let Some(goal) = &plan.goal else {
+        return "Runtime notice: your recorded task plan still has pending or in_progress steps. Continue the requested work and update task_plan before giving the final answer. If a step cannot proceed, mark it blocked with a concrete reason. Do not mark unperformed work completed just to end the run.".to_string();
+    };
+    let mut text = String::from("Runtime notice: the goal is not reached yet. ");
+    if goal.acceptance.is_empty() {
+        text.push_str("It has no acceptance criteria: define concrete, checkable criteria in task_plan, then verify each one. ");
+    } else {
+        let pending = goal
+            .pending()
+            .map(|criterion| format!("{} ({})", criterion.id, criterion.description))
+            .collect::<Vec<_>>();
+        if !pending.is_empty() {
+            text.push_str(&format!(
+                "These acceptance criteria are not verified: {}. Verify each one (for example by running a check or reading the result) and record it in task_plan as met with the evidence; where one is not met, continue the work. ",
+                pending.join("; ")
+            ));
+        }
+    }
+    if steps_open {
+        text.push_str("The plan also has pending or in_progress steps; finish them or mark them blocked with a reason. ");
+    }
+    text.push_str("If something cannot be done, mark it blocked with a concrete reason. Do not mark a criterion met or work completed without doing and verifying it.");
+    text
 }
 
 fn observe_usage(

@@ -17,6 +17,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 **エージェント実行**
 - Responses API の function call を自動実行し、複数の呼び出しを並行処理
 - 工程と進捗を記録する作業計画（`task_plan`）と、未完了工程の継続・完了判定
+- ゴールの指定（`--goal` / `/goal`）。モデルがゴールから完了条件を定め、すべての達成を確認するまで作業を続ける
 - 登録した tool・MCP を検索で必要な分だけ公開する遅延公開（`tool_search`）
 - 調査や独立した作業を新しい会話に切り出すサブエージェント（`delegate_task`）
 - 保存して別プロセスから再開できる会話セッションと、複数ターンの対話モード（`ano chat`）
@@ -80,6 +81,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `--allow-web` | 環境を指定しない場合に、`web_fetch` での Web ページ取得を許可（[Web ページの取得](#web-ページの取得web_fetch)） |
 | `--model NAME` | モデルを変更 |
 | `--reasoning-effort LEVEL` | 推論の深さ（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`。対応範囲はモデルによる） |
+| `--goal TEXT` | ゴール（最終的にどうなっていればよいか。満たすべき条件も文中に書ける）を指定し、達成が確認されるまで作業を続ける。プロンプトは省略可（`run` のみ。chat では `/goal`。[ゴールと完了条件](docs/agent-runtime.md#ゴールと完了条件)） |
 | `--image PATH` / `--audio PATH` | 画像・音声を入力に追加（複数指定可、`run` のみ） |
 | `--disable-tool NAME` | この実行だけ tool を無効化（複数指定可） |
 | `--session PATH` / `--recover-session` | 会話を保存・再開（[セッション](docs/agent-runtime.md#会話セッション)） |
@@ -110,6 +112,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | --- | --- |
 | テキスト | エージェントへの指示として送信 |
 | `/plan` / `/usage` | 作業計画 / この会話のトークン使用量を表示 |
+| `/goal TEXT` | ゴールを指定して作業を始める。`/goal` で表示、`/goal clear` で解除 |
 | `/compact` | 会話を今すぐ圧縮する（要約などで履歴を小さくし、コンテキストを空ける。[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)） |
 | `/clear` | 新しい会話を始める（`--session` 指定時は使えません） |
 | `/help` | コマンド一覧 |
@@ -152,7 +155,7 @@ timeout_secs = 900
 | `response_id` | 最後の応答の ID |
 | `events` | tool 呼び出しなどのイベント（引数と結果を含む） |
 | `outcome` | 作業計画から見た完了状態（`completed` / `blocked` / `incomplete`） |
-| `plan` | 作業計画 |
+| `plan` | 作業計画（ゴールがあれば `plan.goal` に完了条件ごとの状態と根拠） |
 | `usage` | この実行のトークン使用量 |
 | `stop_reason` | 停止理由（`final_answer` / `round_limit` / `token_limit` / `usage_unavailable`） |
 

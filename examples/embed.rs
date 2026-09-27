@@ -73,6 +73,7 @@ async fn main() -> Result<()> {
             workspace: Some(std::env::current_dir()?),
             ..ToolContext::default()
         },
+        goal: None,
     };
     let result = agent.run(request).await;
     mcp.shutdown().await;

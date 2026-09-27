@@ -141,6 +141,10 @@ impl SessionData {
         self.record_tool_results(std::slice::from_ref(result));
     }
 
+    pub fn replace_plan(&mut self, plan: &TaskPlan) {
+        self.plan = plan.clone();
+    }
+
     pub fn record_runtime_input(&mut self, input: &Value) -> Result<()> {
         self.history.extend(
             input

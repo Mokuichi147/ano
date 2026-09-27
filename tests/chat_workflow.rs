@@ -198,3 +198,82 @@ async fn chat_compacts_on_request_with_a_summary() {
         .ends_with("answer 2"));
     assert_eq!(history[1]["content"][0]["text"], "次の質問");
 }
+
+/// `/goal` sets a goal and starts working on it; `/goal` shows it and
+/// `/goal clear` removes it.
+#[tokio::test]
+async fn chat_sets_shows_and_clears_a_goal() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&requests);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(payload): Json<Value>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                let mut requests = captured.lock().unwrap();
+                requests.push(payload);
+                let round = requests.len();
+                let item = if round == 1 {
+                    json!({"type":"function_call","call_id":"goal","name":"task_plan","arguments":json!({
+                        "expected_revision":1,"explanation":null,"steps":null,
+                        "goal":{"objective":"Fix it","acceptance":[
+                            {"id":"c1","description":"A works","status":"met","evidence":"checked A"}]}
+                    }).to_string()})
+                } else {
+                    json!({"type":"message","role":"assistant",
+                        "content":[{"type":"output_text","text":format!("answer {round}")}]})
+                };
+                Json(json!({"id":format!("resp_{round}"),"status":"completed","output":[item]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let workspace = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .current_dir(workspace.path())
+        .env("OPENAI_BASE_URL", &endpoint)
+        .env("OPENAI_API_KEY", "test-fixture-key")
+        .arg("chat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all("/goal\n/goal   \n/goal Fix it\n/goal\n/goal clear\n/goal\n".as_bytes())
+        .await
+        .unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stdout.contains("answer 2"), "{stdout}");
+    assert!(stdout.contains("[met] c1: A works — checked A"), "{stdout}");
+    assert_eq!(stderr.matches("(no goal;").count(), 3, "{stderr}");
+
+    assert!(
+        stderr.contains("Goal (set by the user): Fix it\n  [met] c1: A works"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("(goal cleared)"), "{stderr}");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let input = requests[0]["input"].as_array().unwrap();
+    assert_eq!(input.len(), 1);
+    assert!(input[0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Goal set by the user"));
+}

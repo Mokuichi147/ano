@@ -316,7 +316,7 @@ pub fn delegate_task_definition() -> ToolDefinition {
 
 pub fn task_plan_definition() -> ToolDefinition {
     ToolDefinition::new(TASK_PLAN_NAME,
-        "Read or replace this task's plan. Use steps=null to read. To update, send all steps and the current expected_revision (initially 0). Use stable ids, at most one in_progress step, and detail for blocked reasons or completion evidence. Keep the plan current while working; mark completed only after doing the work. Changing the goal or dropping steps requires an explanation. Plans persist with a session. Plan state is not proof that verification passed.",
+        "Read or update this task's plan and goal. Use steps=null and goal=null to read. To update, send the current expected_revision (initially 0) with all steps and/or the whole goal; a null field keeps its current value. Use stable ids, at most one in_progress step, and detail for blocked reasons or completion evidence. The goal states the end state (objective) and acceptance criteria that show it is reached; for non-trivial work, define one with concrete, checkable criteria. Mark a criterion met only after verifying it (for example by running a check or reading the result), with the evidence; mark it blocked with the reason if it cannot be met. objective=null keeps the current objective; the objective of a goal set by the user is always kept, so send null and define criteria that cover every condition it states. Changing the goal or dropping steps or criteria requires an explanation. Plans persist with a session. Plan state is not proof that verification passed.",
         json!({"type":"object","properties":{
             "expected_revision":{"type":["integer","null"],"minimum":0},
             "explanation":{"type":["string","null"]},
@@ -325,8 +325,17 @@ pub fn task_plan_definition() -> ToolDefinition {
                     "id":{"type":"string"},"description":{"type":"string"},
                     "status":{"type":"string","enum":["pending","in_progress","completed","blocked"]},
                     "detail":{"type":["string","null"]}
-                },"required":["id","description","status","detail"],"additionalProperties":false}}
-        },"required":["expected_revision","explanation","steps"],"additionalProperties":false}))
+                },"required":["id","description","status","detail"],"additionalProperties":false}},
+            "goal":{"type":["object","null"],"properties":{
+                "objective":{"type":["string","null"]},
+                "acceptance":{"type":"array","minItems":1,"maxItems":20,"items":{
+                    "type":"object","properties":{
+                        "id":{"type":"string"},"description":{"type":"string"},
+                        "status":{"type":"string","enum":["pending","met","blocked"]},
+                        "evidence":{"type":["string","null"]}
+                    },"required":["id","description","status","evidence"],"additionalProperties":false}}
+            },"required":["objective","acceptance"],"additionalProperties":false}
+        },"required":["expected_revision","explanation","steps","goal"],"additionalProperties":false}))
 }
 
 /// Build the Responses API `mcp` tool that exposes only `selected_tools`.

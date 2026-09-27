@@ -130,6 +130,8 @@ pub trait ConversationStore: Send + Sync {
     /// Must be durable before any call in `output` is executed.
     fn record_response(&mut self, id: &str, output: &[Value]) -> Result<()>;
     fn checkpoint_tool_result(&mut self, result: &Value, plan: &TaskPlan) -> Result<()>;
+    /// Replace the task plan, e.g. when the user sets or clears a goal.
+    fn replace_plan(&mut self, plan: &TaskPlan) -> Result<()>;
     fn record_runtime_input(&mut self, input: &Value) -> Result<()>;
     fn record_usage(&mut self, delta: &UsageSummary) -> Result<()>;
     /// Replace the history with a compacted window. Returns the record as

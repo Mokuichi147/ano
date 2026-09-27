@@ -5,7 +5,7 @@ use crate::{
         agent::{AgentEvent, AgentResult},
         ports::ResponseDelta,
     },
-    domain::plan::{RunOutcome, TaskPlan},
+    domain::plan::{CriterionStatus, RunOutcome, TaskGoal, TaskPlan},
 };
 use anyhow::Result;
 use std::{
@@ -152,7 +152,8 @@ pub(super) fn format_result(
         } else {
             format.apply(&result.text)
         };
-        if result.outcome == RunOutcome::Completed {
+        // A goal is always reported, so that its verification can be seen.
+        if result.outcome == RunOutcome::Completed && result.plan.goal.is_none() {
             Ok(text)
         } else {
             Ok(format!("{text}\n\n{}", format_plan(&result.plan))
@@ -310,12 +311,49 @@ impl AnswerStream {
     }
 }
 
+/// The goal and the state of its acceptance criteria.
+pub(super) fn format_goal(goal: &TaskGoal) -> String {
+    let mut lines = vec![format!(
+        "Goal{}: {}",
+        if goal.by_user {
+            " (set by the user)"
+        } else {
+            ""
+        },
+        goal.objective
+    )];
+    if goal.acceptance.is_empty() {
+        lines.push("  (acceptance criteria not defined yet)".to_string());
+    }
+    for criterion in &goal.acceptance {
+        let status = match criterion.status {
+            CriterionStatus::Pending => "pending",
+            CriterionStatus::Met => "met",
+            CriterionStatus::Blocked => "blocked",
+        };
+        lines.push(format!(
+            "  [{status}] {}: {}{}",
+            criterion.id,
+            criterion.description,
+            criterion
+                .evidence
+                .as_ref()
+                .map(|evidence| format!(" — {evidence}"))
+                .unwrap_or_default()
+        ));
+    }
+    lines.join("\n")
+}
+
 pub(super) fn format_plan(plan: &TaskPlan) -> String {
     let mut lines = vec![format!(
         "Plan: {:?} (revision {})",
         plan.outcome(),
         plan.revision
     )];
+    if let Some(goal) = &plan.goal {
+        lines.push(format_goal(goal));
+    }
     for step in &plan.steps {
         lines.push(format!(
             "  [{:?}] {}: {}{}",
