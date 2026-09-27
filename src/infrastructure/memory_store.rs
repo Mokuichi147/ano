@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// chat without `--session`. Nothing is written to disk.
 pub struct MemoryConversation {
     data: SessionData,
+    replays_history: bool,
 }
 
 impl MemoryConversation {
@@ -27,6 +28,15 @@ impl MemoryConversation {
             .as_secs();
         Self {
             data: SessionData::new(binding, now),
+            replays_history: true,
+        }
+    }
+
+    /// 原文履歴の記録だけに使い、リクエストはセッションなしと同じ形で送る。
+    pub fn transcript_only(binding: SessionBinding) -> Self {
+        Self {
+            replays_history: false,
+            ..Self::new(binding)
         }
     }
 }
@@ -34,6 +44,10 @@ impl MemoryConversation {
 impl ConversationStore for MemoryConversation {
     fn data(&self) -> &SessionData {
         &self.data
+    }
+
+    fn replays_history(&self) -> bool {
+        self.replays_history
     }
 
     fn begin_turn(&mut self, input: &Value) -> Result<()> {

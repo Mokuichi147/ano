@@ -19,7 +19,7 @@ use crate::{
     },
     config::AppConfig,
     domain::plan::{RunOutcome, TaskGoal},
-    infrastructure::project::read_project_instructions,
+    infrastructure::{chronotope::Chronotope, project::read_project_instructions},
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -91,6 +91,7 @@ fn default_environment() -> String {
 }
 
 struct WebhookState {
+    history: Option<Arc<Chronotope>>,
     config: AppConfig,
     client: Arc<dyn ResponsesApi>,
     registry: ToolRegistry,
@@ -148,7 +149,9 @@ pub async fn serve(
         eprintln!("warning: webhook authentication is disabled (loopback only)");
     }
 
+    let history = Chronotope::from_settings(&config.history, &registry)?;
     let state = Arc::new(WebhookState {
+        history,
         job_slots: Arc::new(Semaphore::new(webhook.max_concurrent_jobs)),
         mcp,
         config,
@@ -470,7 +473,7 @@ async fn execute_job(
     // A webhook has nobody to ask: requests that would go to the user, and
     // those automatic review does not clearly allow, are denied.
     let approval = profile.approval_handler(Arc::clone(&state.client), Arc::new(DenyApproval));
-    let agent = Agent::new(
+    let mut agent = Agent::new(
         Arc::clone(&state.client),
         profile.settings,
         Arc::clone(&state.mcp),
@@ -484,6 +487,9 @@ async fn execute_job(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .record(event)
     }));
+    if let Some(history) = &state.history {
+        agent = agent.with_history(history.clone());
+    }
     let mut input = vec![InputPart::Text(request.task)];
     input.extend(
         request
@@ -499,9 +505,15 @@ async fn execute_job(
         format: audio.format,
     }));
 
+    let raw_input = request.goal.as_ref().map(|goal| {
+        let mut original = input.clone();
+        original.push(InputPart::Text(goal.clone()));
+        original
+    });
     agent
         .run(RunRequest {
             input,
+            raw_input,
             context: profile.context,
             goal: request
                 .goal

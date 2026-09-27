@@ -26,6 +26,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - 推論モデルの `reasoning.effort` 指定と、推論の要約の進捗表示
 - 長い会話の自動圧縮（OpenAI の `/responses/compact`、またはローカル AI でも使えるモデルによる要約）と、使用トークン数に応じた実行停止
 - 大きすぎる tool 出力の切り詰め（先頭と末尾を残す）
+- chronotope への原文会話・ツール履歴の保存、再送、`history_*` 参照 tool（`[history]` で有効化）
 
 **tool と MCP**
 - workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り（バイト位置・行番号）・全文検索（正規表現対応、`.gitignore` 対応）・書き込み・移動・削除
@@ -65,6 +66,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
 | `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
+| `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](docs/chronotope-history.md)） |
 | `ano mcp tools [LABEL]` | MCP server に接続して提供される tool をすべて表示し、設定で有効なものに印を付けます（[tool の確認と有効化](docs/mcp.md#tool-の確認と有効化)） |
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |
 | `ano mcp login LABEL` | OAuth が必要な MCP server を認可し、トークンを保存します（`ano mcp logout LABEL` で削除。[OAuth 認証](docs/mcp.md#oauth-認証)） |
@@ -177,6 +179,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
 | `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](docs/mcp.md) |
 | `[webhook]` | 待ち受けアドレス・署名・ジョブ数とタイムアウト | [docs/webhook.md](docs/webhook.md) |
+| `[history]` | chronotope の接続先・主体・ローカル未送信キュー・タイムアウト | [docs/chronotope-history.md](docs/chronotope-history.md) |
 
 設定の誤りで意図せず制限が外れないよう、次の場合はエラーになります。
 

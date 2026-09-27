@@ -6,7 +6,7 @@
 use crate::{
     application::{profile::ExecutionProfile, settings::AgentSettings},
     domain::{environment::EnvironmentConfig, mcp::McpServerConfig, policy::UserPolicy},
-    infrastructure::openai::ApiSettings,
+    infrastructure::{chronotope::HistorySettings, openai::ApiSettings},
     interface::webhook::WebhookSettings,
 };
 use anyhow::{bail, Context, Result};
@@ -27,6 +27,7 @@ pub struct AppConfig {
     pub users: HashMap<String, UserPolicy>,
     pub environments: HashMap<String, EnvironmentConfig>,
     pub webhook: WebhookSettings,
+    pub history: HistorySettings,
 }
 
 impl AppConfig {
@@ -51,6 +52,7 @@ impl AppConfig {
     /// the config file's `directory`. A stdio `command` is only expanded:
     /// bare names such as `node` are still looked up on `PATH`.
     fn resolve_paths(&mut self, directory: &Path, home: Option<&Path>) -> Result<()> {
+        self.history.data_dir = resolve_path(&self.history.data_dir, directory, home)?;
         for (name, environment) in &mut self.environments {
             if let Some(workspace) = &mut environment.workspace {
                 *workspace = resolve_path(workspace, directory, home)
@@ -93,6 +95,7 @@ impl AppConfig {
     pub fn validate(&self) -> Result<()> {
         self.agent.validate()?;
         self.webhook.validate()?;
+        self.history.validate()?;
         if self.api.timeout_secs == 0 {
             bail!("api.timeout_secs must be greater than zero");
         }

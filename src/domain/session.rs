@@ -50,6 +50,9 @@ pub enum SessionStatus {
 #[serde(deny_unknown_fields)]
 pub struct SessionData {
     pub version: u32,
+    /// 圧縮やプロセス再起動後も原文履歴と対応する会話 ID。
+    #[serde(default = "new_conversation_id")]
+    pub conversation_id: String,
     pub binding: SessionBinding,
     pub status: SessionStatus,
     pub completed_turns: u64,
@@ -70,6 +73,7 @@ impl SessionData {
     pub fn new(binding: SessionBinding, now_unix: u64) -> Self {
         Self {
             version: SESSION_VERSION,
+            conversation_id: new_conversation_id(),
             binding,
             status: SessionStatus::Ready,
             completed_turns: 0,
@@ -222,6 +226,10 @@ impl SessionData {
         self.status = SessionStatus::Failed;
         Ok(())
     }
+}
+
+fn new_conversation_id() -> String {
+    uuid::Uuid::new_v4().to_string()
 }
 
 fn matches_result(call: &Value, result: &Value) -> bool {

@@ -36,6 +36,8 @@ use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Mutex, time::Du
 /// a `tool_search` in the same response takes effect from the next request.
 #[derive(Clone, Copy)]
 pub(super) struct RoundScope<'a> {
+    pub conversation: Option<&'a str>,
+    pub call_id: Option<&'a str>,
     pub round: usize,
     pub user_request: &'a str,
     pub tool_context: &'a ToolContext,
@@ -56,6 +58,8 @@ pub(super) struct RoundScope<'a> {
 struct ItemOutcome {
     /// Item to send back in the next request's `input`.
     continuation: Option<Value>,
+    /// 履歴にはモデル向けの短縮を行う前の結果を保存する。
+    raw: Option<Value>,
     /// New tool selection produced by `tool_search`.
     selection: Option<ActiveTools>,
 }
@@ -88,7 +92,11 @@ impl Agent {
                         .plan
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    session.checkpoint_tool_result(result, &plan)?;
+                    session.checkpoint_tool_result_with_raw(
+                        result,
+                        outcome.raw.as_ref().unwrap_or(result),
+                        &plan,
+                    )?;
                 }
             }
             outcomes.push((index, outcome));
@@ -118,9 +126,19 @@ impl Agent {
                     .as_str()
                     .context("function_call did not contain name")?;
                 let (output, selection) = self
-                    .handle_function_call(name, &item["arguments"], scope)
+                    .handle_function_call(
+                        name,
+                        &item["arguments"],
+                        RoundScope {
+                            call_id: Some(call_id),
+                            ..scope
+                        },
+                    )
                     .await?;
                 Ok(ItemOutcome {
+                    raw: Some(
+                        json!({"type":"function_call_output", "call_id":call_id, "output":serde_json::to_string(&output)?}),
+                    ),
                     continuation: Some(json!({
                         "type": "function_call_output",
                         "call_id": call_id,
@@ -142,6 +160,7 @@ impl Agent {
                         "approval_request_id": approval_request.approval_request_id,
                     })),
                     selection: None,
+                    raw: None,
                 })
             }
             _ => Ok(ItemOutcome::default()),
@@ -450,10 +469,13 @@ impl Agent {
         let spent = Mutex::new(UsageSummary::default());
         let request = RunRequest {
             input: vec![InputPart::Text(task.to_string())],
+            raw_input: None,
             context: scope.tool_context.clone(),
             goal: None,
         };
         let origin = RunOrigin {
+            parent_conversation: scope.conversation.map(str::to_string),
+            parent_call_id: scope.call_id.map(str::to_string),
             depth: scope.depth + 1,
             token_limit: scope.token_budget,
             user_request: Some(scope.user_request.to_string()),

@@ -76,12 +76,22 @@ max_retained_jobs = 1000
 # Wall-clock limit per running job, excluding time spent in the queue.
 job_timeout_secs = 1800
 
+[history]
+# chronotope への原文履歴保存。既定は無効です。
+enabled = false
+base_url = "http://127.0.0.1:7878"
+# 設定ファイルからの相対パス。未送信イベントを再送するまで保持します。
+data_dir = ".ano/history"
+principal = "ano"
+# token_env = "CHRONOTOPE_TOKEN"
+timeout_secs = 5
+
 # Webhook callers and `ano run --environment NAME` select names declared here.
 # Relative workspace paths and MCP cwd paths resolve from this config directory;
 # a leading ~ expands to the home directory.
 [environments.default]
 workspace = "."
-allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_find", "workspace_check"]
+allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_find", "workspace_check", "history_*"]
 allow_writes = false
 # Environments default to "deny" because webhook jobs have nobody to ask.
 # "auto" allows what the reviewer approves and denies the rest when unattended.

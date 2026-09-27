@@ -31,7 +31,7 @@ pub use application::{
     input::{build_user_input, InputPart},
     ports::{
         ApprovalHandler, ApprovalSource, ConversationStore, DirectMcpServer, DirectMcpTool,
-        McpApprovalRequest, McpGateway, ResponsesApi,
+        HistoryBackend, McpApprovalRequest, McpGateway, ResponsesApi,
     },
     profile::ExecutionProfile,
     registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
@@ -51,6 +51,7 @@ pub use domain::{
     usage::{ApiOperation, StopReason, UsageSummary},
 };
 pub use infrastructure::{
+    chronotope::{Chronotope, HistorySettings},
     mcp::McpPool,
     openai::{ApiSettings, OpenAiClient},
     session_store::Session,

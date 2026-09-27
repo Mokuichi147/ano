@@ -126,10 +126,37 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
 /// a recorded tool call or result.
 pub trait ConversationStore: Send + Sync {
     fn data(&self) -> &SessionData;
+    /// false のストアは原文の記録だけに使い、次のリクエストはその履歴から組み立てない。
+    fn replays_history(&self) -> bool {
+        true
+    }
+    fn set_history_parent(&mut self, _conversation: Option<&str>, _call_id: Option<&str>) {}
+    fn record_control_input(&mut self, _text: &str) -> Result<()> {
+        Ok(())
+    }
     fn begin_turn(&mut self, input: &Value) -> Result<()>;
+    /// 原文と内部指示を分けて受け取る。既存ストアはモデル用の入力だけを保持する。
+    fn begin_turn_with_source(
+        &mut self,
+        input: &Value,
+        _original: &Value,
+        _runtime: &Value,
+        _origin: &str,
+    ) -> Result<()> {
+        self.begin_turn(input)
+    }
     /// Must be durable before any call in `output` is executed.
     fn record_response(&mut self, id: &str, output: &[Value]) -> Result<()>;
     fn checkpoint_tool_result(&mut self, result: &Value, plan: &TaskPlan) -> Result<()>;
+    /// モデル用に短縮する前のツール結果を原文履歴へ渡す。
+    fn checkpoint_tool_result_with_raw(
+        &mut self,
+        result: &Value,
+        _raw: &Value,
+        plan: &TaskPlan,
+    ) -> Result<()> {
+        self.checkpoint_tool_result(result, plan)
+    }
     /// Replace the task plan, e.g. when the user sets or clears a goal.
     fn replace_plan(&mut self, plan: &TaskPlan) -> Result<()>;
     fn record_runtime_input(&mut self, input: &Value) -> Result<()>;
@@ -144,6 +171,21 @@ pub trait ConversationStore: Send + Sync {
     fn skip_pending(&mut self, message: &str) -> Result<()>;
     fn complete(&mut self) -> Result<()>;
     fn fail(&mut self, error: &str) -> Result<()>;
+}
+
+/// 実行用の会話ストアに、圧縮されない原文の記録と非同期の同期を追加する。
+#[async_trait]
+pub trait HistoryBackend: Send + Sync {
+    /// セッションなしの実行を記録するための、`replays_history` が false のストア。
+    fn transcript_store(
+        &self,
+        binding: crate::domain::session::SessionBinding,
+    ) -> Box<dyn ConversationStore>;
+    fn wrap<'a>(
+        &self,
+        store: &'a mut dyn ConversationStore,
+    ) -> Result<Box<dyn ConversationStore + 'a>>;
+    async fn sync(&self, user_id: &str) -> Result<Value>;
 }
 
 /// What an approval request is for.

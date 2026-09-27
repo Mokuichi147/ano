@@ -1,6 +1,7 @@
 //! Infrastructure layer: adapters for the OpenAI HTTP API, MCP connections,
 //! session files, and the built-in workspace tools.
 
+pub mod chronotope;
 pub(crate) mod fs;
 pub mod mcp;
 pub mod mcp_oauth;

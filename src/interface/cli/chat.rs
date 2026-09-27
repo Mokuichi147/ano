@@ -207,6 +207,13 @@ pub(super) async fn run(
             };
             let prompt = line.trim();
             let mut goal = None;
+            let starts_goal = prompt.strip_prefix("/goal ").is_some_and(|text| !text.trim().is_empty() && text.trim() != "clear");
+            if prompt.starts_with('/') && !starts_goal {
+                // A command runs even if its raw history cannot be saved.
+                if let Err(error) = agent.record_control_input(store.as_mut(), &line).await {
+                    eprintln!("warning: failed to record the command in history: {error:#}");
+                }
+            }
             match prompt {
                 "" => continue,
                 "/exit" | "/quit" => break,
@@ -300,6 +307,9 @@ pub(super) async fn run(
                 } else {
                     vec![InputPart::Text(prompt.to_string())]
                 },
+                // The raw history keeps the line as typed, spaces included.
+                raw_input: (goal.is_some() || prompt != line)
+                    .then(|| vec![InputPart::Text(line.clone())]),
                 context: context.clone(),
                 goal,
             };

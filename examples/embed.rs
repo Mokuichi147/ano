@@ -68,6 +68,7 @@ async fn main() -> Result<()> {
     .with_event_listener(Arc::new(|event| eprintln!("{event:?}")));
 
     let request = RunRequest {
+        raw_input: None,
         input: vec![InputPart::Text(prompt)],
         context: ToolContext {
             workspace: Some(std::env::current_dir()?),

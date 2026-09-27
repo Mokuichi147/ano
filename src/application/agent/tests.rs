@@ -47,6 +47,8 @@ async fn with_scope<T>(active: &ActiveTools, body: impl AsyncFnOnce(RoundScope<'
     let plan = Mutex::new(TaskPlan::default());
     let delegated_usage = Mutex::new(UsageSummary::default());
     body(RoundScope {
+        conversation: None,
+        call_id: None,
         round: 0,
         user_request: "",
         tool_context: &context,
@@ -1224,6 +1226,8 @@ async fn sub_agents_cannot_delegate_further() {
     let delegated_usage = Mutex::new(UsageSummary::default());
     let active = ActiveTools::default();
     let scope = RoundScope {
+        conversation: None,
+        call_id: None,
         round: 0,
         user_request: "",
         tool_context: &context,
@@ -1477,6 +1481,85 @@ fn calling_only_task_plan_repeatedly_gets_a_notice() {
     let notice = super::repetition_notice("task_plan", 3, None, &[]);
     assert!(notice.contains("called only task_plan in 3 consecutive steps"));
     assert!(notice.contains("were not errors"));
+}
+
+/// Read every raw history event under `dir`, whatever its sync state.
+fn journal_events(dir: &std::path::Path) -> Vec<Value> {
+    let mut events = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            events.extend(journal_events(&path));
+        } else if path.extension().is_some_and(|e| e == "json")
+            && path.file_stem().unwrap().len() == 20
+        {
+            events.push(serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap());
+        }
+    }
+    events
+}
+
+#[tokio::test]
+async fn raw_history_does_not_change_requests_without_a_session() {
+    let server = mock_responses(vec![
+        search_response("search", "anything"),
+        text_response("done", "Finished."),
+    ])
+    .await;
+    let root = tempfile::tempdir().unwrap();
+    let history = Arc::new(
+        crate::infrastructure::chronotope::Chronotope::new(
+            crate::infrastructure::chronotope::HistorySettings {
+                enabled: true,
+                // Nothing listens here; the run keeps the events for a later sync.
+                base_url: "http://127.0.0.1:9".into(),
+                data_dir: root.path().join("history"),
+                ..Default::default()
+            },
+        )
+        .unwrap(),
+    );
+    let mut agent = agent(ToolRegistry::new(), Vec::new())
+        .with_history(Arc::clone(&history) as Arc<dyn crate::application::ports::HistoryBackend>);
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    // The goal cannot be verified, so the second round is the final one.
+    agent.settings.max_tool_rounds = 2;
+    let mut request = RunRequest::new(vec![InputPart::Text("Update the docs".into())])
+        .with_goal(TaskGoal::from_user("Docs are updated").unwrap());
+    request.context.user_id = "alice".into();
+
+    agent.run(request).await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    // The same shape as a run without history: one user message carrying the
+    // goal notice, then continuation by previous_response_id.
+    assert_eq!(requests[0]["input"].as_array().unwrap().len(), 1);
+    assert!(requests[0]["input"][0]["content"][1]["text"]
+        .as_str()
+        .unwrap()
+        .contains("Objective: Docs are updated"));
+    assert!(requests[0].get("store").is_none());
+    assert_eq!(requests[1]["previous_response_id"], "search");
+    assert_eq!(requests[1]["input"].as_array().unwrap().len(), 1);
+    drop(requests);
+
+    assert!(
+        history.status("alice").unwrap()["pending_events"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    let events = journal_events(&root.path().join("history"));
+    let human = events
+        .iter()
+        .filter(|e| e["origin"] == "human")
+        .map(|e| e["content"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(human, ["Update the docs", "Docs are updated"]);
+    assert!(events.iter().any(|e| e["origin"] == "runtime"
+        && e["content"]
+            .as_str()
+            .is_some_and(|text| text.starts_with("Goal set by the user"))));
 }
 
 #[tokio::test]

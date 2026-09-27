@@ -4,6 +4,7 @@
 
 mod approval;
 mod chat;
+mod history;
 mod mcp;
 mod output;
 
@@ -27,8 +28,8 @@ use crate::{
         tool::{ToolContext, DELEGATE_TASK_NAME, WEB_FETCH_NAME, WORKSPACE_EXEC_NAME},
     },
     infrastructure::{
-        mcp::McpPool, openai::OpenAiClient, project::read_project_instructions,
-        session_store::Session, tools::register_builtin_tools,
+        chronotope::Chronotope, mcp::McpPool, openai::OpenAiClient,
+        project::read_project_instructions, session_store::Session, tools::register_builtin_tools,
     },
     interface::webhook,
 };
@@ -73,6 +74,8 @@ enum Command {
     Session(SessionArgs),
     /// Manage the authorization and the enabled tools of MCP servers.
     Mcp(mcp::McpArgs),
+    /// 原文履歴の同期状態を調べ、chronotope へ再送・検索する。
+    History(history::HistoryArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -273,6 +276,11 @@ pub async fn run() -> Result<()> {
     }
     let registry = ToolRegistry::new();
     register_builtin_tools(&registry)?;
+    // `run`, `chat`, and `serve` register the history tools with the client
+    // they record through; other commands must work without its token.
+    if matches!(cli.command, Command::Tools(_)) {
+        Chronotope::from_settings(&config.history, &registry)?;
+    }
 
     match cli.command {
         Command::Session(args) => {
@@ -302,6 +310,7 @@ pub async fn run() -> Result<()> {
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
+        Command::History(args) => history::run(&config, &cli.user, args).await,
     }
 }
 
@@ -469,6 +478,7 @@ fn prepare_agent(
         .map(|path| Session::open(path, binding.clone(), options.recover_session))
         .transpose()?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
+    let history = Chronotope::from_settings(&config.history, &registry)?;
     let mut agent = Agent::new(
         client,
         settings,
@@ -477,6 +487,9 @@ fn prepare_agent(
         policy,
         approval,
     );
+    if let Some(history) = history {
+        agent = agent.with_history(history);
+    }
     let answer = stream.map(|format| Arc::new(output::AnswerStream::new(format, !options.quiet)));
     if !options.quiet {
         let verbose = options.verbose;
@@ -511,12 +524,17 @@ async fn run_agent(
     let stdin_is_terminal = std::io::stdin().is_terminal();
     // Validate options that need no network before reading a piped prompt.
     resolve_run_context(&config, &user_id, &args.agent)?;
-    let prompt = match args.prompt {
-        Some(prompt) => Some(prompt),
+    // A piped prompt is trimmed for the model; the raw history keeps it as
+    // received.
+    let (prompt, piped) = match args.prompt {
+        Some(prompt) => (Some(prompt), None),
         // Only read a piped prompt; never block waiting on an interactive
         // terminal when the user supplied only --image or --audio.
-        None if !stdin_is_terminal => read_stdin_prompt()?,
-        None => None,
+        None if !stdin_is_terminal => match read_stdin_prompt()? {
+            Some(raw) => (Some(raw.trim().to_string()), Some(raw)),
+            None => (None, None),
+        },
+        None => (None, None),
     };
     let goal = args
         .goal
@@ -546,6 +564,7 @@ async fn run_agent(
             .then(|| output::TextFormat::for_stdout(args.agent.raw)),
     )?;
 
+    let piped = piped.filter(|raw| Some(raw) != prompt.as_ref());
     let mut input = Vec::new();
     if let Some(prompt) = prompt {
         input.push(InputPart::Text(prompt));
@@ -553,8 +572,20 @@ async fn run_agent(
     input.extend(args.images.into_iter().map(InputPart::Image));
     input.extend(args.audio.into_iter().map(InputPart::Audio));
 
+    // Only set when it differs from `input`, so attachments are not read twice.
+    let raw_input = (piped.is_some() || args.goal.is_some()).then(|| {
+        let mut original = input.clone();
+        if let Some(raw) = piped {
+            original[0] = InputPart::Text(raw);
+        }
+        if let Some(goal) = args.goal {
+            original.push(InputPart::Text(goal));
+        }
+        original
+    });
     let request = RunRequest {
         input,
+        raw_input,
         context,
         goal,
     };
@@ -669,8 +700,7 @@ fn read_stdin_prompt() -> Result<Option<String>> {
     std::io::stdin()
         .read_to_string(&mut input)
         .context("failed to read prompt from stdin")?;
-    let input = input.trim().to_string();
-    Ok((!input.is_empty()).then_some(input))
+    Ok((!input.trim().is_empty()).then_some(input))
 }
 
 #[cfg(test)]

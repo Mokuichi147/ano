@@ -15,7 +15,7 @@ pub use events::{AgentEvent, EventListener, TextListener};
 use crate::{
     application::{
         input::{build_user_input, InputPart},
-        ports::{ApprovalHandler, ConversationStore, McpGateway, ResponsesApi},
+        ports::{ApprovalHandler, ConversationStore, HistoryBackend, McpGateway, ResponsesApi},
         registry::ToolRegistry,
         settings::AgentSettings,
     },
@@ -43,6 +43,8 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone)]
 pub struct RunRequest {
     pub input: Vec<InputPart>,
+    /// コマンドなどをモデル用に変換した場合の、変換前のユーザー入力。
+    pub raw_input: Option<Vec<InputPart>>,
     pub context: ToolContext,
     /// A goal the user sets for this run, e.g. from `TaskGoal::from_user`.
     /// It replaces the conversation's plan, and the run keeps working until
@@ -55,6 +57,7 @@ impl RunRequest {
     pub fn new(input: Vec<InputPart>) -> Self {
         Self {
             input,
+            raw_input: None,
             context: ToolContext::default(),
             goal: None,
         }
@@ -92,6 +95,8 @@ const DEFAULT_SUMMARY_TRANSCRIPT_BYTES: usize = 128 * 1024;
 /// How a run was started: by the caller, or by `delegate_task` in another run.
 #[derive(Default)]
 pub(super) struct RunOrigin<'a> {
+    pub parent_conversation: Option<String>,
+    pub parent_call_id: Option<String>,
     /// 0 for the caller's run, 1 for a sub-agent. Sub-agents cannot delegate.
     pub depth: usize,
     /// The token budget. A sub-agent gets what remains of its parent's.
@@ -116,6 +121,7 @@ pub struct Agent {
     approval_lock: tokio::sync::Mutex<()>,
     event_listener: Option<EventListener>,
     text_listener: Option<TextListener>,
+    history: Option<Arc<dyn HistoryBackend>>,
 }
 
 impl Agent {
@@ -140,12 +146,32 @@ impl Agent {
             approval_lock: tokio::sync::Mutex::new(()),
             event_listener: None,
             text_listener: None,
+            history: None,
         }
     }
 
     pub fn with_event_listener(mut self, listener: EventListener) -> Self {
         self.event_listener = Some(listener);
         self
+    }
+
+    pub fn with_history(mut self, history: Arc<dyn HistoryBackend>) -> Self {
+        self.history = Some(history);
+        self
+    }
+
+    /// モデルへ送らない CLI コマンドも、受け付けた原文として記録する。
+    pub async fn record_control_input(
+        &self,
+        store: &mut dyn ConversationStore,
+        text: &str,
+    ) -> Result<()> {
+        if let Some(history) = &self.history {
+            let user = store.data().binding.user_id.clone();
+            history.wrap(store)?.record_control_input(text)?;
+            self.sync_history(&user).await;
+        }
+        Ok(())
     }
 
     /// Stream the text of the model's messages to `listener` while they are
@@ -198,6 +224,18 @@ impl Agent {
         &self,
         store: &mut dyn ConversationStore,
     ) -> Result<CompactionRecord> {
+        if let Some(history) = &self.history {
+            let user = store.data().binding.user_id.clone();
+            let mut recorded = history.wrap(store)?;
+            let result = self.compact_store(recorded.as_mut()).await;
+            drop(recorded);
+            self.sync_history(&user).await;
+            return result;
+        }
+        self.compact_store(store).await
+    }
+
+    async fn compact_store(&self, store: &mut dyn ConversationStore) -> Result<CompactionRecord> {
         self.settings.validate()?;
         if store.data().status == SessionStatus::Running {
             bail!("cannot compact a conversation during a turn");
@@ -280,6 +318,53 @@ impl Agent {
     async fn run_inner(
         &self,
         request: RunRequest,
+        session: Option<&mut (dyn ConversationStore + '_)>,
+        origin: RunOrigin<'_>,
+    ) -> Result<AgentResult> {
+        let Some(history) = &self.history else {
+            return self.run_loop(request, session, origin).await;
+        };
+        let user = request.context.user_id.clone();
+        let mut memory;
+        let store = match session {
+            Some(store) => store,
+            None => {
+                memory = history.transcript_store(SessionBinding::new(
+                    &request.context,
+                    self.client.base_url(),
+                )?);
+                memory.as_mut()
+            }
+        };
+        let mut recorded = history.wrap(store)?;
+        recorded.set_history_parent(
+            origin.parent_conversation.as_deref(),
+            origin.parent_call_id.as_deref(),
+        );
+        let result = self
+            .run_loop(request, Some(recorded.as_mut()), origin)
+            .await;
+        if let Err(error) = &result {
+            if recorded.data().status == SessionStatus::Running {
+                recorded.fail(&format!("{error:#}"))?;
+            }
+        }
+        drop(recorded);
+        self.sync_history(&user).await;
+        result
+    }
+
+    async fn sync_history(&self, user: &str) {
+        if let Some(history) = &self.history {
+            if let Err(error) = history.sync(user).await {
+                eprintln!("履歴の同期に失敗しました。原文はローカルに保持されています。ano history sync で再送できます: {error:#}");
+            }
+        }
+    }
+
+    async fn run_loop(
+        &self,
+        request: RunRequest,
         mut session: Option<&mut (dyn ConversationStore + '_)>,
         origin: RunOrigin<'_>,
     ) -> Result<AgentResult> {
@@ -311,14 +396,24 @@ impl Agent {
         // Usage of sub-agents started during the current round.
         let delegated_usage = Mutex::new(UsageSummary::default());
         if let Some(session) = session.as_deref_mut() {
-            session.begin_turn(&user_input)?;
+            let (original, runtime) = source_input(&request, goal.as_ref(), &user_input).await?;
+            session.begin_turn_with_source(
+                &user_input,
+                &original,
+                &runtime,
+                if origin.depth > 0 { "agent" } else { "human" },
+            )?;
         }
+        // A transcript-only store records the run; requests are still built
+        // as if no session was given.
+        let replay = session
+            .as_ref()
+            .is_some_and(|session| session.replays_history());
         let mcp_runtime =
             McpRuntime::new(self.mcp.connect(&self.policy).await?, self.policy.clone());
-        let mut local_history = (session.is_none()
-            && self.settings.compact_threshold_bytes.is_some())
-        .then(|| user_input.as_array().cloned().unwrap_or_default());
-        let mut previous_compact_size = session.as_ref().and_then(|session| {
+        let mut local_history = (!replay && self.settings.compact_threshold_bytes.is_some())
+            .then(|| user_input.as_array().cloned().unwrap_or_default());
+        let mut previous_compact_size = session.as_ref().filter(|_| replay).and_then(|session| {
             session
                 .data()
                 .compactions
@@ -346,6 +441,7 @@ impl Agent {
         let plan = Mutex::new(initial_plan);
         let mut active = session
             .as_ref()
+            .filter(|_| replay)
             .map(|session| ActiveTools::from_history(&session.data().history))
             .unwrap_or_default();
         let mut repetition = Repetition::default();
@@ -355,6 +451,7 @@ impl Agent {
         for round in 0..self.settings.max_tool_rounds {
             let history = session
                 .as_ref()
+                .filter(|_| replay)
                 .map(|session| &session.data().history)
                 .or(local_history.as_ref());
             if let Some(history) = history {
@@ -376,7 +473,7 @@ impl Agent {
                     )?;
                     let (history, mut record) = self.compaction_result(&compacted, &previous)?;
                     previous_compact_size = Some(record.after_bytes);
-                    if let Some(session) = session.as_deref_mut() {
+                    if let Some(session) = session.as_deref_mut().filter(|_| replay) {
                         record = session.replace_history(history, record)?;
                     } else {
                         local_history = Some(history);
@@ -412,7 +509,7 @@ impl Agent {
             let mut payload = json!({
                 "model": self.settings.model,
                 "instructions": instructions,
-                "input": match &session { Some(session) => Value::Array(session.data().history.clone()), None => local_history.as_ref().map(|history| Value::Array(history.clone())).unwrap_or_else(|| next_input.clone()) },
+                "input": match &session { Some(session) if replay => Value::Array(session.data().history.clone()), _ => local_history.as_ref().map(|history| Value::Array(history.clone())).unwrap_or_else(|| next_input.clone()) },
                 "tools": tools,
                 "tool_choice": if final_round { "none" } else { "auto" },
                 "parallel_tool_calls": self.settings.parallel_tool_calls,
@@ -423,7 +520,7 @@ impl Agent {
             if let Some(reasoning) = self.settings.reasoning() {
                 payload["reasoning"] = reasoning;
             }
-            if session.is_some() || local_history.is_some() {
+            if replay || local_history.is_some() {
                 payload["store"] = json!(false);
                 payload["include"] = json!(["reasoning.encrypted_content"]);
             } else if let Some(previous_response_id) = &previous_response_id {
@@ -509,10 +606,13 @@ impl Agent {
             if let Some(reason) = usage.stop_reason(token_limit) {
                 return finish_limited(reason, usage, response_id, &plan, events, session);
             }
+            let conversation = session.as_ref().map(|s| s.data().conversation_id.clone());
             let (mut continuation, selection) = self
                 .handle_output_items(
                     &items,
                     RoundScope {
+                        conversation: conversation.as_deref(),
+                        call_id: None,
                         round,
                         user_request: &user_request,
                         tool_context: &request.context,
@@ -656,6 +756,34 @@ impl Agent {
 
         bail!("agent reached max_tool_rounds")
     }
+}
+
+/// 原文履歴に渡す、変換前の入力と内部で追加した指示。モデルへの入力は変えない。
+async fn source_input(
+    request: &RunRequest,
+    goal: Option<&TaskGoal>,
+    user_input: &Value,
+) -> Result<(Value, Value)> {
+    let runtime = match goal {
+        Some(goal) => build_user_input(&[InputPart::Text(goal_notice(goal))]).await?,
+        None => json!([]),
+    };
+    let original = match (&request.raw_input, goal) {
+        (Some(parts), _) if !parts.is_empty() => build_user_input(parts).await?,
+        (_, None) => user_input.clone(),
+        (_, Some(goal)) => {
+            let mut parts = request.input.clone();
+            if goal.by_user {
+                parts.push(InputPart::Text(goal.objective.clone()));
+            }
+            if parts.is_empty() {
+                json!([])
+            } else {
+                build_user_input(&parts).await?
+            }
+        }
+    };
+    Ok((original, runtime))
 }
 
 /// Tell the model about a goal the user set for this run.
