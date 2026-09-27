@@ -38,6 +38,7 @@ toml_edit = "0.22"
 inquire = { version = "0.9", default-features = false, features = ["crossterm", "fuzzy"] }
 eventsource-stream = "0.2"
 htmd = "0.5"
+ignore = "0.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

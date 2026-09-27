@@ -74,7 +74,7 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     registry.register_contextual(
         non_strict_definition(
             "workspace_search",
-            "Find text in workspace UTF-8 files and return paths, line numbers, and excerpts. Literal and case-sensitive by default; set regex=true for a regular expression (Rust syntax) or ignore_case=true. include limits files by a glob such as *.rs or src/**/*.ts. Searches recursively, skips symlinks and .git/target/node_modules/.venv directories, and limits work to 10000 entries and 32 MiB. Narrow path or include if truncated.",
+            "Find text in workspace UTF-8 files and return paths, line numbers, and excerpts. Literal and case-sensitive by default; set regex=true for a regular expression (Rust syntax) or ignore_case=true. include limits files by a glob such as *.rs or src/**/*.ts. Searches recursively, skips symlinks, .git/target/node_modules/.venv directories, and entries matched by .gitignore (unless include_ignored=true), and limits work to 10000 entries and 32 MiB. Narrow path or include if truncated.",
             json!({
                 "type": "object",
                 "properties": {
@@ -83,6 +83,7 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
                     "regex": {"type": "boolean", "description": "Treat query as a regular expression; defaults to false"},
                     "ignore_case": {"type": "boolean", "description": "Match case-insensitively; defaults to false"},
                     "include": {"type": "string", "description": "Only search files matching this glob, relative to path"},
+                    "include_ignored": {"type": "boolean", "description": "Also search entries matched by .gitignore; defaults to false"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Matching lines to return; defaults to 100"}
                 },
                 "required": ["query"],
@@ -94,13 +95,14 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     registry.register_contextual(
         non_strict_definition(
             "workspace_find",
-            "Find workspace files or directories by path glob. A pattern without / matches names at any depth (*.rs, Cargo.toml); otherwise it matches the path relative to path (src/**/*.rs). Supports *, ?, ** and {a,b}. Skips symlinks and .git/target/node_modules/.venv directories.",
+            "Find workspace files or directories by path glob. A pattern without / matches names at any depth (*.rs, Cargo.toml); otherwise it matches the path relative to path (src/**/*.rs). Supports *, ?, ** and {a,b}. Skips symlinks, .git/target/node_modules/.venv directories, and entries matched by .gitignore unless include_ignored=true.",
             json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "minLength": 1, "description": "Glob pattern"},
                     "path": {"type": "string", "description": "Relative directory to search; defaults to ."},
                     "kind": {"type": "string", "enum": ["file", "directory", "any"], "description": "Entries to return; defaults to file"},
+                    "include_ignored": {"type": "boolean", "description": "Also return entries matched by .gitignore; defaults to false"},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Defaults to 200"}
                 },
                 "required": ["pattern"],
@@ -437,7 +439,8 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
     let max_results = optional_integer(&arguments, "max_results", 100, 1, 1000)? as usize;
     let root = workspace_root(context).await?;
     existing_workspace_path(context, &relative).await?;
-    let walk = walk_workspace(context, &root, &relative).await;
+    let include_ignored = optional_bool(&arguments, "include_ignored")?;
+    let walk = walk_workspace(context, &root, &relative, !include_ignored).await;
     let mut matches = Vec::new();
     let mut files_searched = 0;
     let mut bytes_read = 0;
@@ -519,7 +522,7 @@ async fn workspace_search(arguments: Value, context: &ToolContext) -> Result<Val
     Ok(json!({
         "path": relative, "query": query, "matches": matches,
         "files_searched": files_searched, "truncated": truncated,
-        "skipped_files": {"binary": skipped_binary, "too_large": skipped_large, "unreadable": skipped_unreadable}
+        "skipped_files": {"binary": skipped_binary, "too_large": skipped_large, "unreadable": skipped_unreadable, "ignored": walk.ignored}
     }))
 }
 
@@ -542,7 +545,8 @@ async fn workspace_find(arguments: Value, context: &ToolContext) -> Result<Value
     {
         bail!("workspace path is not a directory: {}", relative.display());
     }
-    let walk = walk_workspace(context, &root, &relative).await;
+    let include_ignored = optional_bool(&arguments, "include_ignored")?;
+    let walk = walk_workspace(context, &root, &relative, !include_ignored).await;
     let mut truncated = walk.truncated;
     let mut results = Vec::new();
     for entry in &walk.entries {
@@ -566,7 +570,7 @@ async fn workspace_find(arguments: Value, context: &ToolContext) -> Result<Value
     }
     Ok(json!({
         "path": relative, "pattern": pattern, "matches": results,
-        "truncated": truncated, "skipped_unreadable": walk.unreadable
+        "truncated": truncated, "skipped_unreadable": walk.unreadable, "skipped_ignored": walk.ignored
     }))
 }
 
@@ -1310,6 +1314,75 @@ mod tests {
             .unwrap();
         assert_eq!(literal["matches"].as_array().unwrap().len(), 1);
         assert!(search(json!({"query": "(", "regex": true})).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn search_and_find_honor_gitignore_files() {
+        let workspace = tempfile::tempdir().unwrap();
+        for path in ["dist", "src/gen", "logs", ".git/info"] {
+            std::fs::create_dir_all(workspace.path().join(path)).unwrap();
+        }
+        for (path, content) in [
+            (".gitignore", "dist/\n*.log\n!keep.log\n"),
+            ("src/.gitignore", "gen/\n"),
+            (".git/info/exclude", "local.txt\n"),
+            ("dist/bundle.js", "needle"),
+            ("src/gen/out.rs", "needle"),
+            ("src/lib.rs", "needle"),
+            ("logs/app.log", "needle"),
+            ("logs/keep.log", "needle"),
+            ("local.txt", "needle"),
+            ("notes.txt", "needle"),
+        ] {
+            std::fs::write(workspace.path().join(path), content).unwrap();
+        }
+        let registry = registry();
+        let context = context(workspace.path(), false);
+        let run = |name: &'static str, arguments| {
+            let registry = registry.clone();
+            let context = context.clone();
+            async move {
+                let result = registry
+                    .execute_with_context(name, arguments, &context)
+                    .await
+                    .unwrap();
+                let mut paths = result["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|found| found["path"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
+                paths.sort();
+                (paths, result)
+            }
+        };
+
+        let (paths, result) = run("workspace_search", json!({"query": "needle"})).await;
+        assert_eq!(paths, ["./logs/keep.log", "./notes.txt", "./src/lib.rs"]);
+        assert_eq!(result["skipped_files"]["ignored"], 4);
+        // Rules of the parent directories apply when a subdirectory is searched.
+        let (paths, _) = run(
+            "workspace_search",
+            json!({"query": "needle", "path": "src"}),
+        )
+        .await;
+        assert_eq!(paths, ["src/lib.rs"]);
+        // An ignored directory named explicitly is searched.
+        let (paths, _) = run(
+            "workspace_search",
+            json!({"query": "needle", "path": "dist"}),
+        )
+        .await;
+        assert_eq!(paths, ["dist/bundle.js"]);
+        let (paths, _) = run(
+            "workspace_search",
+            json!({"query": "needle", "include_ignored": true}),
+        )
+        .await;
+        assert_eq!(paths.len(), 7);
+        let (paths, result) = run("workspace_find", json!({"pattern": "*.{js,rs,log}"})).await;
+        assert_eq!(paths, ["./logs/keep.log", "./src/lib.rs"]);
+        assert_eq!(result["skipped_ignored"], 4);
     }
 
     #[tokio::test]

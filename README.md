@@ -27,7 +27,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - 大きすぎる tool 出力の切り詰め（先頭と末尾を残す）
 
 **tool と MCP**
-- workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り（バイト位置・行番号）・全文検索（正規表現対応）・書き込み・移動・削除
+- workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り（バイト位置・行番号）・全文検索（正規表現対応、`.gitignore` 対応）・書き込み・移動・削除
 - 競合検出付きの正確なファイル編集と、設定で登録した検証コマンド（ビルド・テスト）の実行
 - 承認付きのシェルコマンド実行（`workspace_exec`、opt-in）
 - 承認付きの Web ページ取得と Markdown 変換（`web_fetch`、opt-in。公開アドレスのみ）
@@ -224,9 +224,9 @@ model = "ロードしたモデル名"
 | tool | 内容 | 条件 |
 | --- | --- | --- |
 | `workspace_list` | ディレクトリ直下を名前順に取得（既定100件、最大1000件）。`next_after` を次の `after` に渡すと続きを取得 | workspace |
-| `workspace_find` | パスのグロブ（`*.rs`、`src/**/*.ts`、`*.{toml,md}`）でファイル・ディレクトリを再帰的に探す（既定200件、最大1000件） | workspace |
+| `workspace_find` | パスのグロブ（`*.rs`、`src/**/*.ts`、`*.{toml,md}`）でファイル・ディレクトリを再帰的に探す（既定200件、最大1000件）。`.gitignore` の対象は `include_ignored:true` のときだけ含める | workspace |
 | `workspace_read` | UTF-8 ファイルを `offset`（バイト位置）と `max_bytes`（既定 64 KiB、最大 10 MiB）で分割して読む。`next_offset` で続きを読み、文字の途中では分割しない。`start_line`（1始まり）と `max_lines` を指定すると行単位で読み、`next_line`・`total_lines` と全体の `sha256` を返す | workspace |
-| `workspace_search` | UTF-8 テキストを再帰的に検索し、パス・行番号・列番号・抜粋を返す。既定は大文字小文字を区別する文字列検索で、`regex:true`（Rust の正規表現）、`ignore_case:true`、`include`（対象ファイルのグロブ）を指定できる（既定100件、最大1000件） | workspace |
+| `workspace_search` | UTF-8 テキストを再帰的に検索し、パス・行番号・列番号・抜粋を返す。既定は大文字小文字を区別する文字列検索で、`regex:true`（Rust の正規表現）、`ignore_case:true`、`include`（対象ファイルのグロブ）、`include_ignored`（`.gitignore` の対象も検索）を指定できる（既定100件、最大1000件） | workspace |
 | `workspace_edit` | 置換対象がちょうど1回だけ出現することと、必要なら `expected_sha256` の一致を確認してから原子的に書き込む。`dry_run:true` で差分とハッシュを確認できる | `allow_writes` |
 | `workspace_write` | UTF-8 テキストをファイルへ書き込む | `allow_writes` |
 | `workspace_move` | ファイル・ディレクトリを移動（リネーム）。既存ファイルの上書きは `overwrite:true` のときだけ | `allow_writes` |
@@ -244,6 +244,7 @@ model = "ロードしたモデル名"
 - **workspace の外には出ません。** 絶対パスや `..` を拒否し、既存の親ディレクトリを1階層ずつ正規化して workspace 内であることを確認します。シンボリックリンクを経由した書き込みも拒否し、リンクの削除・移動ではリンク先に触れません。
 - **`.git` と workspace ルートは移動・削除できません。**
 - **検索量に上限があります。** `workspace_search`・`workspace_find` は 10,000 エントリ（検索はさらに 32 MiB）までを走査し、リンク・バイナリ・10 MiB 超のファイルと、`.git`・`node_modules`・`target` などの生成物ディレクトリを省略します。上限に達したら範囲を狭めて再検索します。
+- **`.gitignore` に従います。** workspace 内の各ディレクトリの `.gitignore` と `.git/info/exclude` に一致するファイル・ディレクトリは検索しません（Git リポジトリでなくても適用）。`path` で明示したディレクトリは、それ自体が無視対象でも検索します。省いた数は結果の `ignored` / `skipped_ignored` に入ります。
 - **検証コマンドは設定で固定されます。** `workspace_check` のコマンドと引数は設定ファイルで決まり、workspace を作業ディレクトリとして実行し、出力は上限付きで返します。検証ごとの `timeout_secs` を優先し、タイムアウト時も取得済みの出力を返します。Webhook のジョブ全体の制限は引き続き適用されます。
 
 ### コマンド実行（workspace_exec）

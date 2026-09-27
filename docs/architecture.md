@@ -90,7 +90,7 @@ src/
 │       ├── mod.rs          組み込み tool の登録（echo・unix_time）
 │       ├── workspace.rs    list・read・search・find・edit・write とパスの検証
 │       ├── manage.rs       move・delete
-│       ├── walk.rs         上限付きのディレクトリ走査
+│       ├── walk.rs         上限付きのディレクトリ走査（.gitignore 対応）
 │       ├── glob.rs         パスのグロブ照合
 │       ├── checks.rs       workspace_check
 │       ├── exec.rs         workspace_exec（シェルコマンド）
