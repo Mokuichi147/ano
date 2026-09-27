@@ -54,6 +54,12 @@ pub trait ResponsesApi: Send + Sync {
         replay_deltas(&response, on_delta);
         Ok(response)
     }
+
+    /// Whether the endpoint implements `/responses/compact`. Other endpoints
+    /// compact the history by asking the model for a summary instead.
+    fn supports_remote_compaction(&self) -> bool {
+        false
+    }
 }
 
 /// Report the messages of a completed response to `on_delta`, one delta per
@@ -108,6 +114,10 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
         on_delta: DeltaSink<'_>,
     ) -> Result<Value> {
         (**self).create_response_streaming(payload, on_delta).await
+    }
+
+    fn supports_remote_compaction(&self) -> bool {
+        (**self).supports_remote_compaction()
     }
 }
 

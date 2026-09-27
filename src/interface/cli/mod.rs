@@ -95,7 +95,7 @@ struct AgentOptions {
 
     #[arg(
         long,
-        help = "Compact history after this many JSON bytes (requires /responses/compact)"
+        help = "Compact history after this many JSON bytes (see agent.compaction)"
     )]
     compact_threshold_bytes: Option<usize>,
 

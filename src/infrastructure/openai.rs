@@ -292,6 +292,10 @@ impl ResponsesApi for OpenAiClient {
     ) -> Result<Value> {
         OpenAiClient::create_response_streaming(self, payload, on_delta).await
     }
+
+    fn supports_remote_compaction(&self) -> bool {
+        is_openai_endpoint(&self.base_url)
+    }
 }
 
 fn is_retryable(status: StatusCode) -> bool {

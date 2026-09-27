@@ -60,7 +60,7 @@ src/
 │   ├── usage.rs            トークン使用量と停止理由
 │   ├── policy.rs           ユーザー別の tool allowlist / denylist
 │   ├── session.rs          会話の状態遷移（保留中の呼び出し、失敗時の補完）
-│   ├── compaction.rs       履歴圧縮の判定と結果の検証
+│   ├── compaction.rs       履歴圧縮の判定、remote の結果の検証、summary の記録と置き換え
 │   ├── tool.rs             ToolDefinition・ToolContext・予約名
 │   ├── mcp.rs              MCP サーバー設定と公開可否の判定
 │   └── environment.rs      実行環境と検証コマンドの設定

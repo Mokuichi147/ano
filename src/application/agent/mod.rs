@@ -20,7 +20,10 @@ use crate::{
         settings::AgentSettings,
     },
     domain::{
-        compaction::{compacted_history, compaction_due},
+        compaction::{
+            compacted_history, compaction_due, summarized_history, summary_transcript,
+            CompactionMethod, CompactionRecord,
+        },
         plan::{RunOutcome, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
@@ -67,6 +70,13 @@ pub struct AgentResult {
 
 /// Appended to the instructions of a sub-agent started by `delegate_task`.
 const SUBAGENT_INSTRUCTIONS: &str = "You are a sub-agent. Another agent delegated the task in the user message to you; it sees only your final answer, not your tool calls. Work on that task alone with the available tools and do not ask questions, since nobody can answer them. Finish with a concise, self-contained report: what you found or changed (with file paths and line numbers where useful), what you verified, and anything left unresolved.";
+
+/// Instructions of the request that summarizes a history for compaction on
+/// endpoints without `/responses/compact`.
+const SUMMARY_INSTRUCTIONS: &str = "You compact the history of an AI agent's conversation. The user message is a transcript of it; long tool calls and results are shortened. Write a summary that lets the agent continue the work without the original history. Include the user's requests and constraints, decisions made, work completed (with file paths, commands, and their results), important facts found (names, values, line numbers), errors and unresolved problems, and the current state with the remaining steps. Carry over the content of any earlier summary. Be concise but keep specifics. Write in the language of the user's requests. Output only the summary.";
+
+/// Transcript size for a summary when no compaction threshold is set.
+const DEFAULT_SUMMARY_TRANSCRIPT_BYTES: usize = 128 * 1024;
 
 /// How a run was started: by the caller, or by `delegate_task` in another run.
 #[derive(Default)]
@@ -171,6 +181,91 @@ impl Agent {
         result
     }
 
+    /// Compact a conversation now, regardless of `compact_threshold_bytes`,
+    /// for example on a user's command between turns.
+    pub async fn compact_conversation(
+        &self,
+        store: &mut dyn ConversationStore,
+    ) -> Result<CompactionRecord> {
+        self.settings.validate()?;
+        if store.data().status == SessionStatus::Running {
+            bail!("cannot compact a conversation during a turn");
+        }
+        let previous = store.data().history.clone();
+        if previous.is_empty() {
+            bail!("the conversation is empty");
+        }
+        let response = self.request_compaction(&previous).await?;
+        store.record_usage(&UsageSummary::from_response(
+            &response,
+            ApiOperation::Compaction,
+        ))?;
+        let (history, record) = self.compaction_result(&response, &previous)?;
+        store.replace_history(history, record)
+    }
+
+    fn remote_compaction(&self) -> bool {
+        match self.settings.compaction {
+            CompactionMethod::Auto => self.client.supports_remote_compaction(),
+            CompactionMethod::Remote => true,
+            CompactionMethod::Summary => false,
+        }
+    }
+
+    /// Ask the endpoint to compact `history`. The caller records the usage of
+    /// the returned response before `compaction_result` checks it.
+    async fn request_compaction(&self, history: &[Value]) -> Result<Value> {
+        if self.remote_compaction() {
+            let payload = json!({
+                "model": self.settings.model,
+                "instructions": self.settings.instructions,
+                "input": history,
+            });
+            return self.client.compact_response(&payload).await.context(
+                "context compaction failed; original history was preserved. Set agent.compaction = \"summary\" for endpoints without /responses/compact support",
+            );
+        }
+        // Half of the threshold leaves room for the instructions and the
+        // summary in a context that held the history.
+        let limit = self
+            .settings
+            .compact_threshold_bytes
+            .map(|threshold| threshold / 2)
+            .unwrap_or(DEFAULT_SUMMARY_TRANSCRIPT_BYTES)
+            .max(8 * 1024);
+        let payload = json!({
+            "model": self.settings.model,
+            "instructions": SUMMARY_INSTRUCTIONS,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": summary_transcript(history, limit)}]}],
+            "store": false,
+        });
+        self.client
+            .create_response(&payload)
+            .await
+            .context("context compaction by summary failed; original history was preserved")
+    }
+
+    fn compaction_result(
+        &self,
+        response: &Value,
+        previous: &[Value],
+    ) -> Result<(Vec<Value>, CompactionRecord)> {
+        if self.remote_compaction() {
+            return compacted_history(response, previous);
+        }
+        if let Some(error) = response["error"]["message"].as_str() {
+            bail!("context compaction by summary failed: {error}; original history was preserved");
+        }
+        validate_response_status(response)
+            .context("context compaction by summary failed; original history was preserved")?;
+        let id = response["id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(|id| format!("summary-{id}"))
+            .unwrap_or_else(|| format!("summary-{}", uuid::Uuid::new_v4()));
+        summarized_history(previous, &extract_output_text(response), id)
+    }
+
     async fn run_inner(
         &self,
         request: RunRequest,
@@ -240,9 +335,8 @@ impl Agent {
                     self.settings.compact_threshold_bytes,
                     previous_compact_size,
                 )? {
-                    let compact_payload = json!({"model":self.settings.model,"instructions":self.settings.instructions,"input":history});
-                    let compacted = self.client.compact_response(&compact_payload).await
-                        .context("context compaction failed; original history was preserved. Disable compact_threshold_bytes for endpoints without /responses/compact support")?;
+                    let previous = history.clone();
+                    let compacted = self.request_compaction(&previous).await?;
                     observe_usage(
                         &compacted,
                         ApiOperation::Compaction,
@@ -252,10 +346,7 @@ impl Agent {
                         &events,
                         origin.usage_sink,
                     )?;
-                    let (history, mut record) = compacted_history(
-                        &compacted,
-                        compact_payload["input"].as_array().unwrap(),
-                    )?;
+                    let (history, mut record) = self.compaction_result(&compacted, &previous)?;
                     previous_compact_size = Some(record.after_bytes);
                     if let Some(session) = session.as_deref_mut() {
                         record = session.replace_history(history, record)?;

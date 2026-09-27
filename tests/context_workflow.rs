@@ -106,7 +106,7 @@ fn window() -> Value {
 
 fn workspace() -> tempfile::TempDir {
     let directory = tempfile::tempdir().unwrap();
-    std::fs::write(directory.path().join("agent.toml"), "[api]\nmax_retries=0\n[agent]\nmax_tool_rounds=8\n[environments.coding]\nworkspace='.'\nallow_writes=true\nallowed_tools=['workspace_*']\n").unwrap();
+    std::fs::write(directory.path().join("agent.toml"), "[api]\nmax_retries=0\n[agent]\nmax_tool_rounds=8\ncompaction='remote'\n[environments.coding]\nworkspace='.'\nallow_writes=true\nallowed_tools=['workspace_*']\n").unwrap();
     directory
 }
 
@@ -484,4 +484,82 @@ async fn in_memory_compaction_includes_completed_tool_results() {
         .iter()
         .all(|(_, payload)| payload.get("previous_response_id").is_none()));
     assert!(!directory.path().join(".ano").exists());
+}
+
+#[tokio::test]
+async fn summary_compaction_replaces_history_on_endpoints_without_the_compact_api() {
+    let api = MockApi::start(vec![
+        (
+            RESPONSE,
+            response(
+                "r1",
+                vec![call(
+                    "search",
+                    "tool_search",
+                    json!({"query":"workspace_read"}),
+                )],
+            ),
+        ),
+        (
+            RESPONSE,
+            response(
+                "r2",
+                vec![call("read", "workspace_read", json!({"path":"large.txt"}))],
+            ),
+        ),
+        (
+            RESPONSE,
+            response(
+                "sum1",
+                vec![message("large.txt を読んだ。中身は x の繰り返し。")],
+            ),
+        ),
+        (RESPONSE, response("r3", vec![message("要約から続行")])),
+    ])
+    .await;
+    let directory = workspace();
+    std::fs::write(
+        directory.path().join("agent.toml"),
+        "[api]\nmax_retries=0\n[agent]\nmax_tool_rounds=8\ncompaction='summary'\n[environments.coding]\nworkspace='.'\nallowed_tools=['workspace_*']\n",
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("large.txt"), "x".repeat(12_000)).unwrap();
+    let output = result(
+        run(
+            directory.path(),
+            &api.endpoint,
+            &[
+                "--session",
+                ".ano/work.json",
+                "--compact-threshold-bytes",
+                "8192",
+            ],
+            "ファイルを調べて",
+        )
+        .await,
+    );
+    assert_eq!(output["text"], "要約から続行");
+    assert_eq!(output["usage"]["compactions"], 1);
+    let script = api.script.lock().unwrap();
+    assert!(script.requests.iter().all(|(path, _)| path == RESPONSE));
+    // The summary request sees a shortened transcript, not the raw history.
+    let summary_request = &script.requests[2].1;
+    let transcript = summary_request["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(transcript.contains("## Tool call: workspace_read"));
+    assert!(transcript.contains("characters omitted"));
+    assert!(summary_request["tools"].is_null());
+    // The next request continues from the request and the summary.
+    let history = script.requests[3].1["input"].as_array().unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0]["content"][0]["text"], "ファイルを調べて");
+    assert!(history[0]["content"][1]["text"]
+        .as_str()
+        .unwrap()
+        .ends_with("large.txt を読んだ。中身は x の繰り返し。"));
+    let saved = Session::inspect(directory.path().join(".ano/work.json")).unwrap();
+    assert_eq!(saved.compactions.len(), 1);
+    assert!(saved.compactions[0].id.starts_with("summary-"));
+    assert!(saved.compactions[0].archive_file.is_some());
 }

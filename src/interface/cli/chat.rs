@@ -34,6 +34,7 @@ use tokio::sync::oneshot;
 const HELP: &str = "Commands:
   /plan    show the task plan
   /usage   show token usage of this conversation
+  /compact compact the conversation now (summarize it to save context)
   /clear   start a new conversation (not with --session)
   /help    show this help
   /exit    quit (also Ctrl+D)
@@ -229,6 +230,24 @@ pub(super) async fn run(
                         usage.output_tokens,
                         usage.responses
                     );
+                    continue;
+                }
+                "/compact" => {
+                    let compacted = tokio::select! {
+                        result = agent.compact_conversation(store.as_mut()) => Some(result),
+                        _ = tokio::signal::ctrl_c() => None,
+                    };
+                    match compacted {
+                        Some(Ok(record)) => eprintln!(
+                            "(compacted {} items, {} bytes -> {} items, {} bytes)",
+                            record.before_items,
+                            record.before_bytes,
+                            record.after_items,
+                            record.after_bytes
+                        ),
+                        Some(Err(error)) => eprintln!("error: {error:#}"),
+                        None => eprintln!("\n[interrupted] the conversation was not compacted"),
+                    }
                     continue;
                 }
                 command if command.starts_with('/') => {

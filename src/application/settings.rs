@@ -1,6 +1,6 @@
 //! Settings of the agent run loop.
 
-use crate::domain::approval::ApprovalMode;
+use crate::domain::{approval::ApprovalMode, compaction::CompactionMethod};
 use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::path::{Component, Path};
@@ -39,6 +39,9 @@ pub struct AgentSettings {
     pub max_tool_output_bytes: usize,
     /// Opt-in standalone compaction; measured as serialized history bytes.
     pub compact_threshold_bytes: Option<usize>,
+    /// How the history is compacted: through `/responses/compact` (remote)
+    /// or by a model-written summary. `auto` picks by endpoint.
+    pub compaction: CompactionMethod,
     /// Soft per-run token limit, checked after each returned API response.
     pub max_total_tokens: Option<u64>,
     /// `reasoning.effort` sent to reasoning models; omitted when unset.
@@ -68,6 +71,7 @@ impl Default for AgentSettings {
             tool_timeout_secs: 120,
             max_tool_output_bytes: 128 * 1024,
             compact_threshold_bytes: None,
+            compaction: CompactionMethod::Auto,
             max_total_tokens: None,
             reasoning_effort: None,
             reasoning_summary: None,

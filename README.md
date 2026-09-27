@@ -23,7 +23,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - 生成中の回答を端末に逐次表示するストリーミング（Markdown はブロックごとに整形）
 - リポジトリの `AGENTS.md` などをプロジェクト固有の指示として自動で読み込み
 - 推論モデルの `reasoning.effort` 指定と、推論の要約の進捗表示
-- 長い会話の自動圧縮と、使用トークン数に応じた実行停止
+- 長い会話の自動圧縮（OpenAI の `/responses/compact`、またはローカル AI でも使えるモデルによる要約）と、使用トークン数に応じた実行停止
 - 大きすぎる tool 出力の切り詰め（先頭と末尾を残す）
 
 **tool と MCP**
@@ -108,6 +108,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | --- | --- |
 | テキスト | エージェントへの指示として送信 |
 | `/plan` / `/usage` | 作業計画 / この会話のトークン使用量を表示 |
+| `/compact` | 会話を今すぐ圧縮する（要約などで履歴を小さくし、コンテキストを空ける。[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)） |
 | `/clear` | 新しい会話を始める（`--session` 指定時は使えません） |
 | `/help` | コマンド一覧 |
 | ↑ / ↓ | 以前の入力を呼び出す |
@@ -211,6 +212,7 @@ model = "ロードしたモデル名"
 - `config.toml` はカレントディレクトリから読みます。別のディレクトリで実行する場合は `--config` で指定するか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
 - LM Studio で Remote MCP を使う場合は、Server Settings で MCP 利用を有効にします。
 - 回答はストリーミングで表示します（`stream: true` に対応していない server でも動きます）。
+- 長い会話の圧縮は、`/responses/compact` の代わりにモデル自身が書く要約で行います（`[agent] compaction = "auto"` の既定動作）。コンテキストの小さいモデルでは `compact_threshold_bytes` を設定してください（[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
 
 ロードしたモデル名は `agent.model` または `--model` で指定します。tool calling の品質はモデルの tool use 対応に依存します（native tool use 対応モデルを推奨）。URL 形式の MCP は `url` で登録できますが、Secure MCP Tunnel（`tunnel_id`）は OpenAI Responses API の機能で、LM Studio では使えません。
 

@@ -31,9 +31,12 @@ max_parallel_tool_calls = 8
 tool_timeout_secs = 120
 # Tool outputs longer than this (JSON bytes) are cut to their head and tail.
 max_tool_output_bytes = 131072
-# Opt-in history compaction; requires this model/endpoint to support /responses/compact.
-# Threshold is serialized history bytes, not tokens. Sessions archive the old history.
+# Opt-in history compaction. Threshold is serialized history bytes, not tokens.
+# Sessions archive the old history.
 # compact_threshold_bytes = 262144
+# "remote" uses /responses/compact (OpenAI); "summary" asks the model for a
+# summary and works with any endpoint; "auto" picks by base_url.
+# compaction = "auto"
 # Soft per-run limit for reported input + output tokens, including compaction.
 # Checked after API responses; a response can overshoot. Missing usage stops the run.
 # max_total_tokens = 100000

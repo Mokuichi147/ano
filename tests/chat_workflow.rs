@@ -122,3 +122,79 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["content"][0]["text"], "三番目");
 }
+
+/// `/compact` replaces the conversation with the latest request and a
+/// summary written by the model, on an endpoint without /responses/compact.
+#[tokio::test]
+async fn chat_compacts_on_request_with_a_summary() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&requests);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(payload): Json<Value>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                let mut requests = captured.lock().unwrap();
+                requests.push(payload);
+                let turn = requests.len();
+                Json(json!({
+                    "id": format!("resp_{turn}"),
+                    "status": "completed",
+                    "output": [{"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": format!("answer {turn}")}]}],
+                    "usage": {"input_tokens": 8, "output_tokens": 2, "total_tokens": 10}
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let workspace = tempfile::tempdir().unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .current_dir(workspace.path())
+        .env("OPENAI_BASE_URL", &endpoint)
+        .env("OPENAI_API_KEY", "test-fixture-key")
+        .arg("chat")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    stdin
+        .write_all("最初の質問\n/compact\n次の質問\n/usage\n".as_bytes())
+        .await
+        .unwrap();
+    drop(stdin);
+    let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    server.abort();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("(compacted 2 items"), "{stderr}");
+    assert!(stderr.contains("30 tokens"), "{stderr}");
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1]["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You compact the history"));
+    assert!(requests[1]["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("## Assistant\nanswer 1"));
+    let history = requests[2]["input"].as_array().unwrap();
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0]["content"][0]["text"], "最初の質問");
+    assert!(history[0]["content"][1]["text"]
+        .as_str()
+        .unwrap()
+        .ends_with("answer 2"));
+    assert_eq!(history[1]["content"][0]["text"], "次の質問");
+}
