@@ -18,9 +18,41 @@ pub(super) fn parse_arguments(value: &Value) -> Result<Value> {
     Ok(arguments)
 }
 
-pub(super) fn compact_output(value: &Value) -> String {
-    serde_json::to_string(value)
-        .unwrap_or_else(|_| "{\"error\":\"failed to serialize tool output\"}".to_string())
+/// Serialize a tool output for the model. An output longer than `limit`
+/// bytes is replaced by its head and tail, so one large result (typically
+/// from an MCP server) cannot flood the context of every later request.
+pub(super) fn compact_output(value: &Value, limit: usize) -> String {
+    let text = serde_json::to_string(value)
+        .unwrap_or_else(|_| "{\"error\":\"failed to serialize tool output\"}".to_string());
+    if text.len() <= limit {
+        return text;
+    }
+    // Leave room for the wrapper; escaping can still grow the excerpts a bit.
+    let excerpt = limit.saturating_sub(512) / 2;
+    let head = &text[..floor_char_boundary(&text, excerpt)];
+    let tail = &text[ceil_char_boundary(&text, text.len() - excerpt)..];
+    json!({
+        "truncated": true,
+        "original_bytes": text.len(),
+        "message": "The tool output was too large and was cut in the middle. Narrow the request (for example a smaller page, range, or query) to see the omitted part.",
+        "head": head,
+        "tail": tail,
+    })
+    .to_string()
+}
+
+fn floor_char_boundary(text: &str, mut index: usize) -> usize {
+    while !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn ceil_char_boundary(text: &str, mut index: usize) -> usize {
+    while !text.is_char_boundary(index) {
+        index += 1;
+    }
+    index
 }
 
 pub(super) fn validate_response_status(response: &Value) -> Result<()> {

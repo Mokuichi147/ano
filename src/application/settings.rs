@@ -34,6 +34,9 @@ pub struct AgentSettings {
     pub max_parallel_tool_calls: usize,
     /// Timeout for a single local tool or direct MCP tool call.
     pub tool_timeout_secs: u64,
+    /// Tool outputs longer than this (serialized JSON bytes) are cut to their
+    /// head and tail before they enter the conversation.
+    pub max_tool_output_bytes: usize,
     /// Opt-in standalone compaction; measured as serialized history bytes.
     pub compact_threshold_bytes: Option<usize>,
     /// Soft per-run token limit, checked after each returned API response.
@@ -63,6 +66,7 @@ impl Default for AgentSettings {
             parallel_tool_calls: true,
             max_parallel_tool_calls: 8,
             tool_timeout_secs: 120,
+            max_tool_output_bytes: 128 * 1024,
             compact_threshold_bytes: None,
             max_total_tokens: None,
             reasoning_effort: None,
@@ -111,6 +115,9 @@ impl AgentSettings {
         }
         if self.tool_timeout_secs == 0 {
             bail!("agent.tool_timeout_secs must be greater than zero");
+        }
+        if self.max_tool_output_bytes < 4096 {
+            bail!("agent.max_tool_output_bytes must be at least 4096");
         }
         if let Some(effort) = &self.reasoning_effort {
             if !REASONING_EFFORTS.contains(&effort.as_str()) {

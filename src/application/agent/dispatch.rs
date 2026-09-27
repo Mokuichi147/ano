@@ -124,7 +124,7 @@ impl Agent {
                     continuation: Some(json!({
                         "type": "function_call_output",
                         "call_id": call_id,
-                        "output": compact_output(&output),
+                        "output": compact_output(&output, self.settings.max_tool_output_bytes),
                     })),
                     selection,
                 })

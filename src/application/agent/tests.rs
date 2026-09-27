@@ -1241,3 +1241,35 @@ async fn sub_agents_cannot_delegate_further() {
         .unwrap();
     assert_eq!(output["error"], "tool_disabled");
 }
+
+#[tokio::test]
+async fn large_tool_outputs_are_cut_to_head_and_tail() {
+    let registry = ToolRegistry::new();
+    registry
+        .register(
+            ToolDefinition::new(
+                "dump",
+                "Return a lot of text",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            ),
+            |_arguments| async move { Ok(json!({"text": format!("BEGIN{}END", "あ".repeat(10_000))})) },
+        )
+        .unwrap();
+    let mut agent = agent(registry, Vec::new());
+    agent.settings.max_tool_output_bytes = 4096;
+    let item = json!({"type":"function_call","call_id":"c1","name":"dump","arguments":"{}"});
+    let (continuation, _) = with_scope(&selected_local_tools(&["dump"]), async |scope| {
+        agent
+            .handle_output_items(std::slice::from_ref(&item), scope, None)
+            .await
+            .unwrap()
+    })
+    .await;
+    let output = continuation[0]["output"].as_str().unwrap();
+    assert!(output.len() < 4096 * 2, "{}", output.len());
+    let output: Value = serde_json::from_str(output).unwrap();
+    assert_eq!(output["truncated"], true);
+    assert!(output["original_bytes"].as_u64().unwrap() > 30_000);
+    assert!(output["head"].as_str().unwrap().contains("BEGIN"));
+    assert!(output["tail"].as_str().unwrap().contains("END"));
+}

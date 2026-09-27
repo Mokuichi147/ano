@@ -18,6 +18,7 @@
 | `parallel_tool_calls` | `true` | 1つの応答に含まれる複数の function call を並行実行するか |
 | `max_parallel_tool_calls` | 8 | 同時に実行する tool 呼び出しの上限 |
 | `tool_timeout_secs` | 120 | ローカル tool・直接接続 MCP tool 1回あたりのタイムアウト |
+| `max_tool_output_bytes` | 131072 | tool 出力（JSON のバイト数）の上限。超えた出力は先頭と末尾だけを残し、`truncated: true` と元のサイズを付けてモデルへ返します（4096 以上） |
 | `tool_discovery_limit` | 12 | `tool_search` 1回で有効化する tool 数 |
 | `max_output_tokens` | なし | 各応答の出力トークン上限 |
 | `reasoning_effort` | なし | 推論モデルの `reasoning.effort`（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`）。CLI では `--reasoning-effort` |

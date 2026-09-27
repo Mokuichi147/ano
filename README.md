@@ -23,6 +23,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - リポジトリの `AGENTS.md` などをプロジェクト固有の指示として自動で読み込み
 - 推論モデルの `reasoning.effort` 指定と、推論の要約の進捗表示
 - 長い会話の自動圧縮と、使用トークン数に応じた実行停止
+- 大きすぎる tool 出力の切り詰め（先頭と末尾を残す）
 
 **tool と MCP**
 - workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り（バイト位置・行番号）・全文検索（正規表現対応）・書き込み・移動・削除
@@ -163,7 +164,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | セクション | 内容 | 詳細 |
 | --- | --- | --- |
 | `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ | [ローカル AI](#ローカル-ailm-studioollama-など) |
-| `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
+| `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・tool 出力の上限・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
 | `[environments.<name>]` | workspace・許可する tool・書き込み・コマンド実行・承認モード・検証コマンド | [実行環境](#実行環境) |
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
 | `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](docs/mcp.md) |

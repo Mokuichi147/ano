@@ -26,6 +26,8 @@ max_parallel_tool_calls = 8
 # Timeout for one local tool or direct MCP tool call.
 # Named workspace_check commands use their own timeout_secs instead.
 tool_timeout_secs = 120
+# Tool outputs longer than this (JSON bytes) are cut to their head and tail.
+max_tool_output_bytes = 131072
 # Opt-in history compaction; requires this model/endpoint to support /responses/compact.
 # Threshold is serialized history bytes, not tokens. Sessions archive the old history.
 # compact_threshold_bytes = 262144
