@@ -24,7 +24,7 @@ use crate::{
         mcp::McpTransport,
         plan::TASK_PLAN_NAME,
         session::SessionBinding,
-        tool::{ToolContext, DELEGATE_TASK_NAME, WORKSPACE_EXEC_NAME},
+        tool::{ToolContext, DELEGATE_TASK_NAME, WEB_FETCH_NAME, WORKSPACE_EXEC_NAME},
     },
     infrastructure::{
         mcp::McpPool, openai::OpenAiClient, project::read_project_instructions,
@@ -153,6 +153,13 @@ struct AgentOptions {
         help = "Allow workspace_exec to run shell commands in the workspace (each command needs approval)"
     )]
     allow_exec: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "environment",
+        help = "Allow web_fetch to read public web pages (each fetch needs approval)"
+    )]
+    allow_web: bool,
 
     #[arg(
         long,
@@ -325,6 +332,13 @@ fn list_tools(
                 Some(environment) if environment.allow_exec => "enabled by allow_exec",
                 Some(_) => "unavailable: allow_exec is not set",
                 None => "needs --allow-exec",
+            });
+        }
+        if definition.name == WEB_FETCH_NAME {
+            notes.push(match environment {
+                Some(environment) if environment.allow_web => "enabled by allow_web",
+                Some(_) => "unavailable: allow_web is not set",
+                None => "needs --allow-web",
             });
         }
         if definition.requires_approval {
@@ -563,6 +577,7 @@ fn resolve_run_context(
                 }),
                 allow_writes: args.allow_writes,
                 allow_exec: args.allow_exec,
+                allow_web: args.allow_web,
                 checks: Default::default(),
             },
             approval_mode: config.agent.approval_mode,
@@ -681,6 +696,7 @@ mod tests {
         assert!(context.workspace.is_none());
         assert!(!context.allow_writes);
         assert!(!context.allow_exec);
+        assert!(!context.allow_web);
         assert_eq!(approval_mode, ApprovalMode::Deny);
     }
 
@@ -690,6 +706,7 @@ mod tests {
             vec!["--workspace", "."],
             vec!["--allow-writes"],
             vec!["--allow-exec"],
+            vec!["--allow-web"],
             vec!["--auto-approve-mcp"],
         ] {
             let mut arguments = vec!["ano", "run", "--environment", "review", "review"];

@@ -14,6 +14,9 @@ pub const DELEGATE_TASK_NAME: &str = "delegate_task";
 
 /// Built-in tool that runs shell commands when `ToolContext::allow_exec` is set.
 pub const WORKSPACE_EXEC_NAME: &str = "workspace_exec";
+/// Built-in tool that reads web pages when `ToolContext::allow_web` is set.
+pub const WEB_FETCH_NAME: &str = "web_fetch";
+
 /// Default and maximum `timeout_secs` of one `workspace_exec` command.
 pub const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 120;
 pub const EXEC_MAX_TIMEOUT_SECS: u64 = 1800;
@@ -79,6 +82,8 @@ pub struct ToolContext {
     pub allow_writes: bool,
     /// Whether `workspace_exec` may run commands in the workspace.
     pub allow_exec: bool,
+    /// Whether `web_fetch` may read public web pages.
+    pub allow_web: bool,
     pub checks: BTreeMap<String, CheckConfig>,
 }
 
@@ -86,7 +91,11 @@ impl ToolContext {
     /// Whether a registered tool can run in this context at all. Tools that
     /// cannot are neither offered to the model nor sent for approval.
     pub fn can_run(&self, tool_name: &str) -> bool {
-        tool_name != WORKSPACE_EXEC_NAME || self.allow_exec
+        match tool_name {
+            WORKSPACE_EXEC_NAME => self.allow_exec,
+            WEB_FETCH_NAME => self.allow_web,
+            _ => true,
+        }
     }
 }
 

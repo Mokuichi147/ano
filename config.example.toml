@@ -96,6 +96,9 @@ allow_writes = false
 # Let workspace_exec run shell commands. Commands are not sandboxed; each one
 # is judged by approval_mode ("deny" by default in environments).
 # allow_exec = true
+# Let web_fetch read public web pages (private and local addresses are
+# refused). Each fetch is judged by approval_mode, since URLs can carry data.
+# allow_web = true
 # approval_mode = "auto"
 # Explicit opt-in: configured checks execute with ano's OS permissions and
 # may run project code. Register only commands for workspaces you trust.

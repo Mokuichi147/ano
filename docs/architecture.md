@@ -94,6 +94,7 @@ src/
 │       ├── glob.rs         パスのグロブ照合
 │       ├── checks.rs       workspace_check
 │       ├── exec.rs         workspace_exec（シェルコマンド）
+│       ├── web.rs          web_fetch（公開 Web ページの取得と Markdown 変換）
 │       └── process.rs      子プロセスの実行（期限・出力上限・プロセスグループの停止）
 └── interface/
     ├── cli/                clap による CLI（run・chat・tools・session・serve）、進捗表示、端末での承認

@@ -1,5 +1,5 @@
 //! Built-in local tools: `echo`, `unix_time`, workspace file access and
-//! management, configured validation checks, and shell commands.
+//! management, configured validation checks, shell commands, and web pages.
 
 mod checks;
 mod exec;
@@ -7,6 +7,7 @@ mod glob;
 mod manage;
 mod process;
 mod walk;
+mod web;
 mod workspace;
 
 use crate::{application::registry::ToolRegistry, domain::tool::ToolDefinition};
@@ -18,6 +19,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
     checks::register(registry)?;
     exec::register(registry)?;
+    web::register(registry)?;
     registry.register(
         non_strict_definition(
             "echo",
