@@ -1,12 +1,14 @@
 //! HTTP client for the OpenAI Responses API and compatible endpoints.
 
-use crate::application::ports::ResponsesApi;
+use crate::application::ports::{replay_deltas, DeltaSink, ResponseDelta, ResponsesApi};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use reqwest::{Client, StatusCode, Url};
+use eventsource_stream::Eventsource;
+use futures::StreamExt;
+use reqwest::{Client, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::Value;
-use std::time::Duration;
+use std::{collections::BTreeMap, time::Duration};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -29,6 +31,9 @@ pub struct ApiSettings {
     pub timeout_secs: u64,
     /// Retries for connection failures and 429 / 5xx responses.
     pub max_retries: u32,
+    /// Request server-sent events so answers appear while they are generated.
+    /// An endpoint that ignores the request and returns JSON still works.
+    pub stream: bool,
 }
 
 impl Default for ApiSettings {
@@ -38,6 +43,7 @@ impl Default for ApiSettings {
             api_key_env: default_api_key_env(),
             timeout_secs: 600,
             max_retries: 2,
+            stream: true,
         }
     }
 }
@@ -50,6 +56,7 @@ pub struct OpenAiClient {
     api_key: Option<String>,
     base_url: String,
     max_retries: u32,
+    stream: bool,
 }
 
 impl OpenAiClient {
@@ -76,6 +83,7 @@ impl OpenAiClient {
             api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
             max_retries: settings.max_retries,
+            stream: settings.stream,
         })
     }
 
@@ -85,6 +93,7 @@ impl OpenAiClient {
             api_key: Some(api_key.into()).filter(|key| !key.is_empty()),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             max_retries: 0,
+            stream: true,
         }
     }
 
@@ -100,7 +109,43 @@ impl OpenAiClient {
         self.post_json("responses/compact", payload).await
     }
 
+    /// `POST /responses` with `stream: true`, reporting message text to
+    /// `on_delta` as it arrives. A JSON reply (from an endpoint that does not
+    /// stream) is accepted and its messages are reported at once.
+    pub async fn create_response_streaming(
+        &self,
+        payload: &Value,
+        on_delta: DeltaSink<'_>,
+    ) -> Result<Value> {
+        if !self.stream {
+            let response = self.create_response(payload).await?;
+            replay_deltas(&response, on_delta);
+            return Ok(response);
+        }
+        let mut payload = payload.clone();
+        payload["stream"] = Value::Bool(true);
+        let response = self.send("responses", &payload).await?;
+        let is_event_stream = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("text/event-stream"));
+        if !is_event_stream {
+            let response = read_json(response, "responses").await?;
+            replay_deltas(&response, on_delta);
+            return Ok(response);
+        }
+        read_event_stream(response, on_delta).await
+    }
+
     async fn post_json(&self, endpoint: &str, payload: &Value) -> Result<Value> {
+        let response = self.send(endpoint, payload).await?;
+        read_json(response, endpoint).await
+    }
+
+    /// Send a request, retrying connection failures and retryable statuses.
+    /// Returns a successful response; an error status becomes an error.
+    async fn send(&self, endpoint: &str, payload: &Value) -> Result<Response> {
         let url = format!("{}/{}", self.base_url, endpoint);
         let mut attempt = 0;
         loop {
@@ -134,27 +179,96 @@ impl OpenAiClient {
                 tokio::time::sleep(backoff(attempt, retry_after)).await;
                 continue;
             }
-
-            let body = response
-                .text()
-                .await
-                .with_context(|| format!("failed to read OpenAI {endpoint} response"))?;
-            let parsed = serde_json::from_str::<Value>(&body);
             if !status.is_success() {
-                let message = match &parsed {
-                    Ok(value) => error_text(value),
+                let body = response.text().await.unwrap_or_default();
+                let message = match serde_json::from_str::<Value>(&body) {
+                    Ok(value) => error_text(&value),
                     Err(_) => truncate(&body),
                 };
                 bail!("OpenAI {endpoint} request failed ({status}): {message}");
             }
-            return parsed.with_context(|| {
-                format!(
-                    "OpenAI returned invalid JSON for {endpoint}: {}",
-                    truncate(&body)
-                )
-            });
+            return Ok(response);
         }
     }
+}
+
+async fn read_json(response: Response, endpoint: &str) -> Result<Value> {
+    let body = response
+        .text()
+        .await
+        .with_context(|| format!("failed to read OpenAI {endpoint} response"))?;
+    serde_json::from_str::<Value>(&body).with_context(|| {
+        format!(
+            "OpenAI returned invalid JSON for {endpoint}: {}",
+            truncate(&body)
+        )
+    })
+}
+
+/// Read Responses API server-sent events until the terminal event and return
+/// the response it carries.
+async fn read_event_stream(response: Response, on_delta: DeltaSink<'_>) -> Result<Value> {
+    let mut events = response.bytes_stream().eventsource();
+    // Finished output items by index, for endpoints whose terminal event
+    // leaves the output out.
+    let mut items = BTreeMap::new();
+    let mut completed = None;
+    while let Some(event) = events.next().await {
+        let event = event
+            .map_err(|error| anyhow::anyhow!("{error}"))
+            .context("failed to read the streamed OpenAI responses reply")?;
+        if event.data.trim() == "[DONE]" {
+            break;
+        }
+        let data: Value = match serde_json::from_str(&event.data) {
+            Ok(data) => data,
+            // Comments and keep-alives carry no JSON.
+            Err(_) => continue,
+        };
+        let kind = data["type"].as_str().unwrap_or(event.event.as_str());
+        match kind {
+            "response.output_text.delta" | "response.refusal.delta" => {
+                if let Some(delta) = data["delta"].as_str() {
+                    on_delta(ResponseDelta::Text(delta));
+                }
+            }
+            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+                on_delta(ResponseDelta::Reasoning(
+                    data["delta"].as_str().unwrap_or_default(),
+                ));
+            }
+            "response.output_item.done" => {
+                let item = &data["item"];
+                if item["type"] == "message" {
+                    on_delta(ResponseDelta::MessageDone);
+                }
+                let index = data["output_index"].as_u64().unwrap_or(items.len() as u64);
+                items.insert(index, item.clone());
+            }
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                completed = Some(data["response"].clone());
+                break;
+            }
+            "error" => {
+                let message = data["message"]
+                    .as_str()
+                    .or_else(|| data["error"]["message"].as_str())
+                    .unwrap_or("unknown error");
+                bail!("OpenAI responses stream failed: {}", truncate(message));
+            }
+            _ => {}
+        }
+    }
+    let mut response = completed
+        .filter(Value::is_object)
+        .context("the OpenAI responses stream ended before the response was complete")?;
+    let has_output = response["output"]
+        .as_array()
+        .is_some_and(|output| !output.is_empty());
+    if !has_output && !items.is_empty() {
+        response["output"] = Value::Array(items.into_values().collect());
+    }
+    Ok(response)
 }
 
 #[async_trait]
@@ -169,6 +283,14 @@ impl ResponsesApi for OpenAiClient {
 
     async fn compact_response(&self, payload: &Value) -> Result<Value> {
         OpenAiClient::compact_response(self, payload).await
+    }
+
+    async fn create_response_streaming(
+        &self,
+        payload: &Value,
+        on_delta: DeltaSink<'_>,
+    ) -> Result<Value> {
+        OpenAiClient::create_response_streaming(self, payload, on_delta).await
     }
 }
 
@@ -297,5 +419,143 @@ mod tests {
             *seen.lock().unwrap(),
             vec![None, Some("Bearer secret".to_string())]
         );
+    }
+
+    /// Serve `body` from `/v1/responses` with the given content type and
+    /// return the endpoint and the received payloads.
+    async fn serve_once(
+        content_type: &'static str,
+        body: String,
+    ) -> (String, Arc<Mutex<Vec<Value>>>, tokio::task::JoinHandle<()>) {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&seen);
+        let app = Router::new().route(
+            "/v1/responses",
+            post(move |Json(payload): Json<Value>| {
+                let captured = Arc::clone(&captured);
+                let body = body.clone();
+                async move {
+                    captured.lock().unwrap().push(payload);
+                    ([("content-type", content_type)], body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (endpoint, seen, server)
+    }
+
+    fn sse(events: &[Value]) -> String {
+        events
+            .iter()
+            .map(|event| {
+                format!(
+                    "event: {}\ndata: {event}\n\n",
+                    event["type"].as_str().unwrap()
+                )
+            })
+            .collect()
+    }
+
+    fn collect_deltas() -> (
+        Arc<Mutex<Vec<String>>>,
+        impl Fn(super::ResponseDelta<'_>) + Send + Sync,
+    ) {
+        let deltas = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&deltas);
+        (deltas, move |delta| {
+            sink.lock().unwrap().push(match delta {
+                super::ResponseDelta::Text(text) => text.to_string(),
+                super::ResponseDelta::MessageDone => "<done>".to_string(),
+                super::ResponseDelta::Reasoning(_) => "<reasoning>".to_string(),
+            })
+        })
+    }
+
+    #[tokio::test]
+    async fn streams_message_text_and_returns_the_completed_response() {
+        let message = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"こんにちは、世界"}]});
+        let body = sse(&[
+            json!({"type":"response.created","response":{"id":"r1","status":"in_progress"}}),
+            json!({"type":"response.reasoning_text.delta","output_index":0,"delta":"Think"}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message"}}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"こんにちは"}),
+            json!({"type":"response.output_text.delta","output_index":0,"delta":"、世界"}),
+            json!({"type":"response.output_item.done","output_index":0,"item":message}),
+            json!({"type":"response.completed","response":{"id":"r1","status":"completed","output":[message]}}),
+        ]);
+        let (endpoint, seen, server) = serve_once("text/event-stream", body).await;
+        let (deltas, sink) = collect_deltas();
+        let response = OpenAiClient::new("", &endpoint)
+            .create_response_streaming(&json!({"model":"m"}), &sink)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(seen.lock().unwrap()[0]["stream"], true);
+        assert_eq!(response["id"], "r1");
+        assert_eq!(response["output"][0], message);
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            ["<reasoning>", "こんにちは", "、世界", "<done>"]
+        );
+    }
+
+    #[tokio::test]
+    async fn fills_in_output_from_finished_items_when_the_final_event_omits_it() {
+        let call = json!({"type":"function_call","call_id":"c1","name":"echo","arguments":"{}"});
+        let body = sse(&[
+            json!({"type":"response.output_item.done","output_index":0,"item":call}),
+            json!({"type":"response.completed","response":{"id":"r2","status":"completed"}}),
+        ]);
+        let (endpoint, _, server) = serve_once("text/event-stream", body).await;
+        let (deltas, sink) = collect_deltas();
+        let response = OpenAiClient::new("", &endpoint)
+            .create_response_streaming(&json!({}), &sink)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(response["output"], json!([call]));
+        assert!(deltas.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepts_a_json_reply_to_a_streaming_request() {
+        let body = json!({"id":"r3","status":"completed","output":[
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"whole"}]}
+        ]})
+        .to_string();
+        let (endpoint, _, server) = serve_once("application/json", body).await;
+        let (deltas, sink) = collect_deltas();
+        let response = OpenAiClient::new("", &endpoint)
+            .create_response_streaming(&json!({}), &sink)
+            .await
+            .unwrap();
+        server.abort();
+        assert_eq!(response["id"], "r3");
+        assert_eq!(*deltas.lock().unwrap(), ["whole", "<done>"]);
+    }
+
+    #[tokio::test]
+    async fn stream_errors_and_truncated_streams_fail() {
+        for (body, expected) in [
+            (
+                sse(&[json!({"type":"error","message":"overloaded"})]),
+                "overloaded",
+            ),
+            (
+                sse(&[json!({"type":"response.output_text.delta","delta":"par"})]),
+                "ended before",
+            ),
+        ] {
+            let (endpoint, _, server) = serve_once("text/event-stream", body).await;
+            let (_, sink) = collect_deltas();
+            let error = OpenAiClient::new("", &endpoint)
+                .create_response_streaming(&json!({}), &sink)
+                .await
+                .unwrap_err();
+            server.abort();
+            assert!(format!("{error:#}").contains(expected), "{error:#}");
+        }
     }
 }

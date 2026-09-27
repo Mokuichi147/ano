@@ -1,3 +1,4 @@
+use crate::application::ports::ResponseDelta;
 use crate::domain::{
     compaction::CompactionRecord,
     plan::{RunOutcome, TaskPlan},
@@ -30,6 +31,9 @@ pub enum AgentEvent {
     AssistantProgress {
         round: usize,
         text: String,
+        /// The text was already shown through the agent's text listener.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        streamed: bool,
     },
     /// Summary of the model's reasoning, when `reasoning_summary` is set.
     ReasoningSummary {
@@ -104,6 +108,10 @@ pub enum AgentEvent {
         error: Option<String>,
     },
 }
+
+/// Receives the text of the model's messages while it is generated. Only the
+/// caller's run streams; sub-agents report through their final answer.
+pub type TextListener = Arc<dyn Fn(ResponseDelta<'_>) + Send + Sync>;
 
 /// Receives each event as soon as it happens, so progress is visible during a
 /// long run and is not lost when the run fails.

@@ -1,12 +1,15 @@
 //! Human-readable and JSON output of runs, plans, and progress events.
 
 use crate::{
-    application::agent::{AgentEvent, AgentResult},
+    application::{
+        agent::{AgentEvent, AgentResult},
+        ports::ResponseDelta,
+    },
     domain::plan::{RunOutcome, TaskPlan},
 };
 use anyhow::Result;
 use std::{
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     sync::{LazyLock, Mutex, PoisonError},
 };
 use termimad::{crossterm::style::Stylize, Alignment, MadSkin};
@@ -28,8 +31,11 @@ impl TextFormat {
         if raw || !std::io::stdout().is_terminal() {
             return Self::Raw;
         }
+        // A terminal that reports no usable size (e.g. a bare pseudo
+        // terminal) gets a conventional width instead of a squeezed layout.
+        let width = usize::from(termimad::terminal_size().0);
         Self::Terminal {
-            width: usize::from(termimad::terminal_size().0),
+            width: if width < 20 { 80 } else { width },
             color: std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty()),
         }
     }
@@ -140,12 +146,167 @@ pub(super) fn format_result(
             "stop_reason": result.stop_reason,
         }))?)
     } else {
-        let text = format.apply(&result.text);
+        // A streamed answer is already on the screen.
+        let text = if result.streamed {
+            String::new()
+        } else {
+            format.apply(&result.text)
+        };
         if result.outcome == RunOutcome::Completed {
             Ok(text)
         } else {
-            Ok(format!("{text}\n\n{}", format_plan(&result.plan)))
+            Ok(format!("{text}\n\n{}", format_plan(&result.plan))
+                .trim_start()
+                .to_string())
         }
+    }
+}
+
+/// Prints message text on stdout while the model generates it.
+///
+/// Raw text is printed as it arrives. Formatted text is printed one Markdown
+/// block at a time: a block ends at a blank line outside a code fence, so a
+/// paragraph, list, table, or code block is formatted once it is complete.
+pub(super) struct AnswerStream {
+    format: TextFormat,
+    /// Show that the model is reasoning, as a progress line.
+    show_progress: bool,
+    state: Mutex<StreamState>,
+}
+
+#[derive(Default)]
+struct StreamState {
+    /// Text after the last complete line.
+    partial: String,
+    /// Complete lines of the current block.
+    block: Vec<String>,
+    /// The fence marker while inside a fenced code block.
+    fence: Option<&'static str>,
+    /// Something of the current message has been printed.
+    started: bool,
+    /// The reasoning indicator is shown for the current response.
+    thinking: bool,
+}
+
+impl AnswerStream {
+    pub(super) fn new(format: TextFormat, show_progress: bool) -> Self {
+        Self {
+            format,
+            show_progress,
+            state: Mutex::new(StreamState::default()),
+        }
+    }
+
+    /// Called on agent events, which come between responses: the next
+    /// response announces its reasoning again.
+    pub(super) fn end_response(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .thinking = false;
+    }
+
+    pub(super) fn push(&self, delta: ResponseDelta<'_>) {
+        if let ResponseDelta::Reasoning(_) = delta {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            if !state.thinking && self.show_progress {
+                // Reasoning can take long; show once that the model works.
+                state.thinking = true;
+                emit_progress("[thinking]".to_string());
+            }
+            return;
+        }
+        let out = self.render(delta);
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(out.as_bytes()).ok();
+        stdout.flush().ok();
+    }
+
+    /// Drop a message cut off by an interruption, so that the next message
+    /// starts cleanly.
+    pub(super) fn abandon(&self) {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        if state.started || !state.partial.is_empty() || !state.block.is_empty() {
+            println!();
+        }
+        *state = StreamState::default();
+    }
+
+    /// The text to print for `delta`.
+    fn render(&self, delta: ResponseDelta<'_>) -> String {
+        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut out = String::new();
+        state.thinking = false;
+        match delta {
+            ResponseDelta::Reasoning(_) => {}
+            ResponseDelta::Text(text) if self.format == TextFormat::Raw => {
+                if !state.started && !text.is_empty() {
+                    // A blank line sets the answer apart from the progress.
+                    out.push('\n');
+                    state.started = true;
+                }
+                out.push_str(text);
+            }
+            ResponseDelta::Text(text) => {
+                state.partial.push_str(text);
+                while let Some(end) = state.partial.find('\n') {
+                    let line = state.partial[..end].trim_end_matches('\r').to_string();
+                    state.partial.drain(..=end);
+                    self.line(&mut state, line, &mut out);
+                }
+            }
+            ResponseDelta::MessageDone => {
+                if self.format != TextFormat::Raw {
+                    let rest = std::mem::take(&mut state.partial);
+                    if !rest.is_empty() {
+                        self.line(&mut state, rest, &mut out);
+                    }
+                    self.flush_block(&mut state, &mut out);
+                }
+                if state.started {
+                    out.push_str("\n\n");
+                }
+                state.started = false;
+                state.fence = None;
+            }
+        }
+        out
+    }
+
+    fn line(&self, state: &mut StreamState, line: String, out: &mut String) {
+        let trimmed = line.trim_start();
+        match state.fence {
+            Some(marker) if trimmed.starts_with(marker) => {
+                // A closed code block is complete.
+                state.fence = None;
+                state.block.push(line);
+                self.flush_block(state, out);
+                return;
+            }
+            Some(_) => {}
+            None => {
+                if trimmed.is_empty() {
+                    self.flush_block(state, out);
+                    return;
+                }
+                state.fence = ["```", "~~~"]
+                    .into_iter()
+                    .find(|marker| trimmed.starts_with(marker));
+            }
+        }
+        state.block.push(line);
+    }
+
+    fn flush_block(&self, state: &mut StreamState, out: &mut String) {
+        if state.block.is_empty() {
+            return;
+        }
+        let block = std::mem::take(&mut state.block).join("\n");
+        // Blocks are separated by a blank line, and the first one by a blank
+        // line from the progress above it.
+        out.push_str(if state.started { "\n\n" } else { "\n" });
+        out.push_str(&self.format.apply(&block));
+        state.started = true;
     }
 }
 
@@ -244,7 +405,11 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
         }
         AgentEvent::ExecutionStopped { reason, .. } => progress!("[execution stopped] {reason:?}"),
         AgentEvent::PlanUpdated { plan, .. } => progress!("{}", format_plan(plan)),
-        AgentEvent::AssistantProgress { text, .. } => progress!("[agent] {text}"),
+        AgentEvent::AssistantProgress { text, streamed, .. } => {
+            if !streamed {
+                progress!("[agent] {text}")
+            }
+        }
         AgentEvent::ReasoningSummary { text, .. } => progress!("[reasoning] {text}"),
         AgentEvent::LocalToolCall {
             name, arguments, ..
@@ -378,6 +543,7 @@ mod tests {
         let result = AgentResult {
             usage: UsageSummary::default(),
             stop_reason: StopReason::FinalAnswer,
+            streamed: false,
             outcome: RunOutcome::Completed,
             plan: TaskPlan::default(),
             text: "日本語の結果\n\"quoted\"".into(),
@@ -413,6 +579,50 @@ mod tests {
         assert!(text.contains("│"));
         assert!(text.contains("┌"));
         assert!(text.contains("└"));
+    }
+
+    #[test]
+    fn streamed_markdown_is_formatted_block_by_block() {
+        let stream = AnswerStream::new(
+            TextFormat::Terminal {
+                width: 40,
+                color: false,
+            },
+            false,
+        );
+        let mut printed = Vec::new();
+        for delta in [
+            "## 見",
+            "出し\n\n- **太",
+            "字**\n",
+            "\n```\nlet a",
+            " = 1;\n\nlet b = 2;\n",
+            "```\n末尾",
+        ] {
+            printed.push(stream.render(ResponseDelta::Text(delta)));
+        }
+        // Nothing of a block is printed before the block is complete, and a
+        // blank line inside a code fence does not end the block.
+        assert_eq!(printed[0], "");
+        assert!(printed[1].contains("見出し") && !printed[1].contains('#'));
+        assert_eq!(printed[2], "");
+        assert!(printed[3].contains("• 太字"));
+        assert_eq!(printed[4], "");
+        assert!(printed[5].contains("let a = 1;") && printed[5].contains("let b = 2;"));
+        let done = stream.render(ResponseDelta::MessageDone);
+        assert!(done.contains("末尾") && done.ends_with("\n\n"));
+        // The next message starts over.
+        assert!(stream
+            .render(ResponseDelta::Text("次\n\n"))
+            .starts_with("\n次"));
+    }
+
+    #[test]
+    fn raw_stream_prints_text_as_it_arrives() {
+        let stream = AnswerStream::new(TextFormat::Raw, false);
+        assert_eq!(stream.render(ResponseDelta::Text("**a")), "\n**a");
+        assert_eq!(stream.render(ResponseDelta::Text("b**")), "b**");
+        assert_eq!(stream.render(ResponseDelta::MessageDone), "\n\n");
     }
 
     #[test]

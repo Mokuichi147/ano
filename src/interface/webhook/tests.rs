@@ -42,6 +42,7 @@ fn completed(text: &str, plan: TaskPlan) -> JobOutcome {
         plan,
         usage: UsageSummary::default(),
         stop_reason: StopReason::FinalAnswer,
+        streamed: false,
     }))
 }
 

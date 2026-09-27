@@ -10,7 +10,7 @@ mod response;
 mod tests;
 
 pub use discovery::task_plan_definition;
-pub use events::{AgentEvent, EventListener};
+pub use events::{AgentEvent, EventListener, TextListener};
 
 use crate::{
     application::{
@@ -61,6 +61,8 @@ pub struct AgentResult {
     pub plan: TaskPlan,
     pub usage: UsageSummary,
     pub stop_reason: StopReason,
+    /// `text` was already delivered to the agent's text listener.
+    pub streamed: bool,
 }
 
 /// Appended to the instructions of a sub-agent started by `delegate_task`.
@@ -92,6 +94,7 @@ pub struct Agent {
     /// interactive handler never sees overlapping prompts.
     approval_lock: tokio::sync::Mutex<()>,
     event_listener: Option<EventListener>,
+    text_listener: Option<TextListener>,
 }
 
 impl Agent {
@@ -115,11 +118,21 @@ impl Agent {
             approval_handler,
             approval_lock: tokio::sync::Mutex::new(()),
             event_listener: None,
+            text_listener: None,
         }
     }
 
     pub fn with_event_listener(mut self, listener: EventListener) -> Self {
         self.event_listener = Some(listener);
+        self
+    }
+
+    /// Stream the text of the model's messages to `listener` while they are
+    /// generated. Every message of the run, including progress before tool
+    /// calls, is delivered; `AgentResult::streamed` then tells the caller
+    /// that the final answer has already been shown.
+    pub fn with_text_listener(mut self, listener: TextListener) -> Self {
+        self.text_listener = Some(listener);
         self
     }
 
@@ -213,6 +226,8 @@ impl Agent {
                 .unwrap_or_default(),
         );
         let mut active = ActiveTools::default();
+        let text_listener = self.text_listener.as_ref().filter(|_| origin.depth == 0);
+        let streamed = text_listener.is_some();
 
         for round in 0..self.settings.max_tool_rounds {
             let history = session
@@ -296,7 +311,14 @@ impl Agent {
                 payload["previous_response_id"] = json!(previous_response_id);
             }
 
-            let response = self.client.create_response(&payload).await?;
+            let response = match text_listener {
+                Some(listener) => {
+                    self.client
+                        .create_response_streaming(&payload, listener.as_ref())
+                        .await?
+                }
+                None => self.client.create_response(&payload).await?,
+            };
             observe_usage(
                 &response,
                 ApiOperation::Response,
@@ -352,7 +374,11 @@ impl Agent {
             for message in messages.iter().filter(|item| item["phase"] == "commentary") {
                 let text = extract_output_text(&json!({"output":[message]}));
                 if !text.trim().is_empty() {
-                    events.push(AgentEvent::AssistantProgress { round, text });
+                    events.push(AgentEvent::AssistantProgress {
+                        round,
+                        text,
+                        streamed,
+                    });
                 }
             }
             if let Some(session) = session.as_deref_mut() {
@@ -453,6 +479,7 @@ impl Agent {
                     events.push(AgentEvent::AssistantProgress {
                         round,
                         text: "Continuing unfinished plan steps.".into(),
+                        streamed: false,
                     });
                     continue;
                 }
@@ -471,6 +498,7 @@ impl Agent {
                     } else {
                         StopReason::FinalAnswer
                     },
+                    streamed,
                 });
             }
 
@@ -555,5 +583,6 @@ fn finish_limited(
             .clone(),
         usage,
         stop_reason: reason,
+        streamed: false,
     })
 }

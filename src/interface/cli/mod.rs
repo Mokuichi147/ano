@@ -405,6 +405,8 @@ struct PreparedAgent {
     binding: SessionBinding,
     session: Option<Session>,
     mcp: Arc<dyn McpGateway>,
+    /// Prints the answer while it is generated, when streaming.
+    answer: Option<Arc<output::AnswerStream>>,
 }
 
 fn prepare_agent(
@@ -414,6 +416,7 @@ fn prepare_agent(
     registry: ToolRegistry,
     ask_user: Arc<dyn ApprovalHandler>,
     stdin_is_terminal: bool,
+    stream: Option<output::TextFormat>,
 ) -> Result<PreparedAgent> {
     let profile = resolve_run_context(config, user_id, options)?;
     let client = Arc::new(OpenAiClient::from_api_settings(&config.api)?);
@@ -453,10 +456,20 @@ fn prepare_agent(
         policy,
         approval,
     );
+    let answer = stream.map(|format| Arc::new(output::AnswerStream::new(format, !options.quiet)));
     if !options.quiet {
         let verbose = options.verbose;
-        agent =
-            agent.with_event_listener(Arc::new(move |event| output::print_event(event, verbose)));
+        let answer = answer.clone();
+        agent = agent.with_event_listener(Arc::new(move |event| {
+            if let Some(answer) = &answer {
+                answer.end_response();
+            }
+            output::print_event(event, verbose)
+        }));
+    }
+    if let Some(answer) = &answer {
+        let answer = Arc::clone(answer);
+        agent = agent.with_text_listener(Arc::new(move |delta| answer.push(delta)));
     }
     Ok(PreparedAgent {
         agent,
@@ -464,6 +477,7 @@ fn prepare_agent(
         binding,
         session,
         mcp,
+        answer,
     })
 }
 
@@ -499,6 +513,10 @@ async fn run_agent(
         registry,
         Arc::new(InteractiveApproval),
         stdin_is_terminal,
+        // Show the answer while it is generated, unless it goes to a pipe or
+        // into a JSON document.
+        (!args.json && std::io::stdout().is_terminal())
+            .then(|| output::TextFormat::for_stdout(args.agent.raw)),
     )?;
 
     let mut input = Vec::new();
@@ -517,7 +535,10 @@ async fn run_agent(
     mcp.shutdown().await;
     let result = result?;
     let format = output::TextFormat::for_stdout(args.agent.raw);
-    println!("{}", output::format_result(&result, args.json, format)?);
+    let text = output::format_result(&result, args.json, format)?;
+    if !text.is_empty() {
+        println!("{text}");
+    }
     Ok(())
 }
 

@@ -5,6 +5,9 @@ api_key_env = "OPENAI_API_KEY"
 # Per-request timeout, and retries for connection failures and 429 / 5xx.
 timeout_secs = 600
 max_retries = 2
+# Stream answers so they appear on the terminal while they are generated.
+# Endpoints that ignore the request and return JSON still work.
+stream = true
 
 # For a local or self-hosted server (LM Studio, Ollama, vLLM, llama.cpp),
 # point base_url at it, e.g. "http://127.0.0.1:1234/v1" (LM Studio) or

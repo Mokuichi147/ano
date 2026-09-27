@@ -19,7 +19,7 @@ futures = "0.3"
 hmac = "0.12"
 hex = "0.4"
 mime_guess = "2.0"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 rmcp = { version = "3.4", default-features = false, features = ["auth", "client", "reqwest", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -36,6 +36,7 @@ terminal_size = "0.4"
 termimad = "0.35"
 toml_edit = "0.22"
 inquire = { version = "0.9", default-features = false, features = ["crossterm", "fuzzy"] }
+eventsource-stream = "0.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

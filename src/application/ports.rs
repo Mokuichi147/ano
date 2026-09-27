@@ -13,6 +13,21 @@ use async_trait::async_trait;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 
+/// Part of an assistant message, reported while a response is generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResponseDelta<'a> {
+    /// More text of the current message (`output_text` or `refusal`).
+    Text(&'a str),
+    /// The current message is complete.
+    MessageDone,
+    /// The model is reasoning before it answers. Carries the reasoning text
+    /// or summary when the endpoint streams it.
+    Reasoning(&'a str),
+}
+
+/// Receives the deltas of a streamed response.
+pub type DeltaSink<'a> = &'a (dyn Fn(ResponseDelta<'_>) + Send + Sync);
+
 /// A Responses API compatible endpoint. Payloads and responses use the
 /// Responses API JSON format, which is also the conversation history format.
 #[async_trait]
@@ -23,6 +38,54 @@ pub trait ResponsesApi: Send + Sync {
     async fn create_response(&self, payload: &Value) -> Result<Value>;
     /// `POST /responses/compact`
     async fn compact_response(&self, payload: &Value) -> Result<Value>;
+
+    /// `POST /responses`, reporting message text to `on_delta` while it is
+    /// generated. Returns the same completed response as `create_response`.
+    ///
+    /// When this returns `Ok`, every message in the response has been passed
+    /// to `on_delta`, whether or not the endpoint streamed it. The default
+    /// waits for the whole response and then reports its messages at once.
+    async fn create_response_streaming(
+        &self,
+        payload: &Value,
+        on_delta: DeltaSink<'_>,
+    ) -> Result<Value> {
+        let response = self.create_response(payload).await?;
+        replay_deltas(&response, on_delta);
+        Ok(response)
+    }
+}
+
+/// Report the messages of a completed response to `on_delta`, one delta per
+/// message, for an endpoint that did not stream them.
+pub fn replay_deltas(response: &Value, on_delta: DeltaSink<'_>) {
+    let messages = response["output"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["type"] == "message")
+        .map(|item| {
+            item["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|part| part["text"].as_str().or_else(|| part["refusal"].as_str()))
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    let messages = if messages.is_empty() {
+        // Some compatible endpoints return only the aggregate text.
+        response["output_text"]
+            .as_str()
+            .map(|text| vec![text.to_string()])
+            .unwrap_or_default()
+    } else {
+        messages
+    };
+    for text in messages.iter().filter(|text| !text.trim().is_empty()) {
+        on_delta(ResponseDelta::Text(text));
+        on_delta(ResponseDelta::MessageDone);
+    }
 }
 
 #[async_trait]
@@ -37,6 +100,14 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
 
     async fn compact_response(&self, payload: &Value) -> Result<Value> {
         (**self).compact_response(payload).await
+    }
+
+    async fn create_response_streaming(
+        &self,
+        payload: &Value,
+        on_delta: DeltaSink<'_>,
+    ) -> Result<Value> {
+        (**self).create_response_streaming(payload, on_delta).await
     }
 }
 

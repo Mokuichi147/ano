@@ -157,6 +157,7 @@ pub(super) async fn run(
         binding,
         session,
         mcp,
+        answer,
     } = prepare_agent(
         &config,
         &user_id,
@@ -166,6 +167,9 @@ pub(super) async fn run(
             lines: Arc::clone(&lines),
         }),
         interactive,
+        std::io::stdout()
+            .is_terminal()
+            .then(|| output::TextFormat::for_stdout(options.raw)),
     )?;
     let persistent = session.is_some();
     let mut store: Box<dyn ConversationStore> = match session {
@@ -245,13 +249,19 @@ pub(super) async fn run(
             match outcome {
                 Some(Ok(result)) => {
                     let format = output::TextFormat::for_stdout(options.raw);
-                    // A blank line sets the answer apart from the progress.
-                    println!("\n{}\n", output::format_result(&result, false, format)?)
+                    let text = output::format_result(&result, false, format)?;
+                    if !text.is_empty() {
+                        // A blank line sets the answer apart from the progress.
+                        println!("\n{text}\n");
+                    }
                 }
                 // The failure is recorded in the conversation; the next turn
                 // can continue from it.
                 Some(Err(error)) => eprintln!("error: {error:#}"),
                 None => {
+                    if let Some(answer) = &answer {
+                        answer.abandon();
+                    }
                     if store.data().status == SessionStatus::Running {
                         store.fail("Interrupted by the user.")?;
                     }

@@ -38,7 +38,7 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 
 | ポート | 役割 | 実装 |
 | --- | --- | --- |
-| `ResponsesApi` | `/responses` と `/responses/compact` の呼び出し | `infrastructure::openai::OpenAiClient` |
+| `ResponsesApi` | `/responses`（ストリーミングを含む）と `/responses/compact` の呼び出し | `infrastructure::openai::OpenAiClient` |
 | `McpGateway` / `DirectMcpServer` | 直接接続 MCP の接続管理と tool 呼び出し | `infrastructure::mcp::McpPool` |
 | `ConversationStore` | 会話の保持（変更ごとに保存） | `infrastructure::session_store::Session`（ファイル）、`infrastructure::memory_store::MemoryConversation`（メモリ） |
 | `ApprovalHandler` | MCP 呼び出しと、承認が必要なローカル tool（`workspace_exec` など）の承認 | `AlwaysApprove`・`DenyApproval`・`AutoApproval`（application）、`InteractiveApproval`・対話モードの確認（interface/cli） |
@@ -80,7 +80,7 @@ src/
 │   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── infrastructure/
-│   ├── openai.rs           Responses API クライアント（リトライ付き）
+│   ├── openai.rs           Responses API クライアント（リトライ・SSE ストリーミング）
 │   ├── mcp.rs              stdio / Streamable HTTP の MCP 接続プール
 │   ├── session_store.rs    セッションファイルとロック
 │   ├── memory_store.rs     プロセス内だけで保持する会話（ano chat）
@@ -104,7 +104,7 @@ src/
 
 1. `interface`（CLI または Webhook）が設定から `ExecutionProfile`（モデル設定・有効なポリシー・`ToolContext`）を解決し、workspace の `AGENTS.md` を instructions に加え、アダプターを組み立てて `Agent` を作ります。
 2. `Agent::run` は入力を Responses API の `input` に変換し、`McpGateway` からポリシーで許可された MCP 接続を借ります。
-3. 各ラウンドで `ResponsesApi::create_response` を呼び、返ってきた `function_call`・`mcp_approval_request` を `dispatch` が並行実行します。セッションがあれば、実行前に呼び出しを、完了するたびに結果を `ConversationStore` へ保存します。
+3. 各ラウンドで `ResponsesApi::create_response`（テキストのリスナーがあれば `create_response_streaming`）を呼び、返ってきた `function_call`・`mcp_approval_request` を `dispatch` が並行実行します。セッションがあれば、実行前に呼び出しを、完了するたびに結果を `ConversationStore` へ保存します。
 4. `tool_search` の結果は次のラウンドから tool 一覧に反映されます（`discovery`）。`delegate_task` は同じ `Agent` の実行ループを新しい会話で1段だけ再帰的に動かし、最終回答を tool 出力として返します。
 5. 最終回答で未完了の計画工程が残っていれば継続を促し、完了・中断・上限到達のいずれかで `AgentResult` を返します。
 

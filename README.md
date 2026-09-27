@@ -20,6 +20,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - 登録した tool・MCP を検索で必要な分だけ公開する遅延公開（`tool_search`）
 - 調査や独立した作業を新しい会話に切り出すサブエージェント（`delegate_task`）
 - 保存して別プロセスから再開できる会話セッションと、複数ターンの対話モード（`ano chat`）
+- 生成中の回答を端末に逐次表示するストリーミング（Markdown はブロックごとに整形）
 - リポジトリの `AGENTS.md` などをプロジェクト固有の指示として自動で読み込み
 - 推論モデルの `reasoning.effort` 指定と、推論の要約の進捗表示
 - 長い会話の自動圧縮と、使用トークン数に応じた実行停止
@@ -85,7 +86,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |
 | `--quiet` / `--verbose` | 進捗ログを省略 / 引数と結果を含めて詳しく表示 |
-| `--raw` | 回答の Markdown を整形せずにそのまま出力。stdout が端末のときは、既定で見出し・太字・リスト・表を端末向けに整形して表示します（パイプ先や `--json` では常にそのまま。`NO_COLOR` を設定すると色と文字装飾を省略） |
+| `--raw` | 回答の Markdown を整形せずにそのまま出力。stdout が端末のときは、既定で回答を生成しながら表示し、見出し・太字・リスト・表を端末向けに整形します（パイプ先や `--json` では完了後にそのまま出力。`NO_COLOR` を設定すると色と文字装飾を省略。[ストリーミング](docs/agent-runtime.md#回答のストリーミング)） |
 
 ```sh
 ano run "この画像を説明して" --image ./diagram.png
@@ -139,7 +140,7 @@ timeout_secs = 900
 
 ### 出力とログ
 
-進捗ログ（tool 名と状態、モデルの途中経過、作業計画の更新）は stderr に出力します。`--json` の出力は次のフィールドを持ちます。
+進捗ログ（tool 名と状態、モデルの途中経過、作業計画の更新）は stderr に出力します。stdout が端末なら、回答は生成しながら stdout に表示します。`--json` の出力は次のフィールドを持ちます。
 
 | フィールド | 内容 |
 | --- | --- |
@@ -163,7 +164,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 
 | セクション | 内容 | 詳細 |
 | --- | --- | --- |
-| `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ | [ローカル AI](#ローカル-ailm-studioollama-など) |
+| `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ・ストリーミング | [ローカル AI](#ローカル-ailm-studioollama-など) |
 | `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・tool 出力の上限・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
 | `[environments.<name>]` | workspace・許可する tool・書き込み・コマンド実行・承認モード・検証コマンド | [実行環境](#実行環境) |
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
@@ -209,6 +210,7 @@ model = "ロードしたモデル名"
 - **API キーは不要です。** キーが必須なのは OpenAI 公式の endpoint（`api.openai.com`）だけで、それ以外は `api_key_env` の環境変数が未設定なら Authorization ヘッダーを付けずに送ります。LAN 内の別マシンや Docker 上のサーバーでも同じです。サーバー側で認証を有効にしている場合は、`api_key_env` に指定した環境変数にキーを設定してください。
 - `config.toml` はカレントディレクトリから読みます。別のディレクトリで実行する場合は `--config` で指定するか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
 - LM Studio で Remote MCP を使う場合は、Server Settings で MCP 利用を有効にします。
+- 回答はストリーミングで表示します（`stream: true` に対応していない server でも動きます）。
 
 ロードしたモデル名は `agent.model` または `--model` で指定します。tool calling の品質はモデルの tool use 対応に依存します（native tool use 対応モデルを推奨）。URL 形式の MCP は `url` で登録できますが、Secure MCP Tunnel（`tunnel_id`）は OpenAI Responses API の機能で、LM Studio では使えません。
 
@@ -282,6 +284,7 @@ registry.register(
 )?;
 ```
 
+- `Agent::with_event_listener` で tool 呼び出しなどのイベントを、`Agent::with_text_listener` で生成中の回答の差分を受け取れます。
 - 実行環境（user・environment・workspace・書き込み許可）を受け取る tool は `register_contextual` で登録し、`ToolContext` から参照します。
 - tool 名は Responses API の関数名規則に合わせて ASCII 英数字・`_`・`-` の64文字以内です。`tool_search`・`task_plan`・`delegate_task` と `mcp__` で始まる名前は予約されています。
 - 影響の大きい tool は `ToolDefinition::new(...).with_approval()` で登録すると、呼び出しごとに `ApprovalHandler` へ確認します（`McpApprovalRequest::source` が `ApprovalSource::LocalTool` になります）。

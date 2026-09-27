@@ -1243,6 +1243,38 @@ async fn sub_agents_cannot_delegate_further() {
 }
 
 #[tokio::test]
+async fn text_listener_streams_the_callers_messages_but_not_sub_agents() {
+    let server = mock_responses(vec![
+        delegate_response("parent", "Survey the files"),
+        text_response("sub", "Found three files"),
+        text_response("done", "All done"),
+    ])
+    .await;
+    let streamed = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&streamed);
+    let mut agent =
+        agent(ToolRegistry::new(), Vec::new()).with_text_listener(Arc::new(move |delta| {
+            sink.lock().unwrap().push(match delta {
+                crate::application::ports::ResponseDelta::Text(text) => text.to_string(),
+                crate::application::ports::ResponseDelta::MessageDone => "<done>".into(),
+                crate::application::ports::ResponseDelta::Reasoning(_) => "<reasoning>".into(),
+            })
+        }));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "All done");
+    assert!(result.streamed);
+    assert_eq!(*streamed.lock().unwrap(), ["All done", "<done>"]);
+    // The endpoint was asked to stream only the caller's requests.
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests[0]["stream"], true);
+    assert!(requests[1].get("stream").is_none());
+    assert_eq!(requests[2]["stream"], true);
+}
+
+#[tokio::test]
 async fn large_tool_outputs_are_cut_to_head_and_tail() {
     let registry = ToolRegistry::new();
     registry
