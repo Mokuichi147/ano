@@ -1,9 +1,10 @@
-//! `ano model`: list the models that providers offer, and enable or disable
-//! them in the config file, like the tools of MCP servers.
+//! `ano model`: list the models of providers, register models for providers
+//! that do not list theirs, and enable or disable them in the config file,
+//! like the tools of MCP servers.
 
-use super::provider::{list_models, provider_heading};
+use super::provider::{known_models, provider_heading, KnownModels};
 use crate::{
-    config::{update_provider, AppConfig, SettingValue, DEFAULT_PROVIDER},
+    config::{update_provider, AppConfig, SettingValue},
     domain::provider::ModelFilter,
     infrastructure::openai::ApiSettings,
 };
@@ -20,19 +21,24 @@ pub(super) struct ModelArgs {
 
 #[derive(Debug, Subcommand)]
 enum ModelCommand {
-    /// Connect to providers and list the models they offer, marking the
-    /// enabled ones.
+    /// List the models of providers (those they offer and those registered),
+    /// marking the enabled ones.
     List {
         /// Provider to list. Omit to list every enabled provider.
         #[arg(long, value_name = "NAME")]
         provider: Option<String>,
     },
+    /// Register models in the config file, for a provider that does not list
+    /// its models (such as a ChatGPT subscription).
+    Add(ModelsArgs),
+    /// Remove registered models from the config file.
+    Remove(ModelsArgs),
     /// Choose the enabled models of a provider from a checklist and save the
     /// choice to the config file.
     Edit {
-        /// Provider whose models to choose ('default' is [api]).
-        #[arg(long, value_name = "NAME", default_value = DEFAULT_PROVIDER)]
-        provider: String,
+        /// Provider whose models to choose. Defaults to the default provider.
+        #[arg(long, value_name = "NAME")]
+        provider: Option<String>,
     },
     /// Enable models of a provider in the config file.
     Enable(ToggleArgs),
@@ -41,13 +47,22 @@ enum ModelCommand {
 }
 
 #[derive(Debug, Args)]
+struct ModelsArgs {
+    #[arg(required = true, value_name = "MODEL")]
+    models: Vec<String>,
+    /// Provider of the models. Defaults to the default provider.
+    #[arg(long, value_name = "NAME")]
+    provider: Option<String>,
+}
+
+#[derive(Debug, Args)]
 struct ToggleArgs {
     /// Models to enable or disable: exact names, or a prefix ending in `*`.
     #[arg(required = true, value_name = "MODEL")]
     models: Vec<String>,
-    /// Provider of the models ('default' is [api]).
-    #[arg(long, value_name = "NAME", default_value = DEFAULT_PROVIDER)]
-    provider: String,
+    /// Provider of the models. Defaults to the default provider.
+    #[arg(long, value_name = "NAME")]
+    provider: Option<String>,
     #[arg(
         long,
         help = "Save without connecting to the provider to check the model names"
@@ -64,7 +79,7 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ModelArgs)
                     vec![name]
                 }
                 None => config
-                    .provider_names()
+                    .listed_provider_names()
                     .filter(|name| config.provider_enabled(name))
                     .collect(),
             };
@@ -74,8 +89,8 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ModelArgs)
                     println!();
                 }
                 let settings = config.provider_settings(name)?;
-                match list_models(&settings).await {
-                    Ok(models) => print_models(config, name, &settings, &models),
+                match known_models(&settings).await {
+                    Ok(known) => print_models(config, name, &settings, &known),
                     Err(error) => {
                         failed += 1;
                         println!("{}", provider_heading(name, &settings));
@@ -88,18 +103,21 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ModelArgs)
             }
             Ok(())
         }
-        ModelCommand::Edit { provider: name } => {
-            let settings = config.provider_settings(&name)?;
+        ModelCommand::Add(args) => register(config, config_path, args, true),
+        ModelCommand::Remove(args) => register(config, config_path, args, false),
+        ModelCommand::Edit { provider } => {
+            let name = provider.as_deref().unwrap_or(config.default_provider());
+            let settings = config.provider_settings(name)?;
             if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
                 bail!("`ano model edit` needs a terminal; use `ano model enable` or `ano model disable` instead");
             }
-            let models = list_models(&settings).await?;
+            let models = known_models(&settings).await?.names;
             if models.is_empty() {
-                println!("Provider '{name}' lists no models.");
+                println!("Provider '{name}' has no models to choose from; register them with `ano model add MODEL --provider {name}`.");
                 return Ok(());
             }
-            let mut filter = settings.models();
-            let Some(selected) = choose_models(&name, &filter, &models)? else {
+            let mut filter = settings.model_filter();
+            let Some(selected) = choose_models(name, &filter, &models)? else {
                 println!("Cancelled; the config file was not changed.");
                 return Ok(());
             };
@@ -115,7 +133,7 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ModelArgs)
             // Enable first: disabling then only adds to or removes from lists.
             let mut blocked = filter.set_enabled(enable.iter().copied(), true);
             blocked.extend(filter.set_enabled(disable.iter().copied(), false));
-            save_filter(config_path, &name, &filter)?;
+            save_filter(config_path, name, &filter)?;
             for (heading, names) in [("Enabled", &enable), ("Disabled", &disable)] {
                 if !names.is_empty() {
                     println!("{heading}: {}", names.join(", "));
@@ -130,13 +148,54 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ModelArgs)
     }
 }
 
+/// Add models to, or remove them from, the provider's `models`.
+fn register(config: &AppConfig, config_path: &Path, args: ModelsArgs, add: bool) -> Result<()> {
+    let name = args
+        .provider
+        .as_deref()
+        .unwrap_or(config.default_provider());
+    let mut registered = config.provider_settings(name)?.models;
+    let changed: Vec<&str> = args
+        .models
+        .iter()
+        .map(String::as_str)
+        .filter(|model| registered.iter().any(|known| known == model) != add)
+        .collect();
+    if changed.is_empty() {
+        let state = if add {
+            "already registered"
+        } else {
+            "not registered"
+        };
+        println!("{} {state} for provider '{name}'.", args.models.join(", "));
+        return Ok(());
+    }
+    if add {
+        registered.extend(changed.iter().map(|model| model.to_string()));
+    } else {
+        registered.retain(|model| !changed.contains(&model.as_str()));
+    }
+    let value = (!registered.is_empty()).then_some(SettingValue::List(registered));
+    update_provider(config_path, name, false, &[("models", value)])?;
+    println!(
+        "{} for provider '{name}': {}\nSaved to {}.",
+        if add { "Registered" } else { "Removed" },
+        changed.join(", "),
+        config_path.display()
+    );
+    Ok(())
+}
+
 async fn toggle(
     config: &AppConfig,
     config_path: &Path,
     args: ToggleArgs,
     enabled: bool,
 ) -> Result<()> {
-    let name = &args.provider;
+    let name = args
+        .provider
+        .as_deref()
+        .unwrap_or(config.default_provider());
     let settings = config.provider_settings(name)?;
     let state = if enabled { "enabled" } else { "disabled" };
     let exact: Vec<&str> = args
@@ -146,22 +205,29 @@ async fn toggle(
         .filter(|model| !model.ends_with('*'))
         .collect();
     if !args.no_verify && !exact.is_empty() {
-        let offered = list_models(&settings)
+        let known = known_models(&settings)
             .await
             .context("failed to check the model names (use --no-verify to skip the check)")?;
         let unknown: Vec<&str> = exact
             .iter()
             .copied()
-            .filter(|model| !offered.iter().any(|offered| offered == model))
+            .filter(|model| !known.names.iter().any(|known| known == model))
             .collect();
         if !unknown.is_empty() {
-            bail!(
-                "provider '{name}' does not offer {}; run `ano model list --provider {name}` to see its models, or pass --no-verify",
-                unknown.join(", ")
-            );
+            let models = unknown.join(" ");
+            match known.listed {
+                Some(_) => bail!(
+                    "provider '{name}' does not offer {}; run `ano model list --provider {name}` to see its models, or register them with `ano model add {models} --provider {name}`",
+                    unknown.join(", ")
+                ),
+                None => bail!(
+                    "provider '{name}' does not list its models, and {} is not registered; register it with `ano model add {models} --provider {name}`",
+                    unknown.join(", ")
+                ),
+            }
         }
     }
-    let mut filter = settings.models();
+    let mut filter = settings.model_filter();
     let changed: Vec<&str> = args
         .models
         .iter()
@@ -214,14 +280,20 @@ fn warn_blocked(blocked: &[&str]) {
     }
 }
 
-fn print_models(config: &AppConfig, name: &str, settings: &ApiSettings, models: &[String]) {
-    let filter = settings.models();
+fn print_models(config: &AppConfig, name: &str, settings: &ApiSettings, known: &KnownModels) {
+    let filter = settings.model_filter();
+    let models = &known.names;
     let enabled = models
         .iter()
         .filter(|model| filter.is_enabled(model))
         .count();
+    let kind = if known.listed.is_some() {
+        "models"
+    } else {
+        "registered models"
+    };
     let mut heading = format!(
-        "{}: {} models, {enabled} enabled",
+        "{}: {} {kind}, {enabled} enabled",
         provider_heading(name, settings),
         models.len()
     );
@@ -229,6 +301,9 @@ fn print_models(config: &AppConfig, name: &str, settings: &ApiSettings, models: 
         heading.push_str(" (the provider is disabled)");
     }
     println!("{heading}");
+    if known.listed.is_none() && models.is_empty() {
+        println!("  The provider does not list its models; register the ones to use with `ano model add MODEL --provider {name}`.");
+    }
     let default = config.provider_model(name);
     for model in models {
         let mark = if filter.is_enabled(model) {
@@ -236,11 +311,14 @@ fn print_models(config: &AppConfig, name: &str, settings: &ApiSettings, models: 
         } else {
             "[ ]"
         };
+        let mut line = format!("  {mark} {model}");
         if Some(model.as_str()) == default {
-            println!("  {mark} {model}  (default)");
-        } else {
-            println!("  {mark} {model}");
+            line.push_str("  (default)");
         }
+        if known.only_registered(model) {
+            line.push_str("  (registered; not listed by the provider)");
+        }
+        println!("{line}");
     }
     let unknown: Vec<&str> = filter
         .allowed
@@ -252,7 +330,7 @@ fn print_models(config: &AppConfig, name: &str, settings: &ApiSettings, models: 
         .collect();
     if !unknown.is_empty() {
         println!(
-            "  Names in the config that the provider does not list: {}",
+            "  Names in the config that are neither listed nor registered: {}",
             unknown.join(", ")
         );
     }

@@ -207,7 +207,7 @@ impl ResponsesApi for FallbackClient {
         true
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Option<Vec<String>>> {
         self.targets[0].client.list_models().await
     }
 }

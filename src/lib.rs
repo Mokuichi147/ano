@@ -37,7 +37,7 @@ pub use application::{
     registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
     settings::AgentSettings,
 };
-pub use config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PROVIDER};
+pub use config::{AppConfig, ModelRequest, ModelSelection, API_PROVIDER};
 pub use domain::{
     compaction::CompactionRecord,
     environment::{CheckConfig, EnvironmentConfig},

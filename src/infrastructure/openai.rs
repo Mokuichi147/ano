@@ -52,6 +52,9 @@ pub struct ApiSettings {
     /// `[providers.*]` の接続先は環境変数に左右されない。
     #[serde(skip, default = "yes")]
     pub use_base_url_env: bool,
+    /// Models registered for this provider, for one that does not list its
+    /// models (such as a ChatGPT subscription), or to add to its list.
+    pub models: Vec<String>,
     /// When set, only these models (exact names or `prefix*`) may be used.
     pub allowed_models: Option<Vec<String>>,
     pub disabled_models: Vec<String>,
@@ -75,6 +78,7 @@ impl Default for ApiSettings {
             max_retries: 2,
             stream: true,
             use_base_url_env: true,
+            models: Vec::new(),
             allowed_models: None,
             disabled_models: Vec::new(),
             fallback: Vec::new(),
@@ -92,7 +96,7 @@ impl ApiSettings {
     }
 
     /// The models of this provider that may be used.
-    pub fn models(&self) -> ModelFilter {
+    pub fn model_filter(&self) -> ModelFilter {
         ModelFilter {
             allowed: self.allowed_models.clone(),
             disabled: self.disabled_models.clone(),
@@ -120,6 +124,7 @@ pub struct ProviderSettings {
     pub model: Option<String>,
     /// この接続先での `approval_mode = "auto"` の審査モデル。省略時は `model`。
     pub approval_model: Option<String>,
+    pub models: Vec<String>,
     pub allowed_models: Option<Vec<String>>,
     pub disabled_models: Vec<String>,
     pub fallback: Vec<String>,
@@ -138,6 +143,7 @@ impl Default for ProviderSettings {
             stream: None,
             model: None,
             approval_model: None,
+            models: Vec::new(),
             allowed_models: None,
             disabled_models: Vec::new(),
             fallback: Vec::new(),
@@ -157,6 +163,7 @@ impl ProviderSettings {
             max_retries: self.max_retries.unwrap_or(base.max_retries),
             stream: self.stream.unwrap_or(base.stream),
             use_base_url_env: false,
+            models: self.models.clone(),
             allowed_models: self.allowed_models.clone(),
             disabled_models: self.disabled_models.clone(),
             fallback: self.fallback.clone(),
@@ -290,8 +297,9 @@ impl OpenAiClient {
         read_event_stream(response, on_delta).await
     }
 
-    /// `GET /models`: the models the endpoint offers, sorted by name.
-    pub async fn list_models(&self) -> Result<Vec<String>> {
+    /// `GET /models`: the models the endpoint offers, sorted by name, or
+    /// `None` when the endpoint has no such API (404 or 405).
+    pub async fn list_models(&self) -> Result<Option<Vec<String>>> {
         let mut request = self.http.get(format!("{}/models", self.base_url));
         if let Some(api_key) = &self.api_key {
             request = request.bearer_auth(api_key);
@@ -304,6 +312,12 @@ impl OpenAiClient {
             Err(error) => return Err(error).context("failed to list the models"),
         };
         let status = response.status();
+        if matches!(
+            status,
+            StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED
+        ) {
+            return Ok(None);
+        }
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
             bail!("listing the models failed ({status}): {}", truncate(&body));
@@ -317,7 +331,7 @@ impl OpenAiClient {
             .collect();
         models.sort();
         models.dedup();
-        Ok(models)
+        Ok(Some(models))
     }
 
     async fn post_json(&self, endpoint: &str, payload: &Value) -> Result<Value> {
@@ -487,7 +501,7 @@ impl ResponsesApi for OpenAiClient {
         OpenAiClient::create_response_streaming(self, payload, on_delta).await
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Option<Vec<String>>> {
         OpenAiClient::list_models(self).await
     }
 
@@ -778,6 +792,14 @@ mod tests {
             format!("http://{}/v1", listener.local_addr().unwrap()),
         );
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-        assert_eq!(client.list_models().await.unwrap(), ["gpt-5", "qwen"]);
+        assert_eq!(
+            client.list_models().await.unwrap(),
+            Some(vec!["gpt-5".to_string(), "qwen".to_string()])
+        );
+        // An endpoint without the API does not list models.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = OpenAiClient::new("", format!("http://{}/v1", listener.local_addr().unwrap()));
+        tokio::spawn(async move { axum::serve(listener, Router::new()).await.unwrap() });
+        assert_eq!(client.list_models().await.unwrap(), None);
     }
 }

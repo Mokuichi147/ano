@@ -66,9 +66,10 @@ pub trait ResponsesApi: Send + Sync {
         false
     }
 
-    /// The models the endpoint offers (`GET /models`), sorted by name.
-    async fn list_models(&self) -> Result<Vec<String>> {
-        anyhow::bail!("this endpoint cannot list its models")
+    /// The models the endpoint offers (`GET /models`), sorted by name, or
+    /// `None` when it does not list them (such as a ChatGPT subscription).
+    async fn list_models(&self) -> Result<Option<Vec<String>>> {
+        Ok(None)
     }
 }
 
@@ -134,7 +135,7 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
         (**self).requires_full_history()
     }
 
-    async fn list_models(&self) -> Result<Vec<String>> {
+    async fn list_models(&self) -> Result<Option<Vec<String>>> {
         (**self).list_models().await
     }
 }

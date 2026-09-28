@@ -2,7 +2,10 @@
 //! enable or disable them. Their models are managed by `ano model`.
 
 use crate::{
-    config::{remove_provider, update_provider, AppConfig, SettingValue, DEFAULT_PROVIDER},
+    config::{
+        remove_provider, rename_provider, update_provider, use_provider, AppConfig, SettingValue,
+        API_PROVIDER,
+    },
     infrastructure::openai::{create_client, ApiAuth, ApiSettings},
 };
 use anyhow::{bail, Result};
@@ -26,8 +29,8 @@ enum ProviderCommand {
         #[command(flatten)]
         options: ProviderOptions,
     },
-    /// Change the settings of a provider. `default` changes [api], and its
-    /// model is [agent].model.
+    /// Change the settings of a provider. `api` changes [api], and its model
+    /// is [agent].model.
     Set {
         name: String,
         #[command(flatten)]
@@ -38,6 +41,12 @@ enum ProviderCommand {
     },
     /// Remove a provider from the config file.
     Remove { name: String },
+    /// Make a provider the default for runs that choose none
+    /// ([agent].provider). `api` returns to [api].
+    Use { name: String },
+    /// Rename a provider and the references to it. Renaming `api` moves the
+    /// connection of [api] to [providers.NEW].
+    Rename { old: String, new: String },
     /// Enable a provider in the config file.
     Enable { name: String },
     /// Disable a provider in the config file, keeping its settings.
@@ -206,11 +215,36 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ProviderAr
             Ok(())
         }
         ProviderCommand::Remove { name } => {
-            if name == DEFAULT_PROVIDER {
-                bail!("the '{DEFAULT_PROVIDER}' provider is [api] and cannot be removed");
+            if name == API_PROVIDER {
+                bail!("the '{API_PROVIDER}' provider is [api] and cannot be removed");
             }
             remove_provider(config_path, &name)?;
             println!("Removed provider '{name}' from {}.", config_path.display());
+            Ok(())
+        }
+        ProviderCommand::Use { name } => {
+            config.provider_settings(&name)?;
+            if !config.provider_enabled(&name) {
+                bail!("provider '{name}' is disabled; enable it with `ano provider enable {name}` first");
+            }
+            if config.default_provider() == name {
+                println!("Provider '{name}' is already the default.");
+                return Ok(());
+            }
+            use_provider(config_path, &name)?;
+            println!(
+                "Runs now use provider '{name}' unless one is chosen.\nSaved to {}.",
+                config_path.display()
+            );
+            Ok(())
+        }
+        ProviderCommand::Rename { old, new } => {
+            config.provider_settings(&old)?;
+            rename_provider(config_path, &old, &new)?;
+            println!(
+                "Renamed provider '{old}' to '{new}'.\nSaved to {}.",
+                config_path.display()
+            );
             Ok(())
         }
         ProviderCommand::Enable { name } => toggle(config, config_path, &name, true),
@@ -220,12 +254,17 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ProviderAr
 
 fn toggle(config: &AppConfig, config_path: &Path, name: &str, enabled: bool) -> Result<()> {
     config.provider_settings(name)?;
-    if name == DEFAULT_PROVIDER {
+    if name == API_PROVIDER {
         if enabled {
-            println!("The '{DEFAULT_PROVIDER}' provider is always enabled.");
+            println!("The '{API_PROVIDER}' provider is always enabled.");
             return Ok(());
         }
-        bail!("the '{DEFAULT_PROVIDER}' provider is [api] and cannot be disabled; disable its models with `ano model disable` instead");
+        bail!("the '{API_PROVIDER}' provider is [api] and cannot be disabled; disable its models with `ano model disable` instead");
+    }
+    if !enabled && config.default_provider() == name {
+        bail!(
+            "provider '{name}' is the default; choose another with `ano provider use NAME` first"
+        );
     }
     if config.provider_enabled(name) == enabled {
         let state = if enabled { "enabled" } else { "disabled" };
@@ -243,8 +282,35 @@ fn toggle(config: &AppConfig, config_path: &Path, name: &str, enabled: bool) -> 
     Ok(())
 }
 
-pub(super) async fn list_models(settings: &ApiSettings) -> Result<Vec<String>> {
-    create_client(settings)?.list_models().await
+/// The models of a provider: those it lists and those registered in the
+/// config, which are all there is for a provider that lists none.
+pub(super) struct KnownModels {
+    /// Listed and registered models, sorted by name.
+    pub(super) names: Vec<String>,
+    /// What the provider listed; `None` when it does not list its models.
+    pub(super) listed: Option<Vec<String>>,
+}
+
+impl KnownModels {
+    pub(super) fn new(listed: Option<Vec<String>>, registered: &[String]) -> Self {
+        let mut names: Vec<String> = listed.iter().flatten().chain(registered).cloned().collect();
+        names.sort();
+        names.dedup();
+        Self { names, listed }
+    }
+
+    /// Whether `model` is known only because the config registers it,
+    /// although the provider lists its models.
+    pub(super) fn only_registered(&self, model: &str) -> bool {
+        self.listed
+            .as_ref()
+            .is_some_and(|listed| !listed.iter().any(|listed| listed == model))
+    }
+}
+
+pub(super) async fn known_models(settings: &ApiSettings) -> Result<KnownModels> {
+    let listed = create_client(settings)?.list_models().await?;
+    Ok(KnownModels::new(listed, &settings.models))
 }
 
 /// After adding a provider, show whether it answers. Failing to connect does
@@ -254,18 +320,23 @@ async fn report_models(config_path: &Path, name: &str) {
         let config = AppConfig::load(config_path)?;
         let settings = config.provider_settings(name)?;
         anyhow::Ok((
-            list_models(&settings).await?,
+            known_models(&settings).await?,
             config.provider_model(name).map(str::to_string),
         ))
     }
     .await;
     match result {
-        Ok((models, model)) => {
-            println!(
-                "The provider offers {} models; see them with `ano model list --provider {name}`.",
-                models.len()
-            );
-            if let Some(model) = model.filter(|model| !models.contains(model)) {
+        Ok((known, model)) => {
+            match &known.listed {
+                Some(listed) => println!(
+                    "The provider offers {} models; see them with `ano model list --provider {name}`.",
+                    listed.len()
+                ),
+                None => println!(
+                    "The provider does not list its models; register the ones to use with `ano model add MODEL --provider {name}`."
+                ),
+            }
+            if let Some(model) = model.filter(|model| known.only_registered(model)) {
                 eprintln!("warning: the provider does not list the model '{model}'");
             }
         }
@@ -285,7 +356,7 @@ pub(super) fn provider_heading(name: &str, settings: &ApiSettings) -> String {
 }
 
 fn format_providers(config: &AppConfig) -> String {
-    let names: Vec<&str> = config.provider_names().collect();
+    let names: Vec<&str> = config.listed_provider_names().collect();
     let width = names.iter().map(|name| name.len()).max().unwrap_or(0);
     let mut lines = Vec::new();
     for name in names {
@@ -300,6 +371,9 @@ fn format_providers(config: &AppConfig) -> String {
         let mut line = format!("{mark} {name:width$}  {}", endpoint(&settings));
         if let Some(model) = config.provider_model(name) {
             line.push_str(&format!("  model {model}"));
+        }
+        if config.default_provider() == name {
+            line.push_str("  (default)");
         }
         lines.push(line);
         if let Some(allowed) = &settings.allowed_models {
@@ -370,13 +444,13 @@ mod tests {
                 "--model",
                 "qwen/qwen3",
                 "--fallback",
-                "default",
+                "api",
             ],
         )
         .await
         .unwrap();
         assert_eq!(config.provider_model("lan"), Some("qwen/qwen3"));
-        assert_eq!(config.providers["lan"].fallback, ["default"]);
+        assert_eq!(config.providers["lan"].fallback, ["api"]);
         assert!(provider(&path, &["add", "lan"]).await.is_err());
 
         // Model names are checked against the provider's list.
@@ -386,7 +460,7 @@ mod tests {
         let config = model(&path, &["disable", "qwen/qwen3-4b", "--provider", "lan"])
             .await
             .unwrap();
-        let models = config.provider_settings("lan").unwrap().models();
+        let models = config.provider_settings("lan").unwrap().model_filter();
         assert!(!models.is_enabled("qwen/qwen3-4b"));
         assert!(models.is_enabled("qwen/qwen3"));
         let config = model(&path, &["enable", "qwen/qwen3-4b", "--provider", "lan"])
@@ -419,7 +493,7 @@ mod tests {
             .is_err());
         let config = provider(&path, &["enable", "lan"]).await.unwrap();
         assert!(config.provider_enabled("lan"));
-        assert!(provider(&path, &["disable", "default"]).await.is_err());
+        assert!(provider(&path, &["disable", "api"]).await.is_err());
 
         let config = provider(
             &path,
@@ -435,13 +509,126 @@ mod tests {
                 .await
                 .is_err()
         );
-        let config = provider(&path, &["set", "default", "--model", "gpt-x"])
+        let config = provider(&path, &["set", "api", "--model", "gpt-x"])
             .await
             .unwrap();
         assert_eq!(config.agent.model, "gpt-x");
 
         let config = provider(&path, &["remove", "lan"]).await.unwrap();
         assert!(config.providers.is_empty());
-        assert!(provider(&path, &["remove", "default"]).await.is_err());
+        assert!(provider(&path, &["remove", "api"]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn providers_without_a_model_list_use_the_registered_models() {
+        // No /models route: the endpoint does not list its models.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, Router::new()).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        provider(&path, &["add", "sub", "--base-url", &url])
+            .await
+            .unwrap();
+
+        // Listing succeeds even with nothing registered.
+        model(&path, &["list", "--provider", "sub"]).await.unwrap();
+        let error = model(&path, &["disable", "gpt-5.6-luna", "--provider", "sub"])
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("ano model add gpt-5.6-luna --provider sub"),
+            "{error:#}"
+        );
+
+        let config = model(
+            &path,
+            &["add", "gpt-5.6-luna", "gpt-5.6-mini", "--provider", "sub"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            config.providers["sub"].models,
+            ["gpt-5.6-luna", "gpt-5.6-mini"]
+        );
+        let config = model(&path, &["disable", "gpt-5.6-mini", "--provider", "sub"])
+            .await
+            .unwrap();
+        assert!(!config
+            .provider_settings("sub")
+            .unwrap()
+            .model_filter()
+            .is_enabled("gpt-5.6-mini"));
+        model(&path, &["list", "--provider", "sub"]).await.unwrap();
+
+        let config = model(
+            &path,
+            &[
+                "remove",
+                "gpt-5.6-luna",
+                "gpt-5.6-mini",
+                "--provider",
+                "sub",
+            ],
+        )
+        .await
+        .unwrap();
+        assert!(config.providers["sub"].models.is_empty());
+        assert!(model(&path, &["add", "gpt-*", "--provider", "sub"])
+            .await
+            .is_err());
+        // [api] registers models too.
+        let config = model(&path, &["add", "gpt-5.6-luna"]).await.unwrap();
+        assert_eq!(config.api.models, ["gpt-5.6-luna"]);
+    }
+
+    #[tokio::test]
+    async fn the_default_provider_is_chosen_and_renamed_from_the_command_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[api]\nauth = 'chatgpt'\n[agent]\nmodel = 'gpt-5.6-luna'\n",
+        )
+        .unwrap();
+        provider(
+            &path,
+            &[
+                "add",
+                "mainpc",
+                "--base-url",
+                "http://127.0.0.1:9/v1",
+                "--model",
+                "qwen3.8-27b",
+            ],
+        )
+        .await
+        .unwrap();
+
+        let config = provider(&path, &["use", "mainpc"]).await.unwrap();
+        assert_eq!(config.default_provider(), "mainpc");
+        assert!(provider(&path, &["disable", "mainpc"]).await.is_err());
+        // Models go to the default provider unless --provider says otherwise.
+        let config = model(&path, &["add", "extra-model"]).await.unwrap();
+        assert_eq!(config.providers["mainpc"].models, ["extra-model"]);
+        let config = provider(&path, &["use", "api"]).await.unwrap();
+        assert_eq!(config.default_provider(), "api");
+
+        let config = provider(&path, &["rename", "api", "chatgpt"])
+            .await
+            .unwrap();
+        assert_eq!(config.default_provider(), "chatgpt");
+        assert_eq!(
+            config.providers["chatgpt"].model.as_deref(),
+            Some("gpt-5.6-luna")
+        );
+        assert_eq!(
+            config.listed_provider_names().collect::<Vec<_>>(),
+            ["chatgpt", "mainpc"]
+        );
+        let config = provider(&path, &["rename", "mainpc", "desktop"])
+            .await
+            .unwrap();
+        assert_eq!(config.providers["desktop"].models, ["extra-model"]);
     }
 }

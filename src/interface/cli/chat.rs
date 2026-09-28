@@ -9,7 +9,9 @@
 
 use super::{
     output::{self, ProgressHold},
-    prepare_agent, AgentOptions, ApprovalFactory, PreparedAgent,
+    prepare_agent,
+    provider::KnownModels,
+    AgentOptions, ApprovalFactory, PreparedAgent,
 };
 use crate::{
     application::{
@@ -266,7 +268,7 @@ pub(super) async fn run(
                 }
                 "/models" => {
                     match agent.list_models().await {
-                        Ok(models) => eprintln!("{}", format_models(&selection, &models)),
+                        Ok(models) => eprintln!("{}", format_models(&selection, models)),
                         Err(error) => eprintln!("error: {error:#}"),
                     }
                     continue;
@@ -457,8 +459,12 @@ fn switch_model(
 
 /// Every provider, marking the current one, with its endpoint and model.
 fn format_providers(config: &AppConfig, selection: &ModelSelection) -> String {
+    let current = selection.choice.provider.as_str();
     config
         .provider_names()
+        .filter(|name| {
+            *name == current || config.listed_provider_names().any(|listed| listed == *name)
+        })
         .map(|name| {
             let marker = if name == selection.choice.provider {
                 "*"
@@ -474,14 +480,13 @@ fn format_providers(config: &AppConfig, selection: &ModelSelection) -> String {
                     _ => api.effective_base_url(),
                 })
                 .unwrap_or_default();
-            let model = match config.providers.get(name) {
-                Some(provider) => provider.model.as_deref(),
-                None => Some(config.agent.model.as_str()),
-            };
-            let mut line = match model {
+            let mut line = match config.provider_model(name) {
                 Some(model) => format!("{marker} {name}  {endpoint}  (model {model})"),
                 None => format!("{marker} {name}  {endpoint}"),
             };
+            if config.default_provider() == name {
+                line.push_str("  [default]");
+            }
             if !config.provider_enabled(name) {
                 line.push_str("  [disabled]");
             }
@@ -493,12 +498,18 @@ fn format_providers(config: &AppConfig, selection: &ModelSelection) -> String {
 
 /// The models of the current provider, marking the one in use and those the
 /// config disables.
-fn format_models(selection: &ModelSelection, models: &[String]) -> String {
-    if models.is_empty() {
-        return format!("provider '{}' lists no models", selection.choice.provider);
+fn format_models(selection: &ModelSelection, listed: Option<Vec<String>>) -> String {
+    let provider = &selection.choice.provider;
+    let known = KnownModels::new(listed, &selection.api.models);
+    if known.names.is_empty() {
+        return match known.listed {
+            Some(_) => format!("provider '{provider}' lists no models"),
+            None => format!("provider '{provider}' does not list its models; register them with `ano model add MODEL --provider {provider}`"),
+        };
     }
-    let filter = selection.api.models();
-    models
+    let filter = selection.api.model_filter();
+    known
+        .names
         .iter()
         .map(|model| {
             let marker = if *model == selection.choice.model {
@@ -506,11 +517,14 @@ fn format_models(selection: &ModelSelection, models: &[String]) -> String {
             } else {
                 " "
             };
-            if filter.is_enabled(model) {
-                format!("{marker} {model}")
-            } else {
-                format!("{marker} {model}  [disabled]")
+            let mut line = format!("{marker} {model}");
+            if !filter.is_enabled(model) {
+                line.push_str("  [disabled]");
             }
+            if known.only_registered(model) {
+                line.push_str("  [registered]");
+            }
+            line
         })
         .collect::<Vec<_>>()
         .join("\n")
@@ -603,7 +617,7 @@ mod tests {
             .all(|item| item["type"] != "reasoning"));
         let listing = format_providers(&config, &selection);
         // OPENAI_BASE_URL of the test environment may redirect [api].
-        assert!(listing.contains("  default  ") && listing.contains("(model gpt-main)"));
+        assert!(listing.contains("  api  ") && listing.contains("(model gpt-main)"));
         assert!(listing.contains("* lan  http://192.168.1.10:1234/v1/  (model qwen)"));
     }
 }

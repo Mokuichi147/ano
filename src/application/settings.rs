@@ -63,6 +63,9 @@ pub struct AgentSettings {
     pub approval_mode: ApprovalMode,
     /// Reviewer model for `approval_mode = "auto"`; defaults to `model`.
     pub approval_model: Option<String>,
+    /// The provider runs use unless one is chosen, from `[providers]`.
+    /// Without it, runs connect through `[api]`.
+    pub provider: Option<String>,
 }
 
 impl Default for AgentSettings {
@@ -85,6 +88,7 @@ impl Default for AgentSettings {
             project_instructions: vec!["AGENTS.md".to_string()],
             approval_mode: ApprovalMode::Ask,
             approval_model: None,
+            provider: None,
         }
     }
 }

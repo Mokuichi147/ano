@@ -23,7 +23,7 @@ use crate::{
         profile::{approval_handler, ExecutionProfile},
         registry::ToolRegistry,
     },
-    config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PROVIDER},
+    config::{AppConfig, ModelRequest, ModelSelection},
     domain::{
         approval::ApprovalMode,
         mcp::McpTransport,
@@ -129,7 +129,7 @@ struct AgentOptions {
     #[arg(
         long,
         value_name = "NAME",
-        help = "Connect to a provider from [providers] ('default' is [api])"
+        help = "Connect to a provider from [providers] ('api' is [api]); defaults to [agent].provider"
     )]
     provider: Option<String>,
 
@@ -834,7 +834,7 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
     if args.allow_unauthenticated {
         config.webhook.allow_unauthenticated = true;
     }
-    let client = connect_provider(&config, DEFAULT_PROVIDER)?;
+    let client = connect_provider(&config, config.default_provider())?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = webhook::serve(config, client, Arc::clone(&mcp), registry).await;
     // Close MCP connections after jobs have stopped, even on failure.
@@ -977,7 +977,7 @@ mod tests {
         drop(session);
 
         // A conversation never follows a changed [api] silently.
-        let stay = context(&["--provider", "default"]);
+        let stay = context(&["--provider", "api"]);
         drop(open(&stay).unwrap());
         let mut unchosen = context(&[]);
         unchosen.explicit = false;

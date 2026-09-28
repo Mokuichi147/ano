@@ -124,10 +124,14 @@ impl AppConfig {
             validate_provider(name, provider)
                 .with_context(|| format!("invalid providers.{name}"))?;
         }
+        if let Some(provider) = &self.agent.provider {
+            self.provider_settings(provider)
+                .context("invalid agent.provider")?;
+        }
         for name in self.provider_names() {
             let settings = self.provider_settings(name)?;
             let table = match name {
-                DEFAULT_PROVIDER => "api".to_string(),
+                API_PROVIDER => API_PROVIDER.to_string(),
                 _ => format!("providers.{name}"),
             };
             for rule in settings
@@ -140,6 +144,11 @@ impl AppConfig {
                 }
                 if rule.trim_end_matches('*').contains('*') {
                     bail!("{table} has the model rule '{rule}'; '*' is only allowed at the end");
+                }
+            }
+            for model in &settings.models {
+                if model.trim().is_empty() || model.contains('*') {
+                    bail!("{table}.models must name models exactly; '{model}' is not a model name");
                 }
             }
             for next in &settings.fallback {
@@ -197,14 +206,37 @@ impl AppConfig {
             .with_context(|| format!("unknown execution environment '{name}'"))
     }
 
-    /// Names of every provider, `default` (`[api]`) first.
+    /// Names of every provider, `api` (`[api]`) first.
     pub fn provider_names(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(DEFAULT_PROVIDER).chain(self.providers.keys().map(String::as_str))
+        std::iter::once(API_PROVIDER).chain(self.providers.keys().map(String::as_str))
     }
 
-    /// The connection settings of the provider `name`; `default` is `[api]`.
+    /// Names of the providers to show: `api` only while it is the default
+    /// provider or something refers to it, so an unused `[api]` never
+    /// appears beside the configured providers.
+    pub fn listed_provider_names(&self) -> impl Iterator<Item = &str> {
+        let api_in_use = self.default_provider() == API_PROVIDER
+            || self
+                .environments
+                .values()
+                .any(|environment| environment.provider.as_deref() == Some(API_PROVIDER))
+            || self
+                .providers
+                .values()
+                .any(|provider| provider.fallback.iter().any(|name| name == API_PROVIDER));
+        self.provider_names()
+            .filter(move |name| api_in_use || *name != API_PROVIDER)
+    }
+
+    /// The provider runs use unless one is chosen: `[agent].provider`, or
+    /// `api` without it.
+    pub fn default_provider(&self) -> &str {
+        self.agent.provider.as_deref().unwrap_or(API_PROVIDER)
+    }
+
+    /// The connection settings of the provider `name`; `api` is `[api]`.
     pub fn provider_settings(&self, name: &str) -> Result<ApiSettings> {
-        if name == DEFAULT_PROVIDER {
+        if name == API_PROVIDER {
             return Ok(self.api.clone());
         }
         match self.providers.get(name) {
@@ -216,7 +248,7 @@ impl AppConfig {
         }
     }
 
-    /// Whether the provider `name` may be used. `default` always may.
+    /// Whether the provider `name` may be used. `api` always may.
     pub fn provider_enabled(&self, name: &str) -> bool {
         self.providers
             .get(name)
@@ -224,7 +256,7 @@ impl AppConfig {
     }
 
     /// The model a switch to `name` uses by itself: `[agent].model` for
-    /// `default`, the provider's `model` otherwise.
+    /// `api`, the provider's `model` otherwise.
     pub fn provider_model(&self, name: &str) -> Option<&str> {
         match self.providers.get(name) {
             Some(provider) => provider.model.as_deref(),
@@ -235,24 +267,27 @@ impl AppConfig {
     /// Resolve the provider and model of a run from `requests`, lowest
     /// precedence first (for example the environment, then the command line).
     ///
-    /// A request that names a model uses it. A request that names only a
-    /// provider switches to that provider's `model` when it has one, and
-    /// otherwise keeps the model from lower layers, down to `[agent].model`.
+    /// The default provider comes first, with its model. A request that
+    /// names a model uses it. A request that names only a provider switches
+    /// to that provider's model (`[agent].model` for `api`) when it has one,
+    /// and otherwise keeps the model from lower layers.
     pub fn select_model(&self, requests: &[ModelRequest]) -> Result<ModelSelection> {
-        let mut provider = DEFAULT_PROVIDER.to_string();
+        let default = ModelRequest {
+            provider: Some(self.default_provider().to_string()),
+            model: None,
+        };
+        let mut provider = API_PROVIDER.to_string();
         let mut model = self.agent.model.clone();
         let mut approval_model = self.agent.approval_model.clone();
-        for request in requests {
+        for request in std::iter::once(&default).chain(requests) {
             if let Some(name) = &request.provider {
                 self.provider_settings(name)?;
                 provider.clone_from(name);
+                if let Some(default) = self.provider_model(name) {
+                    model = default.to_string();
+                }
                 approval_model = match self.providers.get(name) {
-                    Some(settings) => {
-                        if let Some(default) = &settings.model {
-                            model.clone_from(default);
-                        }
-                        settings.approval_model.clone()
-                    }
+                    Some(settings) => settings.approval_model.clone(),
                     None => self.agent.approval_model.clone(),
                 };
             }
@@ -267,7 +302,7 @@ impl AppConfig {
             bail!("provider '{provider}' is disabled; enable it with `ano provider enable {provider}`");
         }
         let api = self.provider_settings(&provider)?;
-        if !api.models().is_enabled(&model) {
+        if !api.model_filter().is_enabled(&model) {
             bail!("model '{model}' is disabled for provider '{provider}'; enable it with `ano model enable {model} --provider {provider}` or choose another model");
         }
         Ok(ModelSelection {
@@ -295,7 +330,7 @@ impl AppConfig {
 }
 
 /// The name of the provider configured by `[api]`.
-pub const DEFAULT_PROVIDER: &str = "default";
+pub const API_PROVIDER: &str = "api";
 
 /// One layer of a provider and model choice, such as an environment or the
 /// command line. Unset fields leave the lower layers in effect.
@@ -338,8 +373,8 @@ impl ModelSelection {
 }
 
 fn validate_provider(name: &str, provider: &ProviderSettings) -> Result<()> {
-    if name == DEFAULT_PROVIDER {
-        bail!("'{DEFAULT_PROVIDER}' is reserved for [api]");
+    if name == API_PROVIDER {
+        bail!("'{API_PROVIDER}' is reserved for [api]");
     }
     if name.is_empty()
         || !name
@@ -397,6 +432,164 @@ pub fn update_provider(
     edit_config_file(path, true, |text| {
         with_provider_changes(text, name, adding, changes)
     })
+}
+
+/// Make `name` the default provider in the config file at `path`
+/// (`[agent].provider`; removed for `api`).
+pub fn use_provider(path: &Path, name: &str) -> Result<()> {
+    edit_config_file(path, true, |text| {
+        let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+        let value = (name != API_PROVIDER).then(|| SettingValue::Text(name.into()));
+        set_value(
+            table_mut(&mut document, "agent")?,
+            "provider",
+            value.as_ref(),
+        );
+        Ok(document.to_string())
+    })
+}
+
+/// Rename the provider `old` to `new` in the config file at `path`, with the
+/// references to it: `[agent].provider`, environments, and fallback lists.
+///
+/// Renaming `api` moves the connection of `[api]` (and its models, filters,
+/// and fallbacks) to `[providers.NEW]`, with `[agent].model` as its model and
+/// the reviewer of `[agent].approval_model`. The shared `timeout_secs`,
+/// `max_retries`, and `stream` stay in `[api]`. When `api` was the default,
+/// the new provider becomes the default.
+pub fn rename_provider(path: &Path, old: &str, new: &str) -> Result<()> {
+    edit_config_file(path, false, |text| with_provider_renamed(text, old, new))
+}
+
+/// Settings of `[api]` that describe its connection rather than transport
+/// defaults shared by every provider.
+const API_CONNECTION_KEYS: &[&str] = &[
+    "auth",
+    "chatgpt_auth_file",
+    "base_url",
+    "api_key_env",
+    "models",
+    "allowed_models",
+    "disabled_models",
+    "fallback",
+];
+
+fn with_provider_renamed(text: &str, old: &str, new: &str) -> Result<String> {
+    if new == API_PROVIDER {
+        bail!("'{API_PROVIDER}' is reserved for [api]");
+    }
+    let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+    let exists = |document: &DocumentMut, name: &str| {
+        document
+            .get("providers")
+            .and_then(Item::as_table_like)
+            .is_some_and(|providers| providers.contains_key(name))
+    };
+    if exists(&document, new) {
+        bail!("provider '{new}' already exists");
+    }
+    let moved = if old == API_PROVIDER {
+        let mut table = Table::new();
+        match document.get_mut("api") {
+            // Moving the keys with their decor keeps the comments above them.
+            Some(Item::Table(api)) => {
+                for key in API_CONNECTION_KEYS {
+                    if let Some((key, item)) = api.remove_entry(key) {
+                        table.insert_formatted(&key, item);
+                    }
+                }
+            }
+            Some(item) => {
+                if let Some(api) = item.as_table_like_mut() {
+                    for key in API_CONNECTION_KEYS {
+                        if let Some(item) = api.remove(key) {
+                            table.insert(key, item);
+                        }
+                    }
+                }
+            }
+            None => {}
+        }
+        if let Some(agent) = document.get_mut("agent").and_then(Item::as_table_like_mut) {
+            if let Some(model) = agent.get("model") {
+                table.insert("model", model.clone());
+            }
+            if let Some(reviewer) = agent.remove("approval_model") {
+                table.insert("approval_model", reviewer);
+            }
+        }
+        if document
+            .get("agent")
+            .and_then(|agent| agent.get("provider"))
+            .is_none()
+        {
+            let agent = table_mut(&mut document, "agent")?;
+            set_value(agent, "provider", Some(&SettingValue::Text(new.into())));
+        }
+        Item::Table(table)
+    } else {
+        if !exists(&document, old) {
+            bail!("provider '{old}' is not in the config file");
+        }
+        document["providers"]
+            .as_table_like_mut()
+            .and_then(|providers| providers.remove(old))
+            .context("providers is not a table")?
+    };
+    let providers = document.entry("providers").or_insert_with(|| {
+        let mut table = Table::new();
+        table.set_implicit(true);
+        Item::Table(table)
+    });
+    providers
+        .as_table_like_mut()
+        .context("providers is not a table")?
+        .insert(new, moved);
+
+    let renamed = |table: &mut dyn TableLike, key: &str| {
+        if let Some(Item::Value(Value::String(name))) = table.get_mut(key) {
+            if name.value() == old {
+                let decor = name.decor().clone();
+                *name = toml_edit::Formatted::new(new.to_string());
+                *name.decor_mut() = decor;
+            }
+        }
+        if let Some(Item::Value(Value::Array(names))) = table.get_mut(key) {
+            for name in names.iter_mut() {
+                if name.as_str() == Some(old) {
+                    let decor = name.decor().clone();
+                    *name = Value::from(new);
+                    *name.decor_mut() = decor;
+                }
+            }
+        }
+    };
+    if let Some(agent) = document.get_mut("agent").and_then(Item::as_table_like_mut) {
+        renamed(agent, "provider");
+    }
+    if let Some(api) = document.get_mut("api").and_then(Item::as_table_like_mut) {
+        renamed(api, "fallback");
+    }
+    for section in ["environments", "providers"] {
+        if let Some(tables) = document.get_mut(section).and_then(Item::as_table_like_mut) {
+            for (_, table) in tables.iter_mut() {
+                if let Some(table) = table.as_table_like_mut() {
+                    renamed(table, "provider");
+                    renamed(table, "fallback");
+                }
+            }
+        }
+    }
+    Ok(document.to_string())
+}
+
+/// The table `name` of `document`, created when missing.
+fn table_mut<'a>(document: &'a mut DocumentMut, name: &str) -> Result<&'a mut dyn TableLike> {
+    document
+        .entry(name)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
+        .with_context(|| format!("[{name}] is not a table"))
 }
 
 /// Remove the provider `name` from the config file at `path`. Refused while
@@ -461,14 +654,14 @@ fn with_provider_changes(
     changes: &[(&str, Option<SettingValue>)],
 ) -> Result<String> {
     let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
-    if name == DEFAULT_PROVIDER {
+    if name == API_PROVIDER {
         if adding {
-            bail!("'{DEFAULT_PROVIDER}' is [api]; change it with `ano provider set {DEFAULT_PROVIDER}`");
+            bail!("'{API_PROVIDER}' is [api]; change it with `ano provider set {API_PROVIDER}`, or give it a name with `ano provider rename {API_PROVIDER} NAME`");
         }
         for (key, value) in changes {
             let section = match *key {
                 "model" | "approval_model" => "agent",
-                "enabled" => bail!("the '{DEFAULT_PROVIDER}' provider cannot be disabled"),
+                "enabled" => bail!("the '{API_PROVIDER}' provider cannot be disabled"),
                 _ => "api",
             };
             let table = document
@@ -587,7 +780,8 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
 mod tests {
     use super::{
         expand_home, remove_provider, save_mcp_tool_filters, update_provider,
-        with_mcp_tool_filters, with_provider_changes, AppConfig, ModelRequest, SettingValue,
+        with_mcp_tool_filters, with_provider_changes, with_provider_renamed, AppConfig,
+        ModelRequest, SettingValue,
     };
     use std::path::Path;
 
@@ -612,7 +806,7 @@ mod tests {
             )
         };
         let owned = |p: &str, m: &str, a: Option<&str>| (p.into(), m.into(), a.map(Into::into));
-        assert_eq!(chosen(&[]), owned("default", "gpt-main", Some("gpt-mini")));
+        assert_eq!(chosen(&[]), owned("api", "gpt-main", Some("gpt-mini")));
         // The reviewer of [agent] belongs to [api]; another provider reviews
         // with its own model unless it names one.
         assert_eq!(
@@ -635,8 +829,8 @@ mod tests {
             owned("bare", "env-model", None)
         );
         assert_eq!(
-            chosen(&[request(Some("local"), None), request(Some("default"), None)]),
-            owned("default", "qwen/qwen3", Some("gpt-mini"))
+            chosen(&[request(Some("local"), None), request(Some("api"), None)]),
+            owned("api", "gpt-main", Some("gpt-mini"))
         );
         assert!(config
             .select_model(&[request(Some("missing"), None)])
@@ -653,23 +847,19 @@ mod tests {
         assert_eq!(local.api_key_env, "OPENAI_API_KEY");
         // OPENAI_BASE_URL only redirects [api].
         assert!(!local.use_base_url_env);
-        assert!(
-            config
-                .provider_settings("default")
-                .unwrap()
-                .use_base_url_env
-        );
+        assert!(config.provider_settings("api").unwrap().use_base_url_env);
         assert_eq!(config.provider_settings("bare").unwrap().timeout_secs, 5);
         assert_eq!(
             config.provider_names().collect::<Vec<_>>(),
-            ["default", "bare", "local"]
+            ["api", "bare", "local"]
         );
     }
 
     #[test]
     fn provider_names_and_references_are_validated() {
         for text in [
-            "[providers.default]\nbase_url = 'http://127.0.0.1:1/v1'",
+            "[providers.api]\nbase_url = 'http://127.0.0.1:1/v1'",
+            "[agent]\nprovider = 'missing'",
             "[providers.'a b']\nbase_url = 'http://127.0.0.1:1/v1'",
             "[providers.local]\nmodel = ''",
             "[providers.local]\ntimeout_secs = 0",
@@ -682,7 +872,7 @@ mod tests {
         assert!(
             AppConfig::parse("[providers.local]\n[environments.dev]\nprovider = 'local'").is_ok()
         );
-        assert!(AppConfig::parse("[environments.dev]\nprovider = 'default'").is_ok());
+        assert!(AppConfig::parse("[environments.dev]\nprovider = 'api'").is_ok());
     }
 
     #[test]
@@ -875,7 +1065,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("ano model enable gpt-old-1 --provider default"),
+                .contains("ano model enable gpt-old-1 --provider api"),
             "{error}"
         );
         assert!(config
@@ -890,15 +1080,15 @@ mod tests {
             "llama3"
         );
         assert!(!config.provider_enabled("lan"));
-        assert!(config.provider_enabled("default"));
+        assert!(config.provider_enabled("api"));
     }
 
     #[test]
     fn fallbacks_must_name_other_known_providers() {
-        assert!(AppConfig::parse(
-            "[api]\nfallback = ['lan']\n[providers.lan]\nfallback = ['default']"
-        )
-        .is_ok());
+        assert!(
+            AppConfig::parse("[api]\nfallback = ['lan']\n[providers.lan]\nfallback = ['api']")
+                .is_ok()
+        );
         for text in [
             "[api]\nfallback = ['missing']",
             "[providers.lan]\nfallback = ['lan']",
@@ -919,14 +1109,19 @@ mod tests {
             true,
             &[
                 ("base_url", text_value("http://192.168.1.10:1234/v1")),
-                ("fallback", Some(SettingValue::List(vec!["default".into()]))),
+                ("fallback", Some(SettingValue::List(vec!["api".into()]))),
             ],
         )
         .unwrap();
         assert!(added.starts_with(text), "{added}");
-        assert!(added.contains("[providers.lan]\nbase_url = \"http://192.168.1.10:1234/v1\"\nfallback = [\"default\"]"), "{added}");
+        assert!(
+            added.contains(
+                "[providers.lan]\nbase_url = \"http://192.168.1.10:1234/v1\"\nfallback = [\"api\"]"
+            ),
+            "{added}"
+        );
         let config = AppConfig::parse(&added).unwrap();
-        assert_eq!(config.providers["lan"].fallback, ["default"]);
+        assert_eq!(config.providers["lan"].fallback, ["api"]);
         assert!(with_provider_changes(&added, "lan", true, &[]).is_err());
         assert!(with_provider_changes(text, "missing", false, &[]).is_err());
 
@@ -947,7 +1142,7 @@ mod tests {
         // `default` is [api], and its model is [agent].model.
         let default = with_provider_changes(
             text,
-            "default",
+            "api",
             false,
             &[
                 ("base_url", text_value("http://127.0.0.1:11434/v1")),
@@ -960,8 +1155,8 @@ mod tests {
             "{default}"
         );
         assert!(default.contains("[agent]\nmodel = \"llama3\""), "{default}");
-        assert!(with_provider_changes(text, "default", false, &[("enabled", None)]).is_err());
-        assert!(with_provider_changes(text, "default", true, &[]).is_err());
+        assert!(with_provider_changes(text, "api", false, &[("enabled", None)]).is_err());
+        assert!(with_provider_changes(text, "api", true, &[]).is_err());
     }
 
     #[test]
@@ -987,16 +1182,96 @@ mod tests {
         .is_err());
         update_provider(
             &path,
-            "default",
+            "api",
             false,
             &[("fallback", Some(SettingValue::List(vec!["lan".into()])))],
         )
         .unwrap();
         let error = remove_provider(&path, "lan").unwrap_err();
         assert!(format!("{error:#}").contains("fallback"), "{error:#}");
-        update_provider(&path, "default", false, &[("fallback", None)]).unwrap();
+        update_provider(&path, "api", false, &[("fallback", None)]).unwrap();
         remove_provider(&path, "lan").unwrap();
         assert!(AppConfig::load(&path).unwrap().providers.is_empty());
         assert!(remove_provider(&path, "lan").is_err());
+    }
+
+    #[test]
+    fn the_default_provider_brings_its_model_and_hides_an_unused_api() {
+        let text = "[agent]\nmodel = 'gpt-main'\nprovider = 'lan'\n[providers.lan]\nmodel = 'qwen'\napproval_model = 'qwen-mini'\n[providers.bare]\n";
+        let config = AppConfig::parse(text).unwrap();
+        assert_eq!(config.default_provider(), "lan");
+        let selection = config.select_model(&[]).unwrap();
+        assert_eq!(selection.choice.provider, "lan");
+        assert_eq!(selection.choice.model, "qwen");
+        assert_eq!(selection.approval_model.as_deref(), Some("qwen-mini"));
+        // A default provider without a model uses [agent].model.
+        let bare =
+            AppConfig::parse(&text.replace("provider = 'lan'", "provider = 'bare'")).unwrap();
+        assert_eq!(bare.select_model(&[]).unwrap().choice.model, "gpt-main");
+
+        assert_eq!(
+            config.listed_provider_names().collect::<Vec<_>>(),
+            ["bare", "lan"]
+        );
+        // `api` is still selectable, and listed while something uses it.
+        assert_eq!(
+            config
+                .select_model(&[request(Some("api"), None)])
+                .unwrap()
+                .choice
+                .model,
+            "gpt-main"
+        );
+        let referenced = AppConfig::parse(&format!("{text}fallback = ['api']")).unwrap();
+        assert_eq!(
+            referenced.listed_provider_names().collect::<Vec<_>>(),
+            ["api", "bare", "lan"]
+        );
+        assert_eq!(
+            AppConfig::default()
+                .listed_provider_names()
+                .collect::<Vec<_>>(),
+            ["api"]
+        );
+    }
+
+    #[test]
+    fn renaming_api_moves_its_connection_to_a_named_provider() {
+        let text = "[api]\n# the subscription\nauth = 'chatgpt' # subscription\nmodels = ['gpt-5.6-luna']\ntimeout_secs = 30\n\n[agent]\nmodel = 'gpt-5.6-luna'\napproval_model = 'gpt-5.6-mini'\n\n[providers.lan]\nbase_url = 'http://192.168.1.10:1234/v1'\nfallback = ['api']\n\n[environments.review]\nprovider = 'api'\n";
+        let renamed = with_provider_renamed(text, "api", "chatgpt").unwrap();
+        let config = AppConfig::parse(&renamed).unwrap();
+        assert!(
+            renamed.contains("auth = 'chatgpt' # subscription"),
+            "{renamed}"
+        );
+        let chatgpt = &config.providers["chatgpt"];
+        assert_eq!(
+            chatgpt.auth,
+            crate::infrastructure::openai::ApiAuth::Chatgpt
+        );
+        assert_eq!(chatgpt.models, ["gpt-5.6-luna"]);
+        assert_eq!(chatgpt.model.as_deref(), Some("gpt-5.6-luna"));
+        assert_eq!(chatgpt.approval_model.as_deref(), Some("gpt-5.6-mini"));
+        // Shared transport settings stay, and every reference follows.
+        assert_eq!(config.api.timeout_secs, 30);
+        assert_eq!(
+            config.api.auth,
+            crate::infrastructure::openai::ApiAuth::ApiKey
+        );
+        assert_eq!(config.default_provider(), "chatgpt");
+        assert_eq!(config.providers["lan"].fallback, ["chatgpt"]);
+        assert_eq!(
+            config.environments["review"].provider.as_deref(),
+            Some("chatgpt")
+        );
+        assert!(!config.listed_provider_names().any(|name| name == "api"));
+
+        let again = with_provider_renamed(&renamed, "chatgpt", "subscription").unwrap();
+        let config = AppConfig::parse(&again).unwrap();
+        assert_eq!(config.default_provider(), "subscription");
+        assert_eq!(config.providers["lan"].fallback, ["subscription"]);
+        assert!(with_provider_renamed(&again, "subscription", "lan").is_err());
+        assert!(with_provider_renamed(&again, "subscription", "api").is_err());
+        assert!(with_provider_renamed(&again, "missing", "other").is_err());
     }
 }

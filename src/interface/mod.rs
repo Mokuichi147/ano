@@ -34,7 +34,7 @@ pub(crate) fn connect_provider(config: &AppConfig, name: &str) -> Result<Arc<dyn
         let model = config.provider_model(next).map(str::to_string);
         if model
             .as_ref()
-            .is_some_and(|model| !fallback.models().is_enabled(model))
+            .is_some_and(|model| !fallback.model_filter().is_enabled(model))
         {
             continue;
         }
@@ -43,7 +43,7 @@ pub(crate) fn connect_provider(config: &AppConfig, name: &str) -> Result<Arc<dyn
                 name: next.clone(),
                 client,
                 model,
-                models: fallback.models(),
+                models: fallback.model_filter(),
             }),
             Err(error) => {
                 eprintln!("warning: skipped fallback provider '{next}' of '{name}': {error:#}")

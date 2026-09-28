@@ -77,7 +77,8 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |
 | `ano provider list` | 接続先の一覧（有効・無効、URL、既定モデル、モデルの絞り込み、フォールバック先）を表示します（[接続先の管理](#接続先の管理)） |
 | `ano provider add/set/remove/enable/disable NAME` | 設定ファイルを直接編集せずに、接続先を追加・変更・削除・有効化・無効化します |
-| `ano model list [--provider NAME]` | 接続先に接続して提供されるモデルをすべて表示し、設定で有効なものに印を付けます（[モデルの有効化](#接続先の管理)） |
+| `ano model list [--provider NAME]` | 接続先に接続して提供されるモデル（と登録したモデル）をすべて表示し、設定で有効なものに印を付けます（[モデルの有効化](#接続先の管理)） |
+| `ano model add/remove MODEL... [--provider NAME]` | モデル一覧を返さない接続先（ChatGPT サブスクリプションなど）に、使うモデル名を登録・削除します |
 | `ano model edit [--provider NAME]` | 接続先のモデルをチェックリストで有効化・無効化し、設定ファイルに保存します（`ano model enable/disable MODEL... [--provider NAME]` でも可） |
 | `ano mcp login LABEL` | OAuth が必要な MCP server を認可し、トークンを保存します（`ano mcp logout LABEL` で削除。[OAuth 認証](docs/mcp.md#oauth-認証)） |
 
@@ -91,7 +92,7 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `--workspace PATH` / `--allow-writes` | 環境を指定しない場合の workspace（既定はカレントディレクトリ）と書き込み許可 |
 | `--allow-exec` | 環境を指定しない場合に、`workspace_exec` でのコマンド実行を許可（[コマンド実行](#コマンド実行workspace_exec)） |
 | `--allow-web` | 環境を指定しない場合に、`web_fetch` での Web ページ取得を許可（[Web ページの取得](#web-ページの取得web_fetch)） |
-| `--provider NAME` | `[providers]` の接続先を使う（`default` は `[api]`）。接続先に `model` があれば、そのモデルに切り替わる（[接続先の切り替え](#複数の接続先を切り替える)） |
+| `--provider NAME` | `[providers]` の接続先を使う（省略時は既定の接続先、`api` は `[api]`）。接続先に `model` があれば、そのモデルに切り替わる（[接続先の切り替え](#複数の接続先を切り替える)） |
 | `--model NAME` | モデルを変更（選んだ接続先でのモデル名） |
 | `--reasoning-effort LEVEL` | 推論の深さ（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`。対応範囲はモデルによる） |
 | `--goal TEXT` | ゴール（最終的にどうなっていればよいか。満たすべき条件も文中に書ける）を指定し、達成が確認されるまで作業を続ける。プロンプトは省略可（`run` のみ。chat では `/goal`。[ゴールと完了条件](docs/agent-runtime.md#ゴールと完了条件)） |
@@ -244,7 +245,12 @@ model = "ロードしたモデル名"
 
 ### 複数の接続先を切り替える
 
-`[api]` のほかに、名前付きの接続先を `[providers.<name>]` に登録できます。`[api]` の接続先は `default` という名前で選べます。
+`[api]` のほかに、名前付きの接続先を `[providers.<name>]` に登録できます。`--provider` を付けない実行では、`[agent].provider` に指定した接続先（既定の接続先）を使います。指定がなければ `[api]` に接続し、この接続先は `api` という名前で選べます。
+
+```toml
+[agent]
+provider = "lan"                             # 既定の接続先（`ano provider use lan` でも設定できる）
+```
 
 ```toml
 [providers.lan]
@@ -266,9 +272,10 @@ ano run --provider lan --model qwen3:30b "..."   # 接続先とモデルを両�
 ano chat --environment review                    # 環境の provider（codex）を使う
 ```
 
+- `[api]` を使っていない場合（既定の接続先でもなく、environment やフォールバック先からも参照されていない場合）、一覧には `api` を表示しません。`[api]` の接続設定を名前付きの接続先に移すには `ano provider rename api NAME` を使います（下記）。
 - 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`timeout_secs`・`max_retries`・`stream`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url` と `api_key_env` は引き継がず、省略時は OpenAI の既定値になります。
 - モデルは「環境の指定 → `--provider`/`--model` → 対話中の `/provider`/`/model`」の順に上書きします。接続先だけを選んだ場合は、その接続先の `model` に切り替わります。接続先に `model` がなければ、それまでのモデルをそのまま使います。
-- `[agent].approval_model` は `[api]` 用です。ほかの接続先では、その接続先の `approval_model`（省略時は使用中のモデル）で審査します。
+- `[agent].model` は `[api]` のモデルで、`model` のない既定の接続先でも使います。`[agent].approval_model` は `[api]` 用です。ほかの接続先では、その接続先の `approval_model`（省略時は使用中のモデル）で審査します。
 - `ano chat` では `/provider lan` や `/model qwen3:30b` で、会話を保ったまま切り替えられます。接続先を変えると、それまでの会話が新しい接続先へ送られます。元の接続先でしか読めない暗号化された推論は履歴から除きます。OpenAI の `/responses/compact` で圧縮済みの会話は、ほかの接続先では読めないため移せません（`/clear` か新しいセッションで始めてください）。
 - `--session` の会話は、切り替えた接続先とモデルを記録し、次に `--provider`・`--model` を付けずに再開したときもそれを使います。保存時と異なる接続先で再開するには `--provider` を明示してください。明示しない限り、別の接続先へ会話を送ることはありません。
 - `ano serve` は、環境が参照する接続先へ起動時に接続を確認し、ジョブごとに環境の接続先とモデルを使います。
@@ -278,14 +285,18 @@ ano chat --environment review                    # 環境の provider（codex）
 `ano provider` で接続先を、`ano model` で接続先ごとのモデルを、設定ファイルを直接編集せずに管理できます。設定ファイルのコメントや書式は保ったまま該当箇所だけを書き換えます。書き換え後の設定が不正になる場合は保存しません。`config.toml` がなければ作成します。
 
 ```sh
-ano provider add lan --base-url http://192.168.1.10:1234/v1 --model qwen/qwen3-coder-30b --fallback default
+ano provider add lan --base-url http://192.168.1.10:1234/v1 --model qwen/qwen3-coder-30b --fallback codex
 ano provider add codex --auth chatgpt --model gpt-5-codex
-ano provider set lan --timeout-secs 120 --unset fallback   # 変更と削除（default は [api] と [agent].model）
-ano provider list
+ano provider use lan                                       # 既定の接続先にする（[agent].provider）
+ano provider set lan --timeout-secs 120 --unset fallback   # 変更と削除（api は [api] と [agent].model）
+ano provider list                                          # 既定の接続先に (default)
+ano provider rename lan desktop                            # 改名（environment・フォールバック先・既定の指定も追従）
 ano provider remove codex                                  # environment やフォールバック先が参照していれば拒否
 ```
 
-tool と同じように、接続先とモデルを有効化・無効化できます。無効にした接続先やモデルは、`--provider`・`--model`・environment・`/provider`・`/model` のどこから選んでもエラーになり、フォールバック先からも外れます。`ano model` の `--provider` は、`ano run`・`ano chat` と同じく接続先を選びます。省略すると、`list` はすべての有効な接続先、それ以外は `default`（`[api]`）が対象です。
+`[api]` に接続先（ChatGPT サブスクリプションなど）を設定している場合は、`ano provider rename api chatgpt` で名前付きの接続先に移せます。`[api]` の接続設定（`auth`・`base_url`・`models`・`fallback` など）を `[providers.chatgpt]` に移し、`[agent].model` をそのモデルとして引き継ぎます。`[api]` が既定だった場合は、`chatgpt` が既定の接続先になります。`timeout_secs`・`max_retries`・`stream` は、全接続先で共通の既定値として `[api]` に残します。
+
+tool と同じように、接続先とモデルを有効化・無効化できます。無効にした接続先やモデルは、`--provider`・`--model`・environment・`/provider`・`/model` のどこから選んでもエラーになり、フォールバック先からも外れます。`ano model` の `--provider` は、`ano run`・`ano chat` と同じく接続先を選びます。省略すると、`list` はすべての有効な接続先、それ以外は既定の接続先が対象です。
 
 ```sh
 ano model list                                   # すべての接続先の /v1/models を取得し、有効なものに [x]
@@ -293,11 +304,13 @@ ano model list --provider lan
 ano model edit --provider lan                    # チェックリストで使うモデルを選ぶ
 ano model disable qwen/qwen3-4b --provider lan
 ano model enable 'qwen/*' --provider lan         # 末尾の * で前方一致
+ano model add gpt-5.6-luna gpt-5.6-mini --provider codex   # 一覧を返さない接続先にモデル名を登録
 ano provider disable codex                       # 接続先そのものを無効化（設定は残る）
 ```
 
 - 設定ファイルでは `allowed_models`（許可リスト。指定時はこれに一致するモデルだけ）と `disabled_models`（拒否リスト）で表します。MCP の `allowed_tools`・`disabled_tools` と同じ考え方で、`[api]` にも書けます。接続先そのものの無効化は `enabled = false` です。
-- `enable`・`disable` はモデル名を接続先の一覧と照合します。一覧を返さない接続先（ChatGPT サブスクリプションなど）や未起動のサーバーでは `--no-verify` を付けてください。
+- モデル一覧を返さない接続先（ChatGPT サブスクリプションや、`/v1/models` のないサーバー）では、`ano model add` で登録したモデル名（設定の `models`）を一覧として使います。一覧を返す接続先でも、一覧にないモデル名を登録して並べられます。
+- `enable`・`disable` は、モデル名を「接続先の一覧＋登録したモデル」と照合します。未起動のサーバーで照合を省くには `--no-verify` を付けてください。
 
 #### フォールバック
 
@@ -307,10 +320,10 @@ ano provider disable codex                       # 接続先そのものを無�
 [providers.lan]
 base_url = "http://192.168.1.10:1234/v1"
 model = "qwen/qwen3-coder-30b"
-fallback = ["lan2", "default"]    # lan が使えなければ lan2、次に [api]
+fallback = ["lan2", "codex"]      # lan が使えなければ lan2、次に codex
 ```
 
-- 切り替え先では、その接続先の `model` を使います（`default` なら `[agent].model`）。`model` がない接続先では、要求と同じモデル名を使います。
+- 切り替え先では、その接続先の `model` を使います（`api` なら `[agent].model`）。`model` がない接続先では、要求と同じモデル名を使います。
 - 400 などの要求そのものの誤りでは切り替えません。ストリーミングで回答の表示が始まった後も、表示の重複を避けるため切り替えません。
 - 失敗した接続先は5分間、ほかの接続先の後に回します。毎回接続のタイムアウトを待つことはありません。
 - 会話は元の接続先に紐づいたままです。切り替え先には、元の接続先でしか読めない暗号化された推論を除いた履歴を送ります。切り替え先の推論も履歴には残しません。OpenAI の `/responses/compact` で圧縮済みの会話と `/responses/compact` 自体は、元の接続先でしか扱えないため切り替えません。

@@ -17,7 +17,7 @@ use crate::{
         ports::{McpGateway, ResponsesApi},
         registry::ToolRegistry,
     },
-    config::{AppConfig, ModelRequest, DEFAULT_PROVIDER},
+    config::{AppConfig, ModelRequest},
     domain::plan::{RunOutcome, TaskGoal},
     infrastructure::{
         chronotope::Chronotope, project::read_project_instructions, skills::SkillLibrary,
@@ -97,7 +97,7 @@ struct WebhookState {
     history: Option<Arc<Chronotope>>,
     skills: Option<Arc<SkillLibrary>>,
     config: AppConfig,
-    /// The client of `[api]`.
+    /// The client of the default provider (`AppConfig::default_provider`).
     client: Arc<dyn ResponsesApi>,
     /// Clients of the `[providers]` that environments use, by name.
     providers: HashMap<String, Arc<dyn ResponsesApi>>,
@@ -160,11 +160,9 @@ pub async fn serve(
     // login or API key fails at startup instead of in a job.
     let mut providers = HashMap::new();
     for (name, environment) in &config.environments {
-        if let Some(provider) = environment
-            .provider
-            .as_ref()
-            .filter(|provider| *provider != DEFAULT_PROVIDER && config.provider_enabled(provider))
-        {
+        if let Some(provider) = environment.provider.as_ref().filter(|provider| {
+            *provider != config.default_provider() && config.provider_enabled(provider)
+        }) {
             if !providers.contains_key(provider) {
                 let client = connect_provider(&config, provider).with_context(|| {
                     format!("failed to connect provider '{provider}' of environment '{name}'")
@@ -497,6 +495,7 @@ async fn execute_job(
     selection.apply_to(&mut profile.settings);
     let client = match state.providers.get(&selection.choice.provider) {
         Some(client) => Arc::clone(client),
+        // The default provider's client, which `serve` was given.
         None => Arc::clone(&state.client),
     };
     if let Some(workspace) = profile.context.workspace.clone() {

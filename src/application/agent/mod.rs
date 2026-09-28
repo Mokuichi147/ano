@@ -175,8 +175,9 @@ impl Agent {
         &self.settings.model
     }
 
-    /// The models the current endpoint offers.
-    pub async fn list_models(&self) -> Result<Vec<String>> {
+    /// The models the current endpoint offers, or `None` when it does not
+    /// list them.
+    pub async fn list_models(&self) -> Result<Option<Vec<String>>> {
         self.client.list_models().await
     }
 

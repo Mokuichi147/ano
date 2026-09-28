@@ -23,8 +23,9 @@ stream = true
 # Only api.openai.com requires the key; for other endpoints, requests are sent
 # without an Authorization header when the api_key_env variable is not set.
 
-# Named providers besides [api] ("default"); `ano provider add/set/remove`
-# edits them without opening this file. Choose one with --provider NAME,
+# Named providers besides [api] (named "api"); `ano provider add/set/remove`
+# edits them without opening this file. [agent].provider picks the default;
+# choose another with --provider NAME,
 # `provider = "NAME"` in an environment, or /provider NAME in `ano chat`.
 # timeout_secs, max_retries, and stream default to the [api] values;
 # base_url and api_key_env do not (they default to OpenAI's).
@@ -35,6 +36,9 @@ stream = true
 # model = "qwen/qwen3-coder-30b"
 # Reviewer for approval_mode = "auto" on this provider; defaults to the model.
 # approval_model = "qwen/qwen3-4b"
+# Model names to offer for a provider that does not list its models (such as
+# a ChatGPT subscription); `ano model add MODEL --provider NAME` adds them.
+# models = ["gpt-5.6-luna"]
 # Models of this provider that may be used: an allowlist and a denylist of
 # exact names or prefixes ending in *. Edit them with `ano model enable`,
 # `ano model disable`, or `ano model edit` (with --provider NAME).
@@ -43,7 +47,7 @@ stream = true
 # disabled_models = ["qwen/qwen3-4b"]
 # Providers to try in order while this one cannot be reached, times out, or
 # is overloaded (408, 429, 5xx). The conversation is sent to them.
-# fallback = ["default"]
+# fallback = ["codex"]
 # enabled = false keeps the settings but refuses to use the provider.
 # enabled = true
 #
@@ -56,6 +60,10 @@ stream = true
 # choose an audio-capable Responses model (for example gpt-audio-1.5).
 # Override with `ano run --model ...` when needed.
 model = "gpt-6-astra"
+# The provider runs use unless one is chosen (`ano provider use NAME`).
+# Without it, runs connect through [api]; [agent].model is the model of [api]
+# and of a default provider without its own model.
+# provider = "lan"
 # Total Responses requests; the final request is reserved for a tool-free report.
 max_tool_rounds = 24
 tool_discovery_limit = 12
