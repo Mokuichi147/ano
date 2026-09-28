@@ -7,6 +7,7 @@ mod chat;
 mod history;
 mod mcp;
 mod output;
+mod skills;
 
 pub use approval::InteractiveApproval;
 
@@ -29,7 +30,8 @@ use crate::{
     },
     infrastructure::{
         chronotope::Chronotope, mcp::McpPool, openai::OpenAiClient,
-        project::read_project_instructions, session_store::Session, tools::register_builtin_tools,
+        project::read_project_instructions, session_store::Session, skills::SkillLibrary,
+        tools::register_builtin_tools,
     },
     interface::webhook,
 };
@@ -76,6 +78,8 @@ enum Command {
     Mcp(mcp::McpArgs),
     /// 原文履歴の同期状態を調べ、chronotope へ再送・検索する。
     History(history::HistoryArgs),
+    /// List the saved skills, or show one.
+    Skills(skills::SkillsArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -280,6 +284,7 @@ pub async fn run() -> Result<()> {
     // they record through; other commands must work without its token.
     if matches!(cli.command, Command::Tools(_)) {
         Chronotope::from_settings(&config.history, &registry)?;
+        SkillLibrary::from_settings(&config.skills, &registry)?;
     }
 
     match cli.command {
@@ -311,6 +316,7 @@ pub async fn run() -> Result<()> {
         Command::Serve(args) => serve(config, args, registry).await,
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
         Command::History(args) => history::run(&config, &cli.user, args).await,
+        Command::Skills(args) => skills::run(&config, &cli.user, args),
     }
 }
 
@@ -448,7 +454,12 @@ fn prepare_agent(
     stdin_is_terminal: bool,
     stream: Option<output::TextFormat>,
 ) -> Result<PreparedAgent> {
-    let profile = resolve_run_context(config, user_id, options)?;
+    let mut profile = resolve_run_context(config, user_id, options)?;
+    if let Some(skills) = SkillLibrary::from_settings(&config.skills, &registry)? {
+        for problem in skills.add_to_instructions(&mut profile)? {
+            eprintln!("warning: skipped skill {problem}");
+        }
+    }
     let client = Arc::new(OpenAiClient::from_api_settings(&config.api)?);
     let ask_user: Arc<dyn ApprovalHandler> = if stdin_is_terminal {
         ask_user

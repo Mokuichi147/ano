@@ -52,6 +52,7 @@ fn state() -> WebhookState {
         .environments
         .insert("default".into(), Default::default());
     WebhookState {
+        skills: None,
         history: None,
         config,
         client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:1234/v1")),

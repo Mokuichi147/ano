@@ -63,6 +63,7 @@ src/
 │   ├── compaction.rs       履歴圧縮の判定、remote の結果の検証、summary の記録と置き換え
 │   ├── tool.rs             ToolDefinition・ToolContext・予約名
 │   ├── mcp.rs              MCP サーバー設定と公開可否の判定
+│   ├── skill.rs            スキルの名前・説明・本文の検証
 │   └── environment.rs      実行環境と検証コマンドの設定
 ├── application/
 │   ├── ports.rs            外部依存のトレイト
@@ -85,6 +86,7 @@ src/
 │   ├── session_store.rs    セッションファイルとロック
 │   ├── memory_store.rs     プロセス内だけで保持する会話（ano chat）
 │   ├── project.rs          AGENTS.md などプロジェクト指示の読み込み
+│   ├── skills.rs           SKILL.md の読み書きと skill_read・skill_save
 │   ├── fs.rs               原子的なファイル置き換え
 │   └── tools/
 │       ├── mod.rs          組み込み tool の登録（echo・unix_time）

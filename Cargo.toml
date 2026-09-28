@@ -40,6 +40,8 @@ inquire = { version = "0.9", default-features = false, features = ["crossterm", 
 eventsource-stream = "0.2"
 htmd = "0.5"
 ignore = "0.4"
+directories = "6"
+serde_yaml_ng = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -6,7 +6,7 @@
 use crate::{
     application::{profile::ExecutionProfile, settings::AgentSettings},
     domain::{environment::EnvironmentConfig, mcp::McpServerConfig, policy::UserPolicy},
-    infrastructure::{chronotope::HistorySettings, openai::ApiSettings},
+    infrastructure::{chronotope::HistorySettings, openai::ApiSettings, skills::SkillSettings},
     interface::webhook::WebhookSettings,
 };
 use anyhow::{bail, Context, Result};
@@ -28,6 +28,7 @@ pub struct AppConfig {
     pub environments: HashMap<String, EnvironmentConfig>,
     pub webhook: WebhookSettings,
     pub history: HistorySettings,
+    pub skills: SkillSettings,
 }
 
 impl AppConfig {
@@ -53,6 +54,9 @@ impl AppConfig {
     /// bare names such as `node` are still looked up on `PATH`.
     fn resolve_paths(&mut self, directory: &Path, home: Option<&Path>) -> Result<()> {
         self.history.data_dir = resolve_path(&self.history.data_dir, directory, home)?;
+        if let Some(dir) = &mut self.skills.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
         for (name, environment) in &mut self.environments {
             if let Some(workspace) = &mut environment.workspace {
                 *workspace = resolve_path(workspace, directory, home)

@@ -9,4 +9,5 @@ pub mod memory_store;
 pub mod openai;
 pub mod project;
 pub mod session_store;
+pub mod skills;
 pub mod tools;

@@ -27,6 +27,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - 長い会話の自動圧縮（OpenAI の `/responses/compact`、またはローカル AI でも使えるモデルによる要約）と、使用トークン数に応じた実行停止
 - 大きすぎる tool 出力の切り詰め（先頭と末尾を残す）
 - chronotope への原文会話・ツール履歴の保存、再送、`history_*` 参照 tool（`[history]` で有効化）
+- 上手くいった手順をスキル（Agent Skills 形式の `SKILL.md`）として承認付きで保存し、以後の依頼で参照（`[skills]` で有効化。[スキル](docs/agent-runtime.md#スキルskill_read--skill_save)）
 
 **tool と MCP**
 - workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り（バイト位置・行番号）・全文検索（正規表現対応、`.gitignore` 対応）・書き込み・移動・削除
@@ -67,6 +68,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
 | `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](docs/chronotope-history.md)） |
+| `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](docs/agent-runtime.md#スキルskill_read--skill_save)） |
 | `ano mcp tools [LABEL]` | MCP server に接続して提供される tool をすべて表示し、設定で有効なものに印を付けます（[tool の確認と有効化](docs/mcp.md#tool-の確認と有効化)） |
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |
 | `ano mcp login LABEL` | OAuth が必要な MCP server を認可し、トークンを保存します（`ano mcp logout LABEL` で削除。[OAuth 認証](docs/mcp.md#oauth-認証)） |
@@ -115,6 +117,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | テキスト | エージェントへの指示として送信 |
 | `/plan` / `/usage` | 作業計画 / この会話のトークン使用量を表示 |
 | `/goal TEXT` | ゴールを指定して作業を始める。`/goal` で表示、`/goal clear` で解除 |
+| `/skill [観点]` | この会話で上手くいった手順をスキルとして保存するよう依頼する（`[skills]` 有効時。保存は承認モードで確認） |
 | `/compact` | 会話を今すぐ圧縮する（要約などで履歴を小さくし、コンテキストを空ける。[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)） |
 | `/clear` | 新しい会話を始める（`--session` 指定時は使えません） |
 | `/help` | コマンド一覧 |
@@ -180,6 +183,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](docs/mcp.md) |
 | `[webhook]` | 待ち受けアドレス・署名・ジョブ数とタイムアウト | [docs/webhook.md](docs/webhook.md) |
 | `[history]` | chronotope の接続先・主体・ローカル未送信キュー・タイムアウト | [docs/chronotope-history.md](docs/chronotope-history.md) |
+| `[skills]` | スキルの有効化と保存先 | [スキル](docs/agent-runtime.md#スキルskill_read--skill_save) |
 
 設定の誤りで意図せず制限が外れないよう、次の場合はエラーになります。
 
@@ -240,6 +244,8 @@ model = "ロードしたモデル名"
 | `workspace_check` | 環境の `checks` に登録した検証コマンドを実行。`name:null` で一覧 | `checks` |
 | `workspace_exec` | シェルコマンドを workspace で実行し、終了コードと出力を返す。呼び出しごとに承認が必要（[詳細](#コマンド実行workspace_exec)） | `allow_exec` |
 | `web_fetch` | 公開 Web ページを取得し、HTML を Markdown に変換して返す。`offset`・`max_bytes` で分割して読む。呼び出しごとに承認が必要（[詳細](#web-ページの取得web_fetch)） | `allow_web` |
+| `skill_read` | 保存済みスキルの手順を名前で読む（[詳細](docs/agent-runtime.md#スキルskill_read--skill_save)） | `[skills]` |
+| `skill_save` | 上手くいった手順をスキルとして保存・更新する。呼び出しごとに承認が必要 | `[skills]` |
 | `task_plan` | 作業計画の読み書き（[詳細](docs/agent-runtime.md#作業計画と完了判定)） | 常時 |
 | `tool_search` | 登録済み tool・MCP の検索（[詳細](docs/agent-runtime.md#tool-の遅延公開tool_search)） | 常時 |
 | `delegate_task` | 作業をサブエージェントに任せ、報告を受け取る（[詳細](docs/agent-runtime.md#サブエージェントdelegate_task)） | 常時 |
@@ -322,7 +328,7 @@ registry.register(
 
 | ドキュメント | 内容 |
 | --- | --- |
-| [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント |
+| [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント、スキル |
 | [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、tool の確認と有効化、承認、ポリシーの名前空間、検索カタログ |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
@@ -346,4 +352,5 @@ cargo test
 - `web_fetch` は取得のたびに URL を外部へ送ります。`allow_web` と `approval_mode = "allow"` を併用すると、ページに埋め込まれた指示でモデルがデータを URL に載せて送る可能性を確認なしに許すことになります。
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。
 - `AGENTS.md` はモデルへの指示として送られます。信頼できないリポジトリを扱う環境では `project_instructions = []` にしてください。
+- スキルは以後のすべての実行で指示として参照されます。`skill_save` と `approval_mode = "allow"` を併用すると、Web ページなどに埋め込まれた指示がスキルとして確認なしに残る可能性があります。保存された `SKILL.md` は `ano skills` で確認し、不要なものはディレクトリごと削除してください。
 - 中止・タイムアウト・トークン上限による停止は、完了済みのファイル書き込みや外部操作を巻き戻しません。

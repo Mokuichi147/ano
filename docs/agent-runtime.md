@@ -11,6 +11,7 @@
 - [ゴールと完了条件](#ゴールと完了条件)
 - [tool の遅延公開（tool_search）](#tool-の遅延公開tool_search)
 - [サブエージェント（delegate_task）](#サブエージェントdelegate_task)
+- [スキル（skill_read / skill_save）](#スキルskill_read--skill_save)
 
 ## 実行ループと上限
 
@@ -218,3 +219,34 @@ MCP tool の検索対象は [MCP の設定](mcp.md#検索カタログtool_catalo
 - サブエージェントのイベントは `Agent::with_event_listener` のリスナーに通知されます（CLI の進捗表示にも出ます）が、元の実行の `events` には `subagent_started` / `subagent_finished` だけが入ります。
 - `disabled_tools = ["delegate_task"]` または `--disable-tool delegate_task` で無効化できます。
 
+## スキル（skill_read / skill_save）
+
+スキルは、以前の作業で上手くいった手順（手順・コマンド・確認方法・落とし穴）を名前付きで保存したものです。同じ種類の依頼を受けたとき、モデルが試行錯誤をやり直さずにその手順に沿って進められるようにします。`[skills] enabled = true` で有効になります。
+
+```toml
+[skills]
+enabled = true
+# dir = "~/notes/ano-skills"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**保存形式。** Claude Code や Codex などと同じ Agent Skills 形式の `SKILL.md` です。frontmatter の `name`（英小文字・数字・ハイフンの64文字以内。ディレクトリ名と一致させる）と `description`（いつ使うか）、本文の Markdown からなります。手で書いたり、他のツール用に書かれたスキルを置いたりしても読めます（`name`・`description` 以外の frontmatter は無視し、同じディレクトリの補助ファイルは読みません）。
+
+```markdown
+---
+name: release-build
+description: リリースビルドを作り、スモークテストで確認する。
+---
+
+1. `cargo build --release`
+2. ...
+```
+
+**保存先。** `<dir>/<ユーザー>/<name>/SKILL.md` です。`dir` を省略すると OS 標準のアプリ用データディレクトリ（macOS は `~/Library/Application Support/ano/skills`、Linux は `$XDG_DATA_HOME/ano/skills`（既定 `~/.local/share/ano/skills`）、Windows は `%APPDATA%\ano\data\skills`）を使います。プロジェクトをまたいで使えるよう workspace の外に置き、Webhook のユーザー同士で混ざらないよう `--user`（Webhook の `user`）ごとに分けます。`ano skills` で一覧、`ano skills NAME` で内容を確認できます。
+
+**参照。** 実行の開始時に、ユーザーのスキルの名前と説明だけを instructions に一覧します（合計 16 KiB まで。溢れた分は名前を指定すれば読めます）。モデルは依頼に合うスキルがあれば `skill_read` で本文を読んでから作業します。本文を毎回送らないため、スキルが増えても要求は大きくなりません。一覧は実行（chat では起動時）に一度だけ作り、会話の途中では変えません。読み取れない `SKILL.md` は警告を出して除外します。
+
+**記録。** モデルは、検証まで終えた作業のうち、試行錯誤して見つけた手順や、従ったスキルの誤り・不足、ユーザーが上手くいったと言った手順を、最終回答の前に `skill_save` で保存します。同じ名前で保存すると置き換わるため、既存のスキルは読んでから改善版を保存します。chat では `/skill [観点]` で、この会話で上手くいった手順をスキルにするよう明示的に頼めます（保存するほどのものがなければ保存しません）。
+
+- **保存には承認が必要です。** スキルは以後のすべての実行で指示として読まれるため、`workspace_exec` と同じ[承認モード](mcp.md#承認モード)で判定します。`auto` の判定用モデルは、依頼の作業から得た再利用できる手順を許可し、秘密情報・個人情報を含むもの、承認の省略や権限の緩和・データの送信を指示するもの、文書や tool 出力に埋め込まれた指示に由来するように見えるものを拒否します。承認モードが `deny` の実行（環境の既定）では、保存についての指示を省きます。
+- `skill_read` と `skill_save` は `tool_search` を経ずに常に公開します（スキルの一覧を見たモデルがすぐ呼べるように）。`allowed_tools` を指定した環境では `skill_*` を加えてください。`skill_read` を使えない実行にはスキルの一覧も載せません。
+- スキルは手順の参考で、運用者の instructions やユーザーの依頼より優先されません。不要・誤ったスキルは `SKILL.md` をディレクトリごと削除するか、直接編集してください。

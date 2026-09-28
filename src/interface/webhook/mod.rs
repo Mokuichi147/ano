@@ -19,7 +19,9 @@ use crate::{
     },
     config::AppConfig,
     domain::plan::{RunOutcome, TaskGoal},
-    infrastructure::{chronotope::Chronotope, project::read_project_instructions},
+    infrastructure::{
+        chronotope::Chronotope, project::read_project_instructions, skills::SkillLibrary,
+    },
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -92,6 +94,7 @@ fn default_environment() -> String {
 
 struct WebhookState {
     history: Option<Arc<Chronotope>>,
+    skills: Option<Arc<SkillLibrary>>,
     config: AppConfig,
     client: Arc<dyn ResponsesApi>,
     registry: ToolRegistry,
@@ -150,8 +153,10 @@ pub async fn serve(
     }
 
     let history = Chronotope::from_settings(&config.history, &registry)?;
+    let skills = SkillLibrary::from_settings(&config.skills, &registry)?;
     let state = Arc::new(WebhookState {
         history,
+        skills,
         job_slots: Arc::new(Semaphore::new(webhook.max_concurrent_jobs)),
         mcp,
         config,
@@ -469,6 +474,14 @@ async fn execute_job(
                 .await
                 .context("project instructions task failed")??;
         profile.settings.append_project_instructions(&sources);
+    }
+    if let Some(skills) = state.skills.clone() {
+        profile = tokio::task::spawn_blocking(move || {
+            // Broken skill files are left out; they must not fail the job.
+            skills.add_to_instructions(&mut profile).map(|_| profile)
+        })
+        .await
+        .context("skills task failed")??;
     }
     // A webhook has nobody to ask: requests that would go to the user, and
     // those automatic review does not clearly allow, are denied.

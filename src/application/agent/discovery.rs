@@ -97,7 +97,9 @@ impl Agent {
             self.registry
                 .definitions(&self.policy)
                 .into_iter()
-                .filter(|definition| active.local.contains(&definition.name))
+                .filter(|definition| {
+                    definition.always_offered || active.local.contains(&definition.name)
+                })
                 .map(|definition| definition.as_response_tool()),
         );
 

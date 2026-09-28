@@ -19,7 +19,11 @@ use crate::{
         registry::ToolRegistry,
     },
     config::AppConfig,
-    domain::{plan::TaskGoal, session::SessionStatus},
+    domain::{
+        plan::TaskGoal,
+        session::SessionStatus,
+        skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
+    },
     infrastructure::memory_store::MemoryConversation,
 };
 use anyhow::Result;
@@ -36,6 +40,8 @@ const HELP: &str = "Commands:
   /goal TEXT
            set a goal and work until it is verified as reached
   /goal    show the goal;  /goal clear  clear it
+  /skill [FOCUS]
+           save what worked in this conversation as a skill for later runs
   /usage   show token usage of this conversation
   /compact compact the conversation now (summarize it to save context)
   /clear   start a new conversation (not with --session)
@@ -207,8 +213,11 @@ pub(super) async fn run(
             };
             let prompt = line.trim();
             let mut goal = None;
+            // A command that becomes the model's input instead of the line.
+            let mut model_prompt = None;
             let starts_goal = prompt.strip_prefix("/goal ").is_some_and(|text| !text.trim().is_empty() && text.trim() != "clear");
-            if prompt.starts_with('/') && !starts_goal {
+            let saves_skill = config.skills.enabled && (prompt == "/skill" || prompt.starts_with("/skill "));
+            if prompt.starts_with('/') && !starts_goal && !saves_skill {
                 // A command runs even if its raw history cannot be saved.
                 if let Err(error) = agent.record_control_input(store.as_mut(), &line).await {
                     eprintln!("warning: failed to record the command in history: {error:#}");
@@ -293,6 +302,13 @@ pub(super) async fn run(
                         },
                     }
                 }
+                command if command == "/skill" || command.starts_with("/skill ") => {
+                    if !saves_skill {
+                        eprintln!("skills are disabled; set [skills] enabled = true in the config");
+                        continue;
+                    }
+                    model_prompt = Some(skill_prompt(command["/skill".len()..].trim()));
+                }
                 command if command.starts_with('/') => {
                     eprintln!("unknown command {command}; type /help");
                     continue;
@@ -305,10 +321,12 @@ pub(super) async fn run(
                 input: if goal.is_some() {
                     Vec::new()
                 } else {
-                    vec![InputPart::Text(prompt.to_string())]
+                    vec![InputPart::Text(
+                        model_prompt.clone().unwrap_or_else(|| prompt.to_string()),
+                    )]
                 },
                 // The raw history keeps the line as typed, spaces included.
-                raw_input: (goal.is_some() || prompt != line)
+                raw_input: (goal.is_some() || model_prompt.is_some() || prompt != line)
                     .then(|| vec![InputPart::Text(line.clone())]),
                 context: context.clone(),
                 goal,
@@ -346,4 +364,15 @@ pub(super) async fn run(
     .await;
     mcp.shutdown().await;
     result
+}
+
+/// The request that `/skill` sends: turn what worked in this conversation
+/// into a skill, or say that nothing is worth keeping.
+fn skill_prompt(focus: &str) -> String {
+    let focus = if focus.is_empty() {
+        String::new()
+    } else {
+        format!(" The user wants it to cover: {focus}")
+    };
+    format!("Look back over this conversation and save the approach that worked as a skill with {SKILL_SAVE_NAME}.{focus} If a skill for the same kind of task is listed, read it with {SKILL_READ_NAME} and save the improved version under the same name instead of adding a new one. Keep what will help with similar tasks later: the steps, commands, checks, and pitfalls, not the details of this one case. If nothing in this conversation is worth saving, say so and do not save. Reply in the language the user has been using.")
 }

@@ -317,7 +317,11 @@ impl Agent {
                 None,
             ));
         }
-        if !active.local.contains(name) {
+        let always_offered = self
+            .registry
+            .definition(name)
+            .is_some_and(|definition| definition.always_offered);
+        if !always_offered && !active.local.contains(name) {
             events.push(AgentEvent::LocalToolBlocked {
                 round,
                 name: name.to_string(),

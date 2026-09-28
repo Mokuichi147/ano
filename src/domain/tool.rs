@@ -35,6 +35,10 @@ pub struct ToolDefinition {
     /// that require approval. Not sent to the model.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub requires_approval: bool,
+    /// Offer this tool in every request, without a `tool_search` first. For
+    /// small tools that the instructions ask the model to use directly.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub always_offered: bool,
 }
 
 fn default_strict() -> bool {
@@ -49,12 +53,19 @@ impl ToolDefinition {
             parameters,
             strict: true,
             requires_approval: false,
+            always_offered: false,
         }
     }
 
     /// Require approval before each call of this tool.
     pub fn with_approval(mut self) -> Self {
         self.requires_approval = true;
+        self
+    }
+
+    /// Offer this tool without a `tool_search` first.
+    pub fn always_offered(mut self) -> Self {
+        self.always_offered = true;
         self
     }
 
