@@ -170,7 +170,11 @@ allow_writes = false
 # disabled_tools = ["delete_page"]
 
 # A Streamable HTTP server that requires OAuth. Run `ano mcp login docs_oauth`
-# once; the tokens are saved under ~/.ano/oauth and refreshed automatically.
+# once; the tokens are refreshed automatically and saved in the OS data directory:
+#   macOS:   ~/Library/Application Support/ano/oauth
+#   Linux:   $XDG_DATA_HOME/ano/oauth (~/.local/share/ano/oauth)
+#   Windows: %APPDATA%\ano\data\oauth
+# Tokens saved by earlier versions under ~/.ano/oauth are moved there on first use.
 # [[mcp_servers]]
 # label = "docs_oauth"
 # transport = "streamable_http"

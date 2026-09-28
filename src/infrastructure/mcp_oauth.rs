@@ -36,24 +36,36 @@ const CALLBACK_PAGE: &str = "<!doctype html><meta charset=\"utf-8\"><title>ano</
 #[derive(Clone)]
 pub struct OAuthStore {
     directory: Option<PathBuf>,
+    /// Where earlier versions saved credentials. Files found only there are
+    /// moved to `directory` when first used, so users need not log in again.
+    legacy_directory: Option<PathBuf>,
     /// Serializes token refreshes of one credential file within this process.
     refresh_locks: Arc<StdMutex<HashMap<PathBuf, Arc<Mutex<()>>>>>,
 }
 
 impl OAuthStore {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
-        Self::with_directory(Some(directory.into()))
+        Self::with_directories(Some(directory.into()), None)
     }
 
-    /// `~/.ano/oauth`. Without a known home directory, OAuth servers cannot
-    /// be used, but other servers are unaffected.
+    /// `oauth` in the OS data directory (macOS: `~/Library/Application
+    /// Support/ano`, Linux: `$XDG_DATA_HOME/ano`, Windows: `%APPDATA%\ano\data`).
+    /// Tokens are state written by ano rather than settings edited by users,
+    /// so they stay out of the config directory, which is often shared as
+    /// dotfiles. Credentials still in `~/.ano/oauth` are moved here. Without a
+    /// known home directory, OAuth servers cannot be used, but other servers
+    /// are unaffected.
     pub fn default_location() -> Self {
-        Self::with_directory(std::env::home_dir().map(|home| home.join(".ano").join("oauth")))
+        Self::with_directories(
+            directories::ProjectDirs::from("", "", "ano").map(|dirs| dirs.data_dir().join("oauth")),
+            std::env::home_dir().map(|home| home.join(".ano").join("oauth")),
+        )
     }
 
-    fn with_directory(directory: Option<PathBuf>) -> Self {
+    fn with_directories(directory: Option<PathBuf>, legacy_directory: Option<PathBuf>) -> Self {
         Self {
             directory,
+            legacy_directory,
             refresh_locks: Default::default(),
         }
     }
@@ -67,7 +79,12 @@ impl OAuthStore {
             .context("cannot locate saved MCP OAuth credentials: the home directory is unknown")?;
         let url = server.url.as_deref().unwrap_or_default();
         let digest = hex::encode(&Sha256::digest(url.as_bytes())[..8]);
-        Ok(directory.join(format!("{}-{digest}.json", server.label)))
+        let name = format!("{}-{digest}.json", server.label);
+        let path = directory.join(&name);
+        if let Some(legacy_directory) = &self.legacy_directory {
+            migrate(&legacy_directory.join(&name), &path)?;
+        }
+        Ok(path)
     }
 
     fn credential_store(&self, server: &McpServerConfig) -> Result<FileCredentialStore> {
@@ -85,6 +102,11 @@ impl OAuthStore {
     /// Delete the saved credentials of `server`. Returns whether any existed.
     pub fn remove(&self, server: &McpServerConfig) -> Result<bool> {
         let path = self.path(server)?;
+        // A copy left behind by the migration would otherwise be moved back
+        // on the next use and undo the logout.
+        if let (Some(legacy_directory), Some(name)) = (&self.legacy_directory, path.file_name()) {
+            std::fs::remove_file(legacy_directory.join(name)).ok();
+        }
         match std::fs::remove_file(&path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
@@ -252,6 +274,35 @@ impl CredentialStore for FileCredentialStore {
     }
 }
 
+/// Move credentials saved at `legacy` by an earlier version to `path`, unless
+/// `path` already has credentials. The old directory is removed once empty.
+fn migrate(legacy: &Path, path: &Path) -> Result<()> {
+    if path
+        .try_exists()
+        .with_context(|| format!("failed to inspect {}", path.display()))?
+    {
+        return Ok(());
+    }
+    let bytes = match std::fs::read(legacy) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", legacy.display()))
+        }
+    };
+    // Copy rather than rename: the directories may be on different file
+    // systems, and the copy must be private regardless of the old mode.
+    write_private(path, &bytes)
+        .with_context(|| format!("failed to move {} to {}", legacy.display(), path.display()))?;
+    // The tokens are usable from `path` now; a leftover copy is harmless to
+    // later runs, which prefer `path`.
+    std::fs::remove_file(legacy).ok();
+    if let Some(directory) = legacy.parent() {
+        std::fs::remove_dir(directory).ok();
+    }
+    Ok(())
+}
+
 /// Save `bytes` so that only the current user can read them.
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
     let directory = path.parent().context("file has no parent directory")?;
@@ -331,6 +382,54 @@ mod tests {
 
         assert!(store.remove(&first).unwrap());
         assert!(!store.remove(&first).unwrap());
+    }
+
+    fn save_client(path: &std::path::Path, client_id: &str) {
+        let bytes = serde_json::to_vec(&StoredCredentials::new(
+            client_id.into(),
+            None,
+            vec![],
+            None,
+        ))
+        .unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    #[tokio::test]
+    async fn moves_credentials_from_the_legacy_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let legacy = directory.path().join(".ano").join("oauth");
+        let current = directory.path().join("data").join("oauth");
+        let store = OAuthStore::with_directories(Some(current.clone()), Some(legacy.clone()));
+        let docs = server("docs", "https://a.test/mcp");
+        let name = store.path(&docs).unwrap().file_name().unwrap().to_owned();
+        save_client(&legacy.join(&name), "old");
+
+        let credentials = store.credential_store(&docs).unwrap();
+        assert_eq!(credentials.path, current.join(&name));
+        assert_eq!(credentials.load().await.unwrap().unwrap().client_id, "old");
+        assert!(!legacy.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = |path: &std::path::Path| {
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+            };
+            assert_eq!(mode(&credentials.path), 0o600);
+            assert_eq!(mode(&current), 0o700);
+        }
+
+        // Credentials already in the new directory win over a stale copy.
+        save_client(&legacy.join(&name), "stale");
+        let credentials = store.credential_store(&docs).unwrap();
+        assert_eq!(credentials.load().await.unwrap().unwrap().client_id, "old");
+
+        // Logging out removes the stale copy too, so it does not come back.
+        assert!(store.remove(&docs).unwrap());
+        assert!(!legacy.join(&name).exists());
+        let credentials = store.credential_store(&docs).unwrap();
+        assert!(credentials.load().await.unwrap().is_none());
     }
 
     #[tokio::test]

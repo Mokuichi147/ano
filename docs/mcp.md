@@ -73,7 +73,11 @@ ano mcp logout annict    # 保存したトークンを削除
 ```
 
 - `ano mcp login` は server の Protected Resource Metadata から認可サーバーを見つけ、動的クライアント登録（Dynamic Client Registration）と PKCE 付きの認可コードフローを行います。認可後のリダイレクトは `127.0.0.1` の一時ポートで受け取るため、ブラウザは ano と同じマシンで開いてください。`--no-browser` を付けると URL の表示だけを行います。
-- トークンは `~/.ano/oauth/<label>-<URL のハッシュ>.json` に本人だけが読める権限で保存します。`url` を変えると別の server として扱い、再ログインが必要です。
+- トークンは OS 標準のデータディレクトリ配下の `oauth/<label>-<URL のハッシュ>.json` に本人だけが読める権限で保存します。`url` を変えると別の server として扱い、再ログインが必要です。
+  - macOS: `~/Library/Application Support/ano/oauth`
+  - Linux: `$XDG_DATA_HOME/ano/oauth`（未設定なら `~/.local/share/ano/oauth`）
+  - Windows: `%APPDATA%\ano\data\oauth`
+- 以前のバージョンが `~/.ano/oauth` に保存したトークンは、初回の利用時に新しい場所へ移動するため、再ログインは不要です。
 - 実行時は保存したアクセストークンを送り、期限切れや server に拒否された場合はリフレッシュトークンで自動更新します。更新にも失敗した場合は接続エラーになるので、`ano mcp login` をやり直してください。
 - `ano serve` でも同じ保存先を使います。サーバーを起動するユーザーで事前に `ano mcp login` を実行してください。
 - `oauth` は `transport = "streamable_http"` でだけ使え、`authorization_env` とは併用できません。Responses API 管理方式（既定の `transport`）では OpenAI 側が接続するため ano の OAuth は使えません。
