@@ -12,6 +12,10 @@ use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Upper bound on the list of loadable tools appended to one run's
+/// instructions. Tools beyond it can still be found with `tool_search`.
+const MAX_TOOL_CATALOG_BYTES: usize = 8 * 1024;
+
 /// Tools loaded by the most recent `tool_search`.
 #[derive(Default)]
 pub(super) struct ActiveTools {
@@ -134,6 +138,107 @@ impl Agent {
             }));
         }
         Ok(tools)
+    }
+
+    /// Instructions naming the tools that `tool_search` can load. Only a few
+    /// tools are offered before a search, so without this list the model
+    /// cannot tell that a capability exists and answers from memory or says
+    /// it cannot help. Names are enough to pick search words, so schemas and
+    /// descriptions stay out; the list is cut at `MAX_TOOL_CATALOG_BYTES`.
+    /// `None` when `tool_search` is disabled or nothing can be loaded.
+    pub(super) fn tool_catalog(
+        &self,
+        mcp_runtime: &McpRuntime,
+        context: &ToolContext,
+    ) -> Option<String> {
+        if self.policy.is_disabled(TOOL_SEARCH_NAME) {
+            return None;
+        }
+        let mut local = self
+            .registry
+            .definitions(&self.policy)
+            .into_iter()
+            .filter(|definition| !definition.always_offered && context.can_run(&definition.name))
+            .map(|definition| definition.name)
+            .collect::<Vec<_>>();
+        local.sort();
+
+        // Label, description, and tool names of each MCP server, in the
+        // order they are configured.
+        let mut servers: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
+        for server in self.mcp.configs() {
+            if server.transport != McpTransport::Responses {
+                continue;
+            }
+            let names = server
+                .discoverable_tools(&self.policy)
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>();
+            servers.push((server.label.clone(), server.description.clone(), names));
+        }
+        for (server, tool) in mcp_runtime.tools() {
+            let config = server.config();
+            match servers
+                .iter_mut()
+                .find(|(label, ..)| *label == config.label)
+            {
+                Some((_, _, names)) => names.push(tool.name.clone()),
+                None => servers.push((
+                    config.label.clone(),
+                    config.description.clone(),
+                    vec![tool.name.clone()],
+                )),
+            }
+        }
+        servers.retain(|(_, _, names)| !names.is_empty());
+        if local.is_empty() && servers.is_empty() {
+            return None;
+        }
+
+        let mut lines = Vec::new();
+        if !local.is_empty() {
+            lines.push(("- Local tools".to_string(), local));
+        }
+        for (label, description, names) in servers {
+            let heading = match description {
+                Some(description) => format!(
+                    "- MCP server {label} ({})",
+                    description.split_whitespace().collect::<Vec<_>>().join(" ")
+                ),
+                None => format!("- MCP server {label}"),
+            };
+            lines.push((heading, names));
+        }
+
+        let mut list = String::new();
+        let mut omitted = false;
+        'lines: for (heading, names) in lines {
+            if list.len() + heading.len() + 2 > MAX_TOOL_CATALOG_BYTES {
+                omitted = true;
+                break;
+            }
+            list.push('\n');
+            list.push_str(&heading);
+            for (index, name) in names.iter().enumerate() {
+                let separator = if index == 0 { ": " } else { ", " };
+                if list.len() + separator.len() + name.len() > MAX_TOOL_CATALOG_BYTES {
+                    omitted = true;
+                    break 'lines;
+                }
+                list.push_str(separator);
+                list.push_str(name);
+            }
+        }
+        let mut text = format!(
+            "# Tools you can load\nBesides the tools offered in this request, {TOOL_SEARCH_NAME} can load the tools listed below. Check this list before answering from memory or saying you cannot do something: when a listed tool can look up, fetch, or act on what the user asks about (for example current events, the user's accounts and devices, or files in the workspace), load it with {TOOL_SEARCH_NAME}, searching with words from its name, and use it instead of guessing. Answer directly only when no listed tool fits.\n{list}"
+        );
+        if omitted {
+            text.push_str(&format!(
+                "\n(More tools are not listed; {TOOL_SEARCH_NAME} finds them too.)"
+            ));
+        }
+        Some(text)
     }
 
     /// Tools that cannot run in `context` (see `ToolContext::can_run`) are

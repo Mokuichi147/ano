@@ -102,7 +102,7 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
     assert!(requests[0]["instructions"]
         .as_str()
         .unwrap()
-        .ends_with("Always answer in haiku."));
+        .contains("\n\nAlways answer in haiku."));
 
     // The second turn resends the whole first turn, including reasoning.
     let history = requests[1]["input"].as_array().unwrap();

@@ -325,6 +325,104 @@ fn server_description_alone_does_not_select_every_tool_on_the_server() {
     assert_eq!(search("annict"), vec!["search_works", "update_status"]);
 }
 
+#[test]
+fn the_tool_catalog_names_every_tool_that_a_search_can_load() {
+    let registry = registry_with(&[
+        ("workspace_read", "Read a file"),
+        ("send_email", "Send an email"),
+        ("workspace_exec", "Run a command"),
+    ]);
+    registry
+        .register(
+            ToolDefinition::new("skill_read", "Read a skill", json!({"type": "object"}))
+                .always_offered(),
+            |_arguments| async move { Ok(json!({})) },
+        )
+        .unwrap();
+    let server = McpServerConfig {
+        description: Some("アニメ情報を\n確認できます".into()),
+        tool_catalog: Some(vec![
+            McpToolCatalog {
+                name: "search_works".into(),
+                description: None,
+            },
+            McpToolCatalog {
+                name: "update_status".into(),
+                description: None,
+            },
+        ]),
+        ..remote_server("annict")
+    };
+    let mut agent = agent(registry, vec![server, remote_server("empty")]);
+    agent.policy = UserPolicy::new(vec!["send_email".into()], None);
+
+    let catalog = agent
+        .tool_catalog(&McpRuntime::default(), &ToolContext::default())
+        .unwrap();
+    assert!(catalog.contains("\n- Local tools: workspace_read\n"));
+    assert!(catalog.ends_with(
+        "\n- MCP server annict (アニメ情報を 確認できます): search_works, update_status"
+    ));
+    // Disabled, unrunnable, and always offered tools, and servers with
+    // nothing to load, are left out.
+    for name in ["send_email", "workspace_exec", "skill_read", "empty"] {
+        assert!(!catalog.contains(name), "{name} should not be listed");
+    }
+
+    let context = ToolContext {
+        allow_exec: true,
+        ..ToolContext::default()
+    };
+    let catalog = agent
+        .tool_catalog(&McpRuntime::default(), &context)
+        .unwrap();
+    assert!(catalog.contains("- Local tools: workspace_exec, workspace_read\n"));
+
+    agent.policy = UserPolicy::new(vec!["tool_search".into()], None);
+    assert!(agent
+        .tool_catalog(&McpRuntime::default(), &ToolContext::default())
+        .is_none());
+}
+
+#[test]
+fn the_tool_catalog_is_cut_at_its_size_limit() {
+    let names = (0..2000)
+        .map(|index| (format!("tool_{index:04}"), "A tool"))
+        .collect::<Vec<_>>();
+    let names = names
+        .iter()
+        .map(|(name, description)| (name.as_str(), *description))
+        .collect::<Vec<_>>();
+    let agent = agent(registry_with(&names), Vec::new());
+
+    let catalog = agent
+        .tool_catalog(&McpRuntime::default(), &ToolContext::default())
+        .unwrap();
+    assert!(catalog.len() < 9 * 1024);
+    assert!(catalog.contains("tool_0000, tool_0001"));
+    assert!(!catalog.contains("tool_1999"));
+    assert!(catalog.ends_with("tool_search finds them too.)"));
+}
+
+#[tokio::test]
+async fn runs_list_the_loadable_tools_in_the_instructions() {
+    let server = mock_responses(vec![text_response("done", "Done")]).await;
+    let mut agent = agent(
+        registry_with(&[("unix_time", "Return the time")]),
+        Vec::new(),
+    );
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    agent.run(request()).await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let instructions = requests[0]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("# Tools you can load"));
+    assert!(instructions.contains("- Local tools: unix_time"));
+    let tools = requests[0]["tools"].as_array().unwrap();
+    assert!(tools.iter().all(|tool| tool["name"] != "unix_time"));
+}
+
 #[tokio::test]
 async fn invalid_arguments_are_returned_to_the_model() {
     let agent = agent(registry_with(&[("echo_tool", "Echo")]), Vec::new());

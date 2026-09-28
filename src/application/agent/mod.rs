@@ -418,7 +418,7 @@ impl Agent {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
-        let base_instructions = if origin.depth > 0 {
+        let mut base_instructions = if origin.depth > 0 {
             format!("{}\n\n{SUBAGENT_INSTRUCTIONS}", self.settings.instructions)
         } else {
             self.settings.instructions.clone()
@@ -442,6 +442,10 @@ impl Agent {
             .is_some_and(|session| session.replays_history());
         let mcp_runtime =
             McpRuntime::new(self.mcp.connect(&self.policy).await?, self.policy.clone());
+        if let Some(catalog) = self.tool_catalog(&mcp_runtime, &request.context) {
+            base_instructions.push_str("\n\n");
+            base_instructions.push_str(&catalog);
+        }
         let mut local_history = (!replay
             && (self.settings.compact_threshold_bytes.is_some()
                 || self.client.requires_full_history()))
