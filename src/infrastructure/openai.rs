@@ -8,7 +8,15 @@ use futures::StreamExt;
 use reqwest::{Client, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::Value;
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiAuth {
+    #[default]
+    ApiKey,
+    Chatgpt,
+}
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
@@ -25,6 +33,9 @@ fn default_api_key_env() -> String {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ApiSettings {
+    pub auth: ApiAuth,
+    /// ChatGPT の認証情報。省略時は ~/.ano/auth/chatgpt.json。
+    pub chatgpt_auth_file: Option<PathBuf>,
     pub base_url: String,
     pub api_key_env: String,
     /// Total timeout for one Responses API request.
@@ -39,12 +50,24 @@ pub struct ApiSettings {
 impl Default for ApiSettings {
     fn default() -> Self {
         Self {
+            auth: ApiAuth::ApiKey,
+            chatgpt_auth_file: None,
             base_url: default_base_url(),
             api_key_env: default_api_key_env(),
             timeout_secs: 600,
             max_retries: 2,
             stream: true,
         }
+    }
+}
+
+/// 認証方式に対応する通信アダプターを生成する。
+pub fn create_client(settings: &ApiSettings) -> Result<Arc<dyn ResponsesApi>> {
+    match settings.auth {
+        ApiAuth::ApiKey => Ok(Arc::new(OpenAiClient::from_api_settings(settings)?)),
+        ApiAuth::Chatgpt => Ok(Arc::new(super::chatgpt::ChatGptClient::from_settings(
+            settings,
+        )?)),
     }
 }
 
@@ -66,6 +89,9 @@ impl OpenAiClient {
     }
 
     pub fn from_api_settings(settings: &ApiSettings) -> Result<Self> {
+        if settings.auth != ApiAuth::ApiKey {
+            bail!("ChatGPT 認証には infrastructure::openai::create_client を使用してください");
+        }
         let base_url =
             std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| settings.base_url.clone());
         let api_key = resolve_api_key(
@@ -207,7 +233,10 @@ async fn read_json(response: Response, endpoint: &str) -> Result<Value> {
 
 /// Read Responses API server-sent events until the terminal event and return
 /// the response it carries.
-async fn read_event_stream(response: Response, on_delta: DeltaSink<'_>) -> Result<Value> {
+pub(super) async fn read_event_stream(
+    response: Response,
+    on_delta: DeltaSink<'_>,
+) -> Result<Value> {
     let mut events = response.bytes_stream().eventsource();
     // Finished output items by index, for endpoints whose terminal event
     // leaves the output out.
@@ -298,11 +327,11 @@ impl ResponsesApi for OpenAiClient {
     }
 }
 
-fn is_retryable(status: StatusCode) -> bool {
+pub(super) fn is_retryable(status: StatusCode) -> bool {
     status == StatusCode::TOO_MANY_REQUESTS || matches!(status.as_u16(), 500 | 502 | 503 | 504)
 }
 
-fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
+pub(super) fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
     retry_after
         .unwrap_or_else(|| Duration::from_millis(500 * 2_u64.pow(attempt.min(6))))
         .min(MAX_RETRY_DELAY)

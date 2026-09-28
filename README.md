@@ -41,11 +41,12 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - テキスト・画像・音声入力（音声は文字起こしせず native `input_audio` として送信）
 - 名前付き実行環境を選べる署名付き Webhook と、実行中の進捗確認・中止・タイムアウトに対応した非同期ジョブ API
 - LM Studio などの OpenAI 互換 `/v1/responses` endpoint
+- ChatGPT サブスクリプションの OAuth 認証による Codex 接続（実験的）
 - JSON 出力とログ量の切り替え
 
 ## クイックスタート
 
-Rust 1.89 以降と、OpenAI API キーまたは[ローカル AI](#ローカル-ailm-studioollama-など)（LM Studio・Ollama など。API キー不要）が必要です。
+Rust 1.89 以降と、OpenAI API キー、[ChatGPT サブスクリプション](docs/chatgpt-subscription.md)、または[ローカル AI](#ローカル-ailm-studioollama-など)（LM Studio・Ollama など。API キー不要）が必要です。
 
 ```sh
 cargo install --path .
@@ -55,6 +56,8 @@ ano run --environment default "README とソースを読み、実装の概要を
 ```
 
 インストールせずに `cargo run -- run ...` でも実行できます。Windows（PowerShell）では `Copy-Item config.example.toml config.toml`、`$env:OPENAI_API_KEY = "sk-..."` のように読み替えてください。
+
+ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`config.toml` の `[api]` に `auth = "chatgpt"` を追加してください。`[agent].model` には契約プランで利用できる Codex モデルを指定します。認証情報は ano 専用のファイルに保存されます。設定・制約は [ChatGPT サブスクリプション](docs/chatgpt-subscription.md) を参照してください。
 
 `config.example.toml` の `default` 環境は、カレントディレクトリを読み取り専用で調べる設定です。ファイルを編集させる場合は[実行環境](#実行環境)で `allow_writes = true` の環境を用意します。
 
@@ -328,6 +331,7 @@ registry.register(
 
 | ドキュメント | 内容 |
 | --- | --- |
+| [docs/chatgpt-subscription.md](docs/chatgpt-subscription.md) | ChatGPT ログイン、利用枠による接続、認証情報の保存、対応範囲 |
 | [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント、スキル |
 | [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、tool の確認と有効化、承認、ポリシーの名前空間、検索カタログ |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |

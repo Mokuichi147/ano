@@ -411,8 +411,10 @@ impl Agent {
             .is_some_and(|session| session.replays_history());
         let mcp_runtime =
             McpRuntime::new(self.mcp.connect(&self.policy).await?, self.policy.clone());
-        let mut local_history = (!replay && self.settings.compact_threshold_bytes.is_some())
-            .then(|| user_input.as_array().cloned().unwrap_or_default());
+        let mut local_history = (!replay
+            && (self.settings.compact_threshold_bytes.is_some()
+                || self.client.requires_full_history()))
+        .then(|| user_input.as_array().cloned().unwrap_or_default());
         let mut previous_compact_size = session.as_ref().filter(|_| replay).and_then(|session| {
             session
                 .data()

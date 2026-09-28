@@ -3,6 +3,7 @@
 //! application layer.
 
 mod approval;
+mod auth;
 mod chat;
 mod history;
 mod mcp;
@@ -29,7 +30,7 @@ use crate::{
         tool::{ToolContext, DELEGATE_TASK_NAME, WEB_FETCH_NAME, WORKSPACE_EXEC_NAME},
     },
     infrastructure::{
-        chronotope::Chronotope, mcp::McpPool, openai::OpenAiClient,
+        chronotope::Chronotope, mcp::McpPool, openai::create_client,
         project::read_project_instructions, session_store::Session, skills::SkillLibrary,
         tools::register_builtin_tools,
     },
@@ -66,6 +67,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// ChatGPT サブスクリプションの認証情報を管理する。
+    Auth(auth::AuthArgs),
     /// Run one task and print the result.
     Run(RunArgs),
     /// Talk with the agent over several turns in one conversation.
@@ -288,6 +291,7 @@ pub async fn run() -> Result<()> {
     }
 
     match cli.command {
+        Command::Auth(args) => auth::run(&config.api, args).await,
         Command::Session(args) => {
             let session = Session::inspect(args.path)?;
             if args.json {
@@ -460,7 +464,7 @@ fn prepare_agent(
             eprintln!("warning: skipped skill {problem}");
         }
     }
-    let client = Arc::new(OpenAiClient::from_api_settings(&config.api)?);
+    let client = create_client(&config.api)?;
     let ask_user: Arc<dyn ApprovalHandler> = if stdin_is_terminal {
         ask_user
     } else {
@@ -698,7 +702,7 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
     if args.allow_unauthenticated {
         config.webhook.allow_unauthenticated = true;
     }
-    let client = OpenAiClient::from_api_settings(&config.api)?;
+    let client = create_client(&config.api)?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = webhook::serve(config, client, Arc::clone(&mcp), registry).await;
     // Close MCP connections after jobs have stopped, even on failure.

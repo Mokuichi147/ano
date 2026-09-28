@@ -53,6 +53,9 @@ impl AppConfig {
     /// the config file's `directory`. A stdio `command` is only expanded:
     /// bare names such as `node` are still looked up on `PATH`.
     fn resolve_paths(&mut self, directory: &Path, home: Option<&Path>) -> Result<()> {
+        if let Some(path) = &mut self.api.chatgpt_auth_file {
+            *path = resolve_path(path, directory, home).context("invalid api.chatgpt_auth_file")?;
+        }
         self.history.data_dir = resolve_path(&self.history.data_dir, directory, home)?;
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;

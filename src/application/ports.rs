@@ -60,6 +60,11 @@ pub trait ResponsesApi: Send + Sync {
     fn supports_remote_compaction(&self) -> bool {
         false
     }
+
+    /// サーバーに応答を保存しない接続先では、毎回履歴全体を送信する。
+    fn requires_full_history(&self) -> bool {
+        false
+    }
 }
 
 /// Report the messages of a completed response to `on_delta`, one delta per
@@ -118,6 +123,10 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
 
     fn supports_remote_compaction(&self) -> bool {
         (**self).supports_remote_compaction()
+    }
+
+    fn requires_full_history(&self) -> bool {
+        (**self).requires_full_history()
     }
 }
 

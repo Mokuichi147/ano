@@ -53,7 +53,7 @@ pub use domain::{
 pub use infrastructure::{
     chronotope::{Chronotope, HistorySettings},
     mcp::McpPool,
-    openai::{ApiSettings, OpenAiClient},
+    openai::{create_client, ApiAuth, ApiSettings, OpenAiClient},
     session_store::Session,
     tools::register_builtin_tools,
 };
