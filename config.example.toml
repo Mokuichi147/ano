@@ -2,8 +2,10 @@
 # 認証方式: "api_key"（既定）または "chatgpt"。
 # ChatGPT を使う場合は先に `ano auth login` を実行してください。
 # auth = "chatgpt"
-# 認証情報の保存先。省略時は ~/.ano/auth/chatgpt.json。
-# chatgpt_auth_file = "~/.ano/auth/chatgpt.json"
+# 認証情報の保存先。省略時は OS 標準のデータディレクトリの auth/chatgpt.json
+# （macOS は ~/Library/Application Support/ano、Linux は ~/.local/share/ano、
+# Windows は %APPDATA%\ano\data）。以前の ~/.ano/auth/chatgpt.json は初回に移します。
+# chatgpt_auth_file = "~/secrets/ano-chatgpt.json"
 # ChatGPT 接続では base_url の変更は不可。API キーは使用しません。
 # OpenAI Responses API endpoint.
 base_url = "https://api.openai.com/v1"

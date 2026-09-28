@@ -34,7 +34,7 @@ fn default_api_key_env() -> String {
 #[serde(default, deny_unknown_fields)]
 pub struct ApiSettings {
     pub auth: ApiAuth,
-    /// ChatGPT の認証情報。省略時は ~/.ano/auth/chatgpt.json。
+    /// ChatGPT の認証情報。省略時は OS のデータディレクトリの auth/chatgpt.json。
     pub chatgpt_auth_file: Option<PathBuf>,
     pub base_url: String,
     pub api_key_env: String,

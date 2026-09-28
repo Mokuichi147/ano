@@ -197,3 +197,42 @@ fn malformed_credentials_do_not_leak_values() {
     assert!(!error.contains("secret"));
     assert!(!error.contains("private-data"));
 }
+
+#[tokio::test]
+async fn moves_credentials_from_the_legacy_location_and_logout_removes_both() {
+    let directory = tempfile::tempdir().unwrap();
+    let legacy = directory.path().join(".ano/auth/chatgpt.json");
+    let current = directory.path().join("data/ano/auth/chatgpt.json");
+    let save_legacy = |access_token: &str| {
+        let mut saved = credentials(u64::MAX);
+        saved.access_token = access_token.into();
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, serde_json::to_vec(&saved).unwrap()).unwrap();
+    };
+    save_legacy("old-access");
+    std::fs::write(directory.path().join(".ano/auth/chatgpt.json.lock"), "").unwrap();
+
+    let auth = ChatGptAuth::with_paths(current.clone(), Some(legacy.clone())).unwrap();
+    assert_eq!(auth.load().unwrap().unwrap().access_token, "old-access");
+    assert!(current.exists());
+    // 空になった `~/.ano/auth` と `~/.ano` も残さない。
+    assert!(!directory.path().join(".ano").exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&current), 0o600);
+        assert_eq!(mode(current.parent().unwrap()), 0o700);
+    }
+
+    // 新しい保存先にある認証情報を、古いコピーで上書きしない。
+    save_legacy("stale-access");
+    let auth = ChatGptAuth::with_paths(current.clone(), Some(legacy.clone())).unwrap();
+    assert_eq!(auth.load().unwrap().unwrap().access_token, "old-access");
+
+    // ログアウトで古いコピーも消え、次回に戻ってこない。
+    assert!(auth.logout().await.unwrap());
+    assert!(!legacy.exists());
+    let auth = ChatGptAuth::with_paths(current, Some(legacy)).unwrap();
+    assert!(!auth.status().unwrap().logged_in);
+}

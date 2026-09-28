@@ -40,12 +40,22 @@ ano --config ./my-config.toml auth status --json
 
 ## 認証情報
 
-既定の保存先は `~/.ano/auth/chatgpt.json` です。必要なら `[api]` の `chatgpt_auth_file` で変更できます。相対パスは設定ファイルがあるディレクトリを基準に解決し、先頭の `~` はホームディレクトリへ展開します。
+既定の保存先は OS 標準のアプリ用データディレクトリの `auth/chatgpt.json` です。
+
+| OS | 既定の保存先 |
+| --- | --- |
+| macOS | `~/Library/Application Support/ano/auth/chatgpt.json` |
+| Linux | `$XDG_DATA_HOME/ano/auth/chatgpt.json`（既定 `~/.local/share/ano/auth/chatgpt.json`） |
+| Windows | `%APPDATA%\ano\data\auth\chatgpt.json` |
+
+以前の版の保存先 `~/.ano/auth/chatgpt.json` にだけ認証情報がある場合は、初回の利用時に新しい保存先へ移し、古いファイルを削除します（再ログインは不要です）。`ano auth logout` は古い保存先に残ったコピーも削除します。`chatgpt_auth_file` を指定した場合は移行しません。
+
+必要なら `[api]` の `chatgpt_auth_file` で変更できます。相対パスは設定ファイルがあるディレクトリを基準に解決し、先頭の `~` はホームディレクトリへ展開します。
 
 ```toml
 [api]
 auth = "chatgpt"
-chatgpt_auth_file = "~/.ano/auth/work-chatgpt.json"
+chatgpt_auth_file = "~/secrets/work-chatgpt.json"
 ```
 
 - アクセストークンと更新用トークンを保存し、有効期限直前に自動更新します。401 応答の場合も1回だけ更新して再送します。

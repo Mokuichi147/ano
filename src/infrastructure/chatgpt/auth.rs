@@ -22,6 +22,8 @@ const REFRESH_MARGIN: u64 = 60;
 #[derive(Clone)]
 pub struct ChatGptAuth {
     path: PathBuf,
+    /// 以前の版の既定の保存先。ログアウト時に残ったコピーも消す。
+    legacy_path: Option<PathBuf>,
     http: Client,
     issuer: String,
 }
@@ -49,22 +51,35 @@ impl ChatGptAuth {
         auth
     }
 
+    /// `path` を省略すると OS のデータディレクトリ（macOS:
+    /// `~/Library/Application Support/ano`、Linux: `$XDG_DATA_HOME/ano`、
+    /// Windows: `%APPDATA%\ano\data`）の `auth/chatgpt.json` を使う。
+    /// 以前の既定 `~/.ano/auth/chatgpt.json` にだけ認証情報があれば移す。
     pub fn new(path: Option<&Path>) -> Result<Self> {
-        let path = match path {
-            Some(path) => path.to_path_buf(),
-            None => std::env::home_dir()
-                .context(
-                    "ホームディレクトリを取得できません。api.chatgpt_auth_file を指定してください",
-                )?
-                .join(".ano/auth/chatgpt.json"),
-        };
+        match path {
+            Some(path) => Self::with_paths(path.to_path_buf(), None),
+            None => Self::with_paths(
+                directories::ProjectDirs::from("", "", "ano")
+                    .context("OS のデータディレクトリを取得できません。api.chatgpt_auth_file を指定してください")?
+                    .data_dir()
+                    .join("auth/chatgpt.json"),
+                std::env::home_dir().map(|home| home.join(".ano/auth/chatgpt.json")),
+            ),
+        }
+    }
+
+    fn with_paths(path: PathBuf, legacy_path: Option<PathBuf>) -> Result<Self> {
         let path = if path.is_absolute() {
             path
         } else {
             std::env::current_dir()?.join(path)
         };
+        if let Some(legacy_path) = &legacy_path {
+            migrate(legacy_path, &path)?;
+        }
         Ok(Self {
             path,
+            legacy_path,
             http: Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(10))
@@ -84,6 +99,10 @@ impl ChatGptAuth {
 
     pub async fn logout(&self) -> Result<bool> {
         let _lock = self.lock().await?;
+        // 移行で残ったコピーがあると、次回の起動で戻ってログアウトが無効になる。
+        if let Some(legacy_path) = &self.legacy_path {
+            remove_legacy(legacy_path);
+        }
         match std::fs::remove_file(&self.path) {
             Ok(()) => Ok(true),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
@@ -233,29 +252,12 @@ impl ChatGptAuth {
     }
 
     fn save(&self, credentials: &Credentials) -> Result<()> {
-        #[cfg(unix)]
-        let permissions = {
-            use std::os::unix::fs::PermissionsExt;
-            Some(std::fs::Permissions::from_mode(0o600))
-        };
-        #[cfg(not(unix))]
-        let permissions = None;
-        atomic_write(&self.path, &serde_json::to_vec(credentials)?, permissions)
+        write_private(&self.path, &serde_json::to_vec(credentials)?)
             .context("ChatGPT の認証情報を保存できません")
     }
 
     async fn lock(&self) -> Result<File> {
-        let parent = self.path.parent().context("認証情報の保存先が不正です")?;
-        let mut directories = std::fs::DirBuilder::new();
-        directories.recursive(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::DirBuilderExt;
-            directories.mode(0o700);
-        }
-        directories
-            .create(parent)
-            .context("認証情報の保存先を作成できません")?;
+        create_private_parent(&self.path)?;
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -283,6 +285,68 @@ impl ChatGptAuth {
         })
         .await
         .context("別のプロセスが ChatGPT 認証情報を更新中です。しばらくして再実行してください")?
+    }
+}
+
+/// 所有者だけが読み書きできるファイルとして原子的に保存する。
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    create_private_parent(path)?;
+    #[cfg(unix)]
+    let permissions = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(std::fs::Permissions::from_mode(0o600))
+    };
+    #[cfg(not(unix))]
+    let permissions = None;
+    atomic_write(path, bytes, permissions)
+}
+
+/// 保存先のディレクトリを、新しく作る場合は所有者専用で作る。
+fn create_private_parent(path: &Path) -> Result<()> {
+    let parent = path.parent().context("認証情報の保存先が不正です")?;
+    let mut directories = std::fs::DirBuilder::new();
+    directories.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directories.mode(0o700);
+    }
+    directories
+        .create(parent)
+        .context("認証情報の保存先を作成できません")
+}
+
+/// 以前の版が `legacy` に保存した認証情報を、`path` にまだなければ移す。
+fn migrate(legacy: &Path, path: &Path) -> Result<()> {
+    if path
+        .try_exists()
+        .context("ChatGPT の認証情報の保存先を確認できません")?
+    {
+        return Ok(());
+    }
+    let bytes = match std::fs::read(legacy) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("以前の ChatGPT の認証情報を読み込めません"),
+    };
+    // ファイルシステムをまたいでも移せるよう、rename ではなく書き直す。
+    // 旧ファイルの権限にかかわらず、新しいファイルは所有者専用にする。
+    write_private(path, &bytes).context("ChatGPT の認証情報を新しい保存先へ移せません")?;
+    remove_legacy(legacy);
+    Ok(())
+}
+
+/// 以前の保存先の認証情報とロックファイルを消し、空になったディレクトリも消す。
+fn remove_legacy(legacy: &Path) {
+    std::fs::remove_file(legacy).ok();
+    let mut lock_name = legacy.as_os_str().to_os_string();
+    lock_name.push(".lock");
+    std::fs::remove_file(PathBuf::from(lock_name)).ok();
+    // `~/.ano/auth` と、ほかに何も残っていなければ `~/.ano` も消す。
+    for directory in legacy.ancestors().skip(1).take(2) {
+        if std::fs::remove_dir(directory).is_err() {
+            break;
+        }
     }
 }
 
