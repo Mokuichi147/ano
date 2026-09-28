@@ -1,0 +1,447 @@
+//! `ano provider`: add, change, and remove providers in the config file, and
+//! enable or disable them. Their models are managed by `ano model`.
+
+use crate::{
+    config::{remove_provider, update_provider, AppConfig, SettingValue, DEFAULT_PROVIDER},
+    infrastructure::openai::{create_client, ApiAuth, ApiSettings},
+};
+use anyhow::{bail, Result};
+use clap::{Args, Subcommand, ValueEnum};
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Args)]
+pub(super) struct ProviderArgs {
+    #[command(subcommand)]
+    command: ProviderCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum ProviderCommand {
+    /// List the providers with their endpoints, models, and fallbacks,
+    /// marking the enabled ones.
+    List,
+    /// Add a provider to the config file.
+    Add {
+        name: String,
+        #[command(flatten)]
+        options: ProviderOptions,
+    },
+    /// Change the settings of a provider. `default` changes [api], and its
+    /// model is [agent].model.
+    Set {
+        name: String,
+        #[command(flatten)]
+        options: ProviderOptions,
+        /// Remove a setting, returning it to its default.
+        #[arg(long, value_enum, value_name = "FIELD")]
+        unset: Vec<Field>,
+    },
+    /// Remove a provider from the config file.
+    Remove { name: String },
+    /// Enable a provider in the config file.
+    Enable { name: String },
+    /// Disable a provider in the config file, keeping its settings.
+    Disable { name: String },
+}
+
+#[derive(Debug, Default, Args)]
+struct ProviderOptions {
+    /// Responses API endpoint, such as http://127.0.0.1:1234/v1.
+    #[arg(long, value_name = "URL")]
+    base_url: Option<String>,
+    #[arg(long, value_enum)]
+    auth: Option<AuthArg>,
+    /// Environment variable that holds the API key.
+    #[arg(long, value_name = "ENV")]
+    api_key_env: Option<String>,
+    /// Where the ChatGPT login is saved, for `--auth chatgpt`.
+    #[arg(long, value_name = "PATH")]
+    chatgpt_auth_file: Option<PathBuf>,
+    /// Model to use when switching to this provider.
+    #[arg(long)]
+    model: Option<String>,
+    /// Reviewer model for `approval_mode = "auto"` on this provider.
+    #[arg(long, value_name = "MODEL")]
+    approval_model: Option<String>,
+    /// Providers to try in order while this one is unavailable. Replaces the
+    /// current list; separate names with commas or repeat the option.
+    #[arg(long, value_name = "PROVIDER", value_delimiter = ',')]
+    fallback: Vec<String>,
+    #[arg(long, value_name = "SECONDS")]
+    timeout_secs: Option<u64>,
+    #[arg(long, value_name = "N")]
+    max_retries: Option<u32>,
+    #[arg(long, value_name = "BOOL")]
+    stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum AuthArg {
+    ApiKey,
+    Chatgpt,
+}
+
+/// A setting that `--unset` removes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Field {
+    BaseUrl,
+    Auth,
+    ApiKeyEnv,
+    ChatgptAuthFile,
+    Model,
+    ApprovalModel,
+    Fallback,
+    TimeoutSecs,
+    MaxRetries,
+    Stream,
+    AllowedModels,
+    DisabledModels,
+}
+
+impl Field {
+    fn key(self) -> &'static str {
+        match self {
+            Field::BaseUrl => "base_url",
+            Field::Auth => "auth",
+            Field::ApiKeyEnv => "api_key_env",
+            Field::ChatgptAuthFile => "chatgpt_auth_file",
+            Field::Model => "model",
+            Field::ApprovalModel => "approval_model",
+            Field::Fallback => "fallback",
+            Field::TimeoutSecs => "timeout_secs",
+            Field::MaxRetries => "max_retries",
+            Field::Stream => "stream",
+            Field::AllowedModels => "allowed_models",
+            Field::DisabledModels => "disabled_models",
+        }
+    }
+}
+
+impl ProviderOptions {
+    /// The keys to write, in config file order.
+    fn changes(&self) -> Result<Vec<(&'static str, Option<SettingValue>)>> {
+        let text = |value: &Option<String>| value.clone().map(SettingValue::Text);
+        let mut changes = Vec::new();
+        let mut push = |key: &'static str, value: Option<SettingValue>| {
+            if let Some(value) = value {
+                changes.push((key, Some(value)));
+            }
+        };
+        push(
+            "auth",
+            self.auth.map(|auth| {
+                SettingValue::Text(
+                    match auth {
+                        AuthArg::ApiKey => "api_key",
+                        AuthArg::Chatgpt => "chatgpt",
+                    }
+                    .into(),
+                )
+            }),
+        );
+        push("base_url", text(&self.base_url));
+        push("api_key_env", text(&self.api_key_env));
+        push(
+            "chatgpt_auth_file",
+            // Relative paths in the config resolve from its directory, so
+            // save the path the user meant from here.
+            match &self.chatgpt_auth_file {
+                Some(path) => Some(SettingValue::Text(
+                    std::path::absolute(path)?.to_string_lossy().into_owned(),
+                )),
+                None => None,
+            },
+        );
+        push("model", text(&self.model));
+        push("approval_model", text(&self.approval_model));
+        push(
+            "fallback",
+            (!self.fallback.is_empty()).then(|| SettingValue::List(self.fallback.clone())),
+        );
+        push(
+            "timeout_secs",
+            self.timeout_secs
+                .map(|value| SettingValue::Integer(value.try_into().unwrap_or(i64::MAX))),
+        );
+        push(
+            "max_retries",
+            self.max_retries
+                .map(|value| SettingValue::Integer(value.into())),
+        );
+        push("stream", self.stream.map(SettingValue::Bool));
+        Ok(changes)
+    }
+}
+
+pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ProviderArgs) -> Result<()> {
+    match args.command {
+        ProviderCommand::List => {
+            println!("{}", format_providers(config));
+            Ok(())
+        }
+        ProviderCommand::Add { name, options } => {
+            update_provider(config_path, &name, true, &options.changes()?)?;
+            println!("Added provider '{name}' to {}.", config_path.display());
+            report_models(config_path, &name).await;
+            Ok(())
+        }
+        ProviderCommand::Set {
+            name,
+            options,
+            unset,
+        } => {
+            let mut changes = options.changes()?;
+            if let Some(field) = unset
+                .iter()
+                .find(|field| changes.iter().any(|(key, _)| *key == field.key()))
+            {
+                bail!("--unset {} conflicts with a new value for it", field.key());
+            }
+            changes.extend(unset.iter().map(|field| (field.key(), None)));
+            if changes.is_empty() {
+                bail!("nothing to change; pass settings such as --base-url or --model, or --unset FIELD");
+            }
+            update_provider(config_path, &name, false, &changes)?;
+            println!("Updated provider '{name}' in {}.", config_path.display());
+            Ok(())
+        }
+        ProviderCommand::Remove { name } => {
+            if name == DEFAULT_PROVIDER {
+                bail!("the '{DEFAULT_PROVIDER}' provider is [api] and cannot be removed");
+            }
+            remove_provider(config_path, &name)?;
+            println!("Removed provider '{name}' from {}.", config_path.display());
+            Ok(())
+        }
+        ProviderCommand::Enable { name } => toggle(config, config_path, &name, true),
+        ProviderCommand::Disable { name } => toggle(config, config_path, &name, false),
+    }
+}
+
+fn toggle(config: &AppConfig, config_path: &Path, name: &str, enabled: bool) -> Result<()> {
+    config.provider_settings(name)?;
+    if name == DEFAULT_PROVIDER {
+        if enabled {
+            println!("The '{DEFAULT_PROVIDER}' provider is always enabled.");
+            return Ok(());
+        }
+        bail!("the '{DEFAULT_PROVIDER}' provider is [api] and cannot be disabled; disable its models with `ano model disable` instead");
+    }
+    if config.provider_enabled(name) == enabled {
+        let state = if enabled { "enabled" } else { "disabled" };
+        println!("Provider '{name}' is already {state}.");
+        return Ok(());
+    }
+    // Enabled is the default, so enabling removes the key.
+    let value = (!enabled).then_some(SettingValue::Bool(false));
+    update_provider(config_path, name, false, &[("enabled", value)])?;
+    println!(
+        "{} provider '{name}'.\nSaved to {}.",
+        if enabled { "Enabled" } else { "Disabled" },
+        config_path.display()
+    );
+    Ok(())
+}
+
+pub(super) async fn list_models(settings: &ApiSettings) -> Result<Vec<String>> {
+    create_client(settings)?.list_models().await
+}
+
+/// After adding a provider, show whether it answers. Failing to connect does
+/// not undo the addition: the server may simply not be running yet.
+async fn report_models(config_path: &Path, name: &str) {
+    let result = async {
+        let config = AppConfig::load(config_path)?;
+        let settings = config.provider_settings(name)?;
+        anyhow::Ok((
+            list_models(&settings).await?,
+            config.provider_model(name).map(str::to_string),
+        ))
+    }
+    .await;
+    match result {
+        Ok((models, model)) => {
+            println!(
+                "The provider offers {} models; see them with `ano model list --provider {name}`.",
+                models.len()
+            );
+            if let Some(model) = model.filter(|model| !models.contains(model)) {
+                eprintln!("warning: the provider does not list the model '{model}'");
+            }
+        }
+        Err(error) => eprintln!("warning: could not list the models of '{name}': {error:#}"),
+    }
+}
+
+fn endpoint(settings: &ApiSettings) -> String {
+    match settings.auth {
+        ApiAuth::Chatgpt => "ChatGPT subscription".into(),
+        ApiAuth::ApiKey => settings.effective_base_url(),
+    }
+}
+
+pub(super) fn provider_heading(name: &str, settings: &ApiSettings) -> String {
+    format!("{name} ({})", endpoint(settings))
+}
+
+fn format_providers(config: &AppConfig) -> String {
+    let names: Vec<&str> = config.provider_names().collect();
+    let width = names.iter().map(|name| name.len()).max().unwrap_or(0);
+    let mut lines = Vec::new();
+    for name in names {
+        let Ok(settings) = config.provider_settings(name) else {
+            continue;
+        };
+        let mark = if config.provider_enabled(name) {
+            "[x]"
+        } else {
+            "[ ]"
+        };
+        let mut line = format!("{mark} {name:width$}  {}", endpoint(&settings));
+        if let Some(model) = config.provider_model(name) {
+            line.push_str(&format!("  model {model}"));
+        }
+        lines.push(line);
+        if let Some(allowed) = &settings.allowed_models {
+            lines.push(format!("    allowed models: {}", allowed.join(", ")));
+        }
+        if !settings.disabled_models.is_empty() {
+            lines.push(format!(
+                "    disabled models: {}",
+                settings.disabled_models.join(", ")
+            ));
+        }
+        if !settings.fallback.is_empty() {
+            lines.push(format!("    fallback: {}", settings.fallback.join(" -> ")));
+        }
+    }
+    lines.join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{model, provider, Cli, Command};
+    use crate::config::AppConfig;
+    use axum::{routing::get, Json, Router};
+    use clap::Parser;
+    use serde_json::json;
+    use std::path::Path;
+
+    /// Run `ano --config PATH ARGUMENTS...` and load the config it leaves.
+    async fn ano(path: &Path, arguments: &[&str]) -> anyhow::Result<AppConfig> {
+        let mut all = vec!["ano", "--config", path.to_str().unwrap()];
+        all.extend(arguments);
+        let config = AppConfig::load_or_default(path)?;
+        match Cli::try_parse_from(all)?.command {
+            Command::Provider(args) => provider::run(&config, path, args).await?,
+            Command::Model(args) => model::run(&config, path, args).await?,
+            _ => unreachable!(),
+        }
+        AppConfig::load(path)
+    }
+
+    async fn provider(path: &Path, command: &[&str]) -> anyhow::Result<AppConfig> {
+        ano(path, &[&["provider"], command].concat()).await
+    }
+
+    async fn model(path: &Path, command: &[&str]) -> anyhow::Result<AppConfig> {
+        ano(path, &[&["model"], command].concat()).await
+    }
+
+    #[tokio::test]
+    async fn providers_and_their_models_are_managed_from_the_command_line() {
+        let app = Router::new().route(
+            "/v1/models",
+            get(|| async { Json(json!({"data":[{"id":"qwen/qwen3"}, {"id":"qwen/qwen3-4b"}]})) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+
+        let config = provider(
+            &path,
+            &[
+                "add",
+                "lan",
+                "--base-url",
+                &url,
+                "--model",
+                "qwen/qwen3",
+                "--fallback",
+                "default",
+            ],
+        )
+        .await
+        .unwrap();
+        assert_eq!(config.provider_model("lan"), Some("qwen/qwen3"));
+        assert_eq!(config.providers["lan"].fallback, ["default"]);
+        assert!(provider(&path, &["add", "lan"]).await.is_err());
+
+        // Model names are checked against the provider's list.
+        assert!(model(&path, &["disable", "missing", "--provider", "lan"])
+            .await
+            .is_err());
+        let config = model(&path, &["disable", "qwen/qwen3-4b", "--provider", "lan"])
+            .await
+            .unwrap();
+        let models = config.provider_settings("lan").unwrap().models();
+        assert!(!models.is_enabled("qwen/qwen3-4b"));
+        assert!(models.is_enabled("qwen/qwen3"));
+        let config = model(&path, &["enable", "qwen/qwen3-4b", "--provider", "lan"])
+            .await
+            .unwrap();
+        assert!(config.providers["lan"].disabled_models.is_empty());
+        let config = model(
+            &path,
+            &["disable", "other/*", "--provider", "lan", "--no-verify"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(config.providers["lan"].disabled_models, ["other/*"]);
+        // Without --provider, the models are those of [api].
+        let config = model(&path, &["disable", "gpt-old*"]).await.unwrap();
+        assert_eq!(config.api.disabled_models, ["gpt-old*"]);
+        assert!(model(&path, &["disable"]).await.is_err());
+        // A provider is enabled or disabled as a whole.
+        assert!(provider(&path, &["disable", "lan", "qwen/qwen3"])
+            .await
+            .is_err());
+
+        let config = provider(&path, &["disable", "lan"]).await.unwrap();
+        assert!(!config.provider_enabled("lan"));
+        assert!(config
+            .select_model(&[crate::config::ModelRequest {
+                provider: Some("lan".into()),
+                model: None,
+            }])
+            .is_err());
+        let config = provider(&path, &["enable", "lan"]).await.unwrap();
+        assert!(config.provider_enabled("lan"));
+        assert!(provider(&path, &["disable", "default"]).await.is_err());
+
+        let config = provider(
+            &path,
+            &["set", "lan", "--timeout-secs", "5", "--unset", "fallback"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(config.provider_settings("lan").unwrap().timeout_secs, 5);
+        assert!(config.providers["lan"].fallback.is_empty());
+        assert!(provider(&path, &["set", "lan"]).await.is_err());
+        assert!(
+            provider(&path, &["set", "lan", "--model", "x", "--unset", "model"])
+                .await
+                .is_err()
+        );
+        let config = provider(&path, &["set", "default", "--model", "gpt-x"])
+            .await
+            .unwrap();
+        assert_eq!(config.agent.model, "gpt-x");
+
+        let config = provider(&path, &["remove", "lan"]).await.unwrap();
+        assert!(config.providers.is_empty());
+        assert!(provider(&path, &["remove", "default"]).await.is_err());
+    }
+}

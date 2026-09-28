@@ -68,15 +68,27 @@ impl ExecutionProfile {
         client: Arc<dyn ResponsesApi>,
         ask_user: Arc<dyn ApprovalHandler>,
     ) -> Arc<dyn ApprovalHandler> {
-        match self.approval_mode {
-            ApprovalMode::Allow => Arc::new(AlwaysApprove),
-            ApprovalMode::Deny => Arc::new(DenyApproval),
-            ApprovalMode::Ask => ask_user,
-            ApprovalMode::Auto => Arc::new(AutoApproval::new(
-                client,
-                self.settings.reviewer_model(),
-                ask_user,
-            )),
-        }
+        approval_handler(
+            self.approval_mode,
+            client,
+            self.settings.reviewer_model(),
+            ask_user,
+        )
+    }
+}
+
+/// The approval handler for `mode`. `auto` reviews with `reviewer` on
+/// `client` and passes uncertain calls to `ask_user`.
+pub fn approval_handler(
+    mode: ApprovalMode,
+    client: Arc<dyn ResponsesApi>,
+    reviewer: &str,
+    ask_user: Arc<dyn ApprovalHandler>,
+) -> Arc<dyn ApprovalHandler> {
+    match mode {
+        ApprovalMode::Allow => Arc::new(AlwaysApprove),
+        ApprovalMode::Deny => Arc::new(DenyApproval),
+        ApprovalMode::Ask => ask_user,
+        ApprovalMode::Auto => Arc::new(AutoApproval::new(client, reviewer, ask_user)),
     }
 }

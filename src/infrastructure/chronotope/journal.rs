@@ -6,7 +6,7 @@ use crate::{
     domain::{
         compaction::CompactionRecord,
         plan::TaskPlan,
-        session::{SessionData, SessionStatus},
+        session::{ModelChoice, SessionData, SessionStatus},
         usage::UsageSummary,
     },
     infrastructure::fs::atomic_write,
@@ -53,7 +53,8 @@ impl<'a> RecordedConversation<'a> {
         }
         if manifest_path.exists() {
             let stored: Value = serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
-            if stored != manifest {
+            // 会話の途中でモデルの接続先を切り替えられるため、接続先は照合しない。
+            if without_endpoint(stored) != without_endpoint(manifest.clone()) {
                 bail!("原文履歴は別のユーザー・環境に属しています");
             }
         } else {
@@ -410,6 +411,23 @@ impl ConversationStore for RecordedConversation<'_> {
         self.inner.fail(error)?;
         self.clear_active()
     }
+    fn switch_model(&mut self, choice: &ModelChoice, endpoint: &str) -> Result<()> {
+        self.inner.switch_model(choice, endpoint)?;
+        self.notice(
+            &format!(
+                "モデルを {}（接続先 {}）に切り替えました",
+                choice.model, choice.provider
+            ),
+            "ok",
+        )
+    }
+}
+
+fn without_endpoint(mut manifest: Value) -> Value {
+    if let Some(binding) = manifest["binding"].as_object_mut() {
+        binding.remove("endpoint");
+    }
+    manifest
 }
 
 impl Drop for RecordedConversation<'_> {

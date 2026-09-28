@@ -11,6 +11,7 @@ pub mod environment;
 pub mod mcp;
 pub mod plan;
 pub mod policy;
+pub mod provider;
 pub mod session;
 pub mod skill;
 pub mod tool;

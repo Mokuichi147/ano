@@ -150,6 +150,36 @@ impl Agent {
         }
     }
 
+    /// 以後の実行を別の接続先・モデルで行う。`approval_handler` は
+    /// `client` で審査するものに作り直して渡す。会話の履歴は
+    /// [`ConversationStore::switch_model`] で別途移す。
+    pub fn replace_model(
+        &mut self,
+        client: Arc<dyn ResponsesApi>,
+        model: String,
+        approval_model: Option<String>,
+        approval_handler: Arc<dyn ApprovalHandler>,
+    ) {
+        self.client = client;
+        self.settings.model = model;
+        self.settings.approval_model = approval_model;
+        self.approval_handler = approval_handler;
+    }
+
+    /// The endpoint of the current client, as recorded in session bindings.
+    pub fn endpoint(&self) -> &str {
+        self.client.base_url()
+    }
+
+    pub fn model(&self) -> &str {
+        &self.settings.model
+    }
+
+    /// The models the current endpoint offers.
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        self.client.list_models().await
+    }
+
     pub fn with_event_listener(mut self, listener: EventListener) -> Self {
         self.event_listener = Some(listener);
         self

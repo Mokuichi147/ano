@@ -5,7 +5,7 @@ use crate::{
     domain::{
         compaction::CompactionRecord,
         plan::TaskPlan,
-        session::{SessionBinding, SessionData},
+        session::{ModelChoice, SessionBinding, SessionData},
         usage::UsageSummary,
     },
 };
@@ -99,5 +99,9 @@ impl ConversationStore for MemoryConversation {
 
     fn fail(&mut self, error: &str) -> Result<()> {
         self.data.fail(error)
+    }
+
+    fn switch_model(&mut self, choice: &ModelChoice, endpoint: &str) -> Result<()> {
+        self.data.switch_model(choice, endpoint)
     }
 }

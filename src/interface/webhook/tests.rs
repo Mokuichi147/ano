@@ -56,6 +56,7 @@ fn state() -> WebhookState {
         history: None,
         config,
         client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:1234/v1")),
+        providers: HashMap::new(),
         registry: ToolRegistry::new(),
         mcp: Arc::new(McpPool::new(Vec::new())),
         jobs: RwLock::new(HashMap::new()),
@@ -627,4 +628,36 @@ async fn goals_are_validated_before_a_job_is_accepted() {
         .await;
         assert_eq!(response.status(), expected, "{goal}");
     }
+}
+
+#[tokio::test]
+async fn environments_run_on_their_own_provider_and_model() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&seen);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(payload): Json<Value>| {
+            let recorded = Arc::clone(&recorded);
+            async move {
+                recorded.lock().unwrap().push(payload["model"].clone());
+                Json(json!({"id":"r", "status":"completed", "output":[
+                    {"type":"message", "content":[{"type":"output_text", "text":"done"}]}]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = OpenAiClient::new("", format!("http://{}/v1", listener.local_addr().unwrap()));
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let mut state = state();
+    state.config = AppConfig::parse(
+        "[providers.local]\nbase_url = 'http://127.0.0.1:9/v1'\nmodel = 'qwen'\n[environments.default]\nprovider = 'local'",
+    )
+    .unwrap();
+    // The [api] client points at a closed port, so only the provider answers.
+    state.providers.insert("local".into(), Arc::new(local));
+    let state = Arc::new(state);
+    let id = enqueue(&state, "hello").await;
+    wait_for_job(&state, &id, JobState::Completed).await;
+    assert_eq!(*seen.lock().unwrap(), vec![json!("qwen")]);
+    server.abort();
 }

@@ -13,6 +13,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(default, deny_unknown_fields)]
 pub struct EnvironmentConfig {
     pub workspace: Option<PathBuf>,
+    /// `[providers]` の接続先名。`default` は `[api]`。省略時は `[api]`。
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub instructions: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
@@ -54,6 +56,13 @@ impl EnvironmentConfig {
             .is_some_and(|model| model.trim().is_empty())
         {
             bail!("model must not be empty");
+        }
+        if self
+            .provider
+            .as_ref()
+            .is_some_and(|provider| provider.trim().is_empty())
+        {
+            bail!("provider must not be empty");
         }
         Ok(())
     }

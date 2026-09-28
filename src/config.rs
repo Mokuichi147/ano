@@ -5,23 +5,31 @@
 
 use crate::{
     application::{profile::ExecutionProfile, settings::AgentSettings},
+    domain::session::ModelChoice,
     domain::{environment::EnvironmentConfig, mcp::McpServerConfig, policy::UserPolicy},
-    infrastructure::{chronotope::HistorySettings, openai::ApiSettings, skills::SkillSettings},
+    infrastructure::{
+        chronotope::HistorySettings,
+        openai::{ApiSettings, ProviderSettings},
+        skills::SkillSettings,
+    },
     interface::webhook::WebhookSettings,
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     io::Write,
     path::{Component, Path, PathBuf},
 };
-use toml_edit::{Array, DocumentMut, Item, TableLike, Value};
+use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value};
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub api: ApiSettings,
+    /// `[api]` 以外の名前付き接続先。`--provider`・environment の `provider`・
+    /// `ano chat` の `/provider` で選ぶ。
+    pub providers: BTreeMap<String, ProviderSettings>,
     pub agent: AgentSettings,
     pub mcp_servers: Vec<McpServerConfig>,
     pub users: HashMap<String, UserPolicy>,
@@ -55,6 +63,12 @@ impl AppConfig {
     fn resolve_paths(&mut self, directory: &Path, home: Option<&Path>) -> Result<()> {
         if let Some(path) = &mut self.api.chatgpt_auth_file {
             *path = resolve_path(path, directory, home).context("invalid api.chatgpt_auth_file")?;
+        }
+        for (name, provider) in &mut self.providers {
+            if let Some(path) = &mut provider.chatgpt_auth_file {
+                *path = resolve_path(path, directory, home)
+                    .with_context(|| format!("invalid providers.{name}.chatgpt_auth_file"))?;
+            }
         }
         self.history.data_dir = resolve_path(&self.history.data_dir, directory, home)?;
         if let Some(dir) = &mut self.skills.dir {
@@ -106,6 +120,36 @@ impl AppConfig {
         if self.api.timeout_secs == 0 {
             bail!("api.timeout_secs must be greater than zero");
         }
+        for (name, provider) in &self.providers {
+            validate_provider(name, provider)
+                .with_context(|| format!("invalid providers.{name}"))?;
+        }
+        for name in self.provider_names() {
+            let settings = self.provider_settings(name)?;
+            let table = match name {
+                DEFAULT_PROVIDER => "api".to_string(),
+                _ => format!("providers.{name}"),
+            };
+            for rule in settings
+                .disabled_models
+                .iter()
+                .chain(settings.allowed_models.iter().flatten())
+            {
+                if rule.trim().is_empty() {
+                    bail!("{table} has an empty model name");
+                }
+                if rule.trim_end_matches('*').contains('*') {
+                    bail!("{table} has the model rule '{rule}'; '*' is only allowed at the end");
+                }
+            }
+            for next in &settings.fallback {
+                if next == name {
+                    bail!("{table}.fallback must not name the provider itself");
+                }
+                self.provider_settings(next)
+                    .with_context(|| format!("invalid {table}.fallback"))?;
+            }
+        }
         for (name, environment) in &self.environments {
             for (check_name, check) in &environment.checks {
                 if check_name.trim().is_empty() {
@@ -118,6 +162,10 @@ impl AppConfig {
             environment
                 .validate()
                 .with_context(|| format!("invalid environments.{name}"))?;
+            if let Some(provider) = &environment.provider {
+                self.provider_settings(provider)
+                    .with_context(|| format!("invalid environments.{name}.provider"))?;
+            }
         }
         let mut labels = HashSet::new();
         for server in &self.mcp_servers {
@@ -149,6 +197,86 @@ impl AppConfig {
             .with_context(|| format!("unknown execution environment '{name}'"))
     }
 
+    /// Names of every provider, `default` (`[api]`) first.
+    pub fn provider_names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(DEFAULT_PROVIDER).chain(self.providers.keys().map(String::as_str))
+    }
+
+    /// The connection settings of the provider `name`; `default` is `[api]`.
+    pub fn provider_settings(&self, name: &str) -> Result<ApiSettings> {
+        if name == DEFAULT_PROVIDER {
+            return Ok(self.api.clone());
+        }
+        match self.providers.get(name) {
+            Some(provider) => Ok(provider.api_settings(&self.api)),
+            None => bail!(
+                "unknown provider '{name}'; choose one of: {}",
+                self.provider_names().collect::<Vec<_>>().join(", ")
+            ),
+        }
+    }
+
+    /// Whether the provider `name` may be used. `default` always may.
+    pub fn provider_enabled(&self, name: &str) -> bool {
+        self.providers
+            .get(name)
+            .is_none_or(|provider| provider.enabled)
+    }
+
+    /// The model a switch to `name` uses by itself: `[agent].model` for
+    /// `default`, the provider's `model` otherwise.
+    pub fn provider_model(&self, name: &str) -> Option<&str> {
+        match self.providers.get(name) {
+            Some(provider) => provider.model.as_deref(),
+            None => Some(&self.agent.model),
+        }
+    }
+
+    /// Resolve the provider and model of a run from `requests`, lowest
+    /// precedence first (for example the environment, then the command line).
+    ///
+    /// A request that names a model uses it. A request that names only a
+    /// provider switches to that provider's `model` when it has one, and
+    /// otherwise keeps the model from lower layers, down to `[agent].model`.
+    pub fn select_model(&self, requests: &[ModelRequest]) -> Result<ModelSelection> {
+        let mut provider = DEFAULT_PROVIDER.to_string();
+        let mut model = self.agent.model.clone();
+        let mut approval_model = self.agent.approval_model.clone();
+        for request in requests {
+            if let Some(name) = &request.provider {
+                self.provider_settings(name)?;
+                provider.clone_from(name);
+                approval_model = match self.providers.get(name) {
+                    Some(settings) => {
+                        if let Some(default) = &settings.model {
+                            model.clone_from(default);
+                        }
+                        settings.approval_model.clone()
+                    }
+                    None => self.agent.approval_model.clone(),
+                };
+            }
+            if let Some(name) = &request.model {
+                if name.trim().is_empty() {
+                    bail!("model must not be empty");
+                }
+                model.clone_from(name);
+            }
+        }
+        if !self.provider_enabled(&provider) {
+            bail!("provider '{provider}' is disabled; enable it with `ano provider enable {provider}`");
+        }
+        let api = self.provider_settings(&provider)?;
+        if !api.models().is_enabled(&model) {
+            bail!("model '{model}' is disabled for provider '{provider}'; enable it with `ano model enable {model} --provider {provider}` or choose another model");
+        }
+        Ok(ModelSelection {
+            api,
+            choice: ModelChoice { provider, model },
+            approval_model,
+        })
+    }
+
     /// Resolve a run of `user_id` in the named environment.
     pub fn execution_profile(
         &self,
@@ -166,16 +294,150 @@ impl AppConfig {
     }
 }
 
+/// The name of the provider configured by `[api]`.
+pub const DEFAULT_PROVIDER: &str = "default";
+
+/// One layer of a provider and model choice, such as an environment or the
+/// command line. Unset fields leave the lower layers in effect.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelRequest {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+}
+
+impl ModelRequest {
+    pub fn is_empty(&self) -> bool {
+        self.provider.is_none() && self.model.is_none()
+    }
+}
+
+impl From<&ModelChoice> for ModelRequest {
+    fn from(choice: &ModelChoice) -> Self {
+        Self {
+            provider: Some(choice.provider.clone()),
+            model: Some(choice.model.clone()),
+        }
+    }
+}
+
+/// The provider and model a run uses, with the provider's connection.
+#[derive(Debug, Clone)]
+pub struct ModelSelection {
+    pub choice: ModelChoice,
+    pub api: ApiSettings,
+    /// Reviewer model for `approval_mode = "auto"`; `None` uses the model.
+    pub approval_model: Option<String>,
+}
+
+impl ModelSelection {
+    /// Apply the model to `settings` of a run.
+    pub fn apply_to(&self, settings: &mut AgentSettings) {
+        settings.model.clone_from(&self.choice.model);
+        settings.approval_model.clone_from(&self.approval_model);
+    }
+}
+
+fn validate_provider(name: &str, provider: &ProviderSettings) -> Result<()> {
+    if name == DEFAULT_PROVIDER {
+        bail!("'{DEFAULT_PROVIDER}' is reserved for [api]");
+    }
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        bail!("provider names may contain only ASCII letters, digits, '-', '_', and '.'");
+    }
+    if provider.timeout_secs == Some(0) {
+        bail!("timeout_secs must be greater than zero");
+    }
+    for (field, value) in [
+        ("model", &provider.model),
+        ("approval_model", &provider.approval_model),
+        ("base_url", &provider.base_url),
+        ("api_key_env", &provider.api_key_env),
+    ] {
+        if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
+            bail!("{field} must not be empty");
+        }
+    }
+    Ok(())
+}
+
 /// Save `server`'s `allowed_tools` and `disabled_tools` to its
 /// `[[mcp_servers]]` entry in the config file at `path`. The rest of the
 /// file, including comments and formatting, is kept as it is, and the file is
 /// replaced only when the result is still a valid config.
 pub fn save_mcp_tool_filters(path: &Path, server: &McpServerConfig) -> Result<()> {
-    let path = std::fs::canonicalize(path)
-        .with_context(|| format!("failed to resolve config file {}", path.display()))?;
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
-    let updated = with_mcp_tool_filters(&text, server)?;
+    edit_config_file(path, false, |text| with_mcp_tool_filters(text, server))
+}
+
+/// A value to write to the config file.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SettingValue {
+    Text(String),
+    Integer(i64),
+    Bool(bool),
+    List(Vec<String>),
+}
+
+/// Write `changes` to the settings of the provider `name` in the config file
+/// at `path`, creating the file when it does not exist. `None` removes a key.
+/// `adding` requires a new provider; otherwise it must exist. For `default`,
+/// `model` and `approval_model` go to `[agent]` and the rest to `[api]`.
+///
+/// Comments and formatting are kept, and the file is replaced only when the
+/// result is still a valid config.
+pub fn update_provider(
+    path: &Path,
+    name: &str,
+    adding: bool,
+    changes: &[(&str, Option<SettingValue>)],
+) -> Result<()> {
+    edit_config_file(path, true, |text| {
+        with_provider_changes(text, name, adding, changes)
+    })
+}
+
+/// Remove the provider `name` from the config file at `path`. Refused while
+/// an environment or a fallback list names it.
+pub fn remove_provider(path: &Path, name: &str) -> Result<()> {
+    edit_config_file(path, false, |text| {
+        let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+        let removed = document
+            .get_mut("providers")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|providers| providers.remove(name));
+        if removed.is_none() {
+            bail!("provider '{name}' is not in the config file");
+        }
+        Ok(document.to_string())
+    })
+}
+
+/// Replace the config file at `path` with `edit` applied to its text, when
+/// the result is a valid config. With `create`, a missing file is edited as
+/// an empty one and created.
+fn edit_config_file(
+    path: &Path,
+    create: bool,
+    edit: impl FnOnce(&str) -> Result<String>,
+) -> Result<()> {
+    let (path, text) = match std::fs::canonicalize(path) {
+        Ok(path) => {
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read config file {}", path.display()))?;
+            (path, Some(text))
+        }
+        Err(error) if create && error.kind() == std::io::ErrorKind::NotFound => {
+            (std::path::absolute(path)?, None)
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to resolve config file {}", path.display()))
+        }
+    };
+    let updated = edit(text.as_deref().unwrap_or_default())?;
     AppConfig::parse(&updated).context("the updated config would be invalid")?;
 
     let directory = path
@@ -184,10 +446,88 @@ pub fn save_mcp_tool_filters(path: &Path, server: &McpServerConfig) -> Result<()
     let mut file = tempfile::NamedTempFile::new_in(directory)
         .with_context(|| format!("failed to write config file {}", path.display()))?;
     file.write_all(updated.as_bytes())?;
-    std::fs::set_permissions(file.path(), std::fs::metadata(&path)?.permissions())?;
+    if text.is_some() {
+        std::fs::set_permissions(file.path(), std::fs::metadata(&path)?.permissions())?;
+    }
     file.persist(&path)
         .with_context(|| format!("failed to replace config file {}", path.display()))?;
     Ok(())
+}
+
+fn with_provider_changes(
+    text: &str,
+    name: &str,
+    adding: bool,
+    changes: &[(&str, Option<SettingValue>)],
+) -> Result<String> {
+    let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+    if name == DEFAULT_PROVIDER {
+        if adding {
+            bail!("'{DEFAULT_PROVIDER}' is [api]; change it with `ano provider set {DEFAULT_PROVIDER}`");
+        }
+        for (key, value) in changes {
+            let section = match *key {
+                "model" | "approval_model" => "agent",
+                "enabled" => bail!("the '{DEFAULT_PROVIDER}' provider cannot be disabled"),
+                _ => "api",
+            };
+            let table = document
+                .entry(section)
+                .or_insert(Item::Table(Table::new()))
+                .as_table_like_mut()
+                .with_context(|| format!("[{section}] is not a table"))?;
+            set_value(table, key, value.as_ref());
+        }
+        return Ok(document.to_string());
+    }
+    let exists = document
+        .get("providers")
+        .and_then(Item::as_table_like)
+        .is_some_and(|providers| providers.contains_key(name));
+    match (adding, exists) {
+        (true, true) => {
+            bail!("provider '{name}' already exists; change it with `ano provider set {name}`")
+        }
+        (false, false) => bail!("provider '{name}' is not in the config file"),
+        _ => {}
+    }
+    let providers = document.entry("providers").or_insert_with(|| {
+        let mut table = Table::new();
+        table.set_implicit(true);
+        Item::Table(table)
+    });
+    let provider = providers
+        .as_table_like_mut()
+        .context("providers is not a table")?
+        .entry(name)
+        .or_insert(Item::Table(Table::new()))
+        .as_table_like_mut()
+        .with_context(|| format!("providers.{name} is not a table"))?;
+    for (key, value) in changes {
+        set_value(provider, key, value.as_ref());
+    }
+    Ok(document.to_string())
+}
+
+/// Set `key` to `value`, or remove it for `None`. A replaced value keeps its
+/// place and surrounding comments.
+fn set_value(entry: &mut dyn TableLike, key: &str, value: Option<&SettingValue>) {
+    let Some(value) = value else {
+        entry.remove(key);
+        return;
+    };
+    let mut value = match value {
+        SettingValue::Text(text) => Value::from(text.as_str()),
+        SettingValue::Integer(number) => Value::from(*number),
+        SettingValue::Bool(flag) => Value::from(*flag),
+        SettingValue::List(names) => {
+            Value::Array(names.iter().map(String::as_str).collect::<Array>())
+        }
+    };
+    if let Some(Item::Value(existing)) = entry.get(key) {
+        *value.decor_mut() = existing.decor().clone();
+    }
+    entry.insert(key, Item::Value(value));
 }
 
 fn with_mcp_tool_filters(text: &str, server: &McpServerConfig) -> Result<String> {
@@ -214,18 +554,14 @@ fn with_mcp_tool_filters(text: &str, server: &McpServerConfig) -> Result<String>
     Ok(document.to_string())
 }
 
-/// Set `key` to `names`, or remove it for `None`. A replaced value keeps its
-/// place and surrounding comments.
 fn set_string_list(entry: &mut dyn TableLike, key: &str, names: Option<&[String]>) {
-    let Some(names) = names else {
-        entry.remove(key);
-        return;
-    };
-    let mut array: Array = names.iter().map(String::as_str).collect();
-    if let Some(Item::Value(existing)) = entry.get(key) {
-        *array.decor_mut() = existing.decor().clone();
-    }
-    entry.insert(key, Item::Value(Value::Array(array)));
+    set_value(
+        entry,
+        key,
+        names
+            .map(|names| SettingValue::List(names.to_vec()))
+            .as_ref(),
+    );
 }
 
 fn resolve_path(path: &Path, directory: &Path, home: Option<&Path>) -> Result<PathBuf> {
@@ -249,8 +585,105 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_home, save_mcp_tool_filters, with_mcp_tool_filters, AppConfig};
+    use super::{
+        expand_home, remove_provider, save_mcp_tool_filters, update_provider,
+        with_mcp_tool_filters, with_provider_changes, AppConfig, ModelRequest, SettingValue,
+    };
     use std::path::Path;
+
+    const PROVIDERS: &str = "[agent]\nmodel = 'gpt-main'\napproval_model = 'gpt-mini'\n[api]\ntimeout_secs = 30\n[providers.local]\nbase_url = 'http://192.168.1.10:1234/v1'\nmodel = 'qwen/qwen3'\n[providers.bare]\nbase_url = 'http://127.0.0.1:8000/v1'\ntimeout_secs = 5\n";
+
+    fn request(provider: Option<&str>, model: Option<&str>) -> ModelRequest {
+        ModelRequest {
+            provider: provider.map(str::to_string),
+            model: model.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_provider_brings_its_model_and_later_layers_override_it() {
+        let config = AppConfig::parse(PROVIDERS).unwrap();
+        let chosen = |requests: &[ModelRequest]| {
+            let selection = config.select_model(requests).unwrap();
+            (
+                selection.choice.provider,
+                selection.choice.model,
+                selection.approval_model,
+            )
+        };
+        let owned = |p: &str, m: &str, a: Option<&str>| (p.into(), m.into(), a.map(Into::into));
+        assert_eq!(chosen(&[]), owned("default", "gpt-main", Some("gpt-mini")));
+        // The reviewer of [agent] belongs to [api]; another provider reviews
+        // with its own model unless it names one.
+        assert_eq!(
+            chosen(&[request(Some("local"), None)]),
+            owned("local", "qwen/qwen3", None)
+        );
+        assert_eq!(
+            chosen(&[
+                request(Some("local"), None),
+                request(None, Some("qwen3:30b"))
+            ]),
+            owned("local", "qwen3:30b", None)
+        );
+        // A provider without a model keeps the model of lower layers.
+        assert_eq!(
+            chosen(&[
+                request(None, Some("env-model")),
+                request(Some("bare"), None)
+            ]),
+            owned("bare", "env-model", None)
+        );
+        assert_eq!(
+            chosen(&[request(Some("local"), None), request(Some("default"), None)]),
+            owned("default", "qwen/qwen3", Some("gpt-mini"))
+        );
+        assert!(config
+            .select_model(&[request(Some("missing"), None)])
+            .is_err());
+        assert!(config.select_model(&[request(None, Some(" "))]).is_err());
+    }
+
+    #[test]
+    fn providers_inherit_transport_settings_but_not_the_endpoint() {
+        let config = AppConfig::parse(PROVIDERS).unwrap();
+        let local = config.provider_settings("local").unwrap();
+        assert_eq!(local.base_url, "http://192.168.1.10:1234/v1");
+        assert_eq!(local.timeout_secs, 30);
+        assert_eq!(local.api_key_env, "OPENAI_API_KEY");
+        // OPENAI_BASE_URL only redirects [api].
+        assert!(!local.use_base_url_env);
+        assert!(
+            config
+                .provider_settings("default")
+                .unwrap()
+                .use_base_url_env
+        );
+        assert_eq!(config.provider_settings("bare").unwrap().timeout_secs, 5);
+        assert_eq!(
+            config.provider_names().collect::<Vec<_>>(),
+            ["default", "bare", "local"]
+        );
+    }
+
+    #[test]
+    fn provider_names_and_references_are_validated() {
+        for text in [
+            "[providers.default]\nbase_url = 'http://127.0.0.1:1/v1'",
+            "[providers.'a b']\nbase_url = 'http://127.0.0.1:1/v1'",
+            "[providers.local]\nmodel = ''",
+            "[providers.local]\ntimeout_secs = 0",
+            "[providers.local]\nunknown = 1",
+            "[environments.dev]\nprovider = 'missing'",
+            "[environments.dev]\nprovider = ''",
+        ] {
+            assert!(AppConfig::parse(text).is_err(), "{text}");
+        }
+        assert!(
+            AppConfig::parse("[providers.local]\n[environments.dev]\nprovider = 'local'").is_ok()
+        );
+        assert!(AppConfig::parse("[environments.dev]\nprovider = 'default'").is_ok());
+    }
 
     #[test]
     fn saves_mcp_tool_filters_keeping_comments_and_other_servers() {
@@ -424,5 +857,146 @@ mod tests {
             assert!(AppConfig::parse(&text).is_err(), "accepted {path}");
         }
         assert!(AppConfig::parse("[webhook]\npath = '/hooks/tasks'").is_ok());
+    }
+
+    #[test]
+    fn disabled_providers_and_models_cannot_be_selected() {
+        let config = AppConfig::parse("[agent]\nmodel = 'gpt-main'\n[api]\ndisabled_models = ['gpt-old*']\n[providers.lan]\nenabled = false\nmodel = 'qwen'\n[providers.box]\nallowed_models = ['llama*']\nmodel = 'llama3'").unwrap();
+        let error = config
+            .select_model(&[request(Some("lan"), None)])
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("ano provider enable lan"),
+            "{error}"
+        );
+        let error = config
+            .select_model(&[request(None, Some("gpt-old-1"))])
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("ano model enable gpt-old-1 --provider default"),
+            "{error}"
+        );
+        assert!(config
+            .select_model(&[request(Some("box"), Some("qwen"))])
+            .is_err());
+        assert_eq!(
+            config
+                .select_model(&[request(Some("box"), None)])
+                .unwrap()
+                .choice
+                .model,
+            "llama3"
+        );
+        assert!(!config.provider_enabled("lan"));
+        assert!(config.provider_enabled("default"));
+    }
+
+    #[test]
+    fn fallbacks_must_name_other_known_providers() {
+        assert!(AppConfig::parse(
+            "[api]\nfallback = ['lan']\n[providers.lan]\nfallback = ['default']"
+        )
+        .is_ok());
+        for text in [
+            "[api]\nfallback = ['missing']",
+            "[providers.lan]\nfallback = ['lan']",
+            "[providers.lan]\ndisabled_models = ['']",
+            "[providers.lan]\nallowed_models = ['qwen/*-4b']",
+        ] {
+            assert!(AppConfig::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn provider_changes_keep_the_rest_of_the_file() {
+        let text = "# main endpoint\n[api]\nbase_url = 'http://127.0.0.1:1234/v1' # LM Studio\n\n[agent]\nmodel = 'qwen'\n";
+        let text_value = |value: &str| Some(SettingValue::Text(value.into()));
+        let added = with_provider_changes(
+            text,
+            "lan",
+            true,
+            &[
+                ("base_url", text_value("http://192.168.1.10:1234/v1")),
+                ("fallback", Some(SettingValue::List(vec!["default".into()]))),
+            ],
+        )
+        .unwrap();
+        assert!(added.starts_with(text), "{added}");
+        assert!(added.contains("[providers.lan]\nbase_url = \"http://192.168.1.10:1234/v1\"\nfallback = [\"default\"]"), "{added}");
+        let config = AppConfig::parse(&added).unwrap();
+        assert_eq!(config.providers["lan"].fallback, ["default"]);
+        assert!(with_provider_changes(&added, "lan", true, &[]).is_err());
+        assert!(with_provider_changes(text, "missing", false, &[]).is_err());
+
+        let changed = with_provider_changes(
+            &added,
+            "lan",
+            false,
+            &[
+                ("fallback", None),
+                ("enabled", Some(SettingValue::Bool(false))),
+            ],
+        )
+        .unwrap();
+        let config = AppConfig::parse(&changed).unwrap();
+        assert!(config.providers["lan"].fallback.is_empty());
+        assert!(!config.provider_enabled("lan"));
+
+        // `default` is [api], and its model is [agent].model.
+        let default = with_provider_changes(
+            text,
+            "default",
+            false,
+            &[
+                ("base_url", text_value("http://127.0.0.1:11434/v1")),
+                ("model", text_value("llama3")),
+            ],
+        )
+        .unwrap();
+        assert!(
+            default.contains("base_url = \"http://127.0.0.1:11434/v1\" # LM Studio"),
+            "{default}"
+        );
+        assert!(default.contains("[agent]\nmodel = \"llama3\""), "{default}");
+        assert!(with_provider_changes(text, "default", false, &[("enabled", None)]).is_err());
+        assert!(with_provider_changes(text, "default", true, &[]).is_err());
+    }
+
+    #[test]
+    fn provider_files_are_created_and_references_block_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        update_provider(
+            &path,
+            "lan",
+            true,
+            &[("model", Some(SettingValue::Text("qwen".into())))],
+        )
+        .unwrap();
+        let config = AppConfig::load(&path).unwrap();
+        assert_eq!(config.provider_model("lan"), Some("qwen"));
+        // An invalid result is never written.
+        assert!(update_provider(
+            &path,
+            "lan",
+            false,
+            &[("timeout_secs", Some(SettingValue::Integer(0)))]
+        )
+        .is_err());
+        update_provider(
+            &path,
+            "default",
+            false,
+            &[("fallback", Some(SettingValue::List(vec!["lan".into()])))],
+        )
+        .unwrap();
+        let error = remove_provider(&path, "lan").unwrap_err();
+        assert!(format!("{error:#}").contains("fallback"), "{error:#}");
+        update_provider(&path, "default", false, &[("fallback", None)]).unwrap();
+        remove_provider(&path, "lan").unwrap();
+        assert!(AppConfig::load(&path).unwrap().providers.is_empty());
+        assert!(remove_provider(&path, "lan").is_err());
     }
 }

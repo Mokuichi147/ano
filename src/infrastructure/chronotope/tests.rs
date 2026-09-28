@@ -333,3 +333,44 @@ fn reasoning_is_not_recorded_even_through_compaction() {
     // 思考過程を除いた履歴はモデル用の履歴とは別で、実行用の履歴はそのまま残す。
     assert_eq!(session.data().history.len(), 3);
 }
+
+#[test]
+fn switching_the_model_endpoint_keeps_the_raw_history_of_the_conversation() {
+    let root = tempfile::tempdir().unwrap();
+    let h = history(root.path(), "http://127.0.0.1:9");
+    let mut session =
+        Session::open(root.path().join("session.json"), binding("alice"), false).unwrap();
+    drop(h.wrap(&mut session).unwrap());
+    let choice = crate::domain::session::ModelChoice {
+        provider: "local".into(),
+        model: "qwen".into(),
+    };
+    h.wrap(&mut session)
+        .unwrap()
+        .switch_model(&choice, "http://192.168.1.10:1234/v1")
+        .unwrap();
+    assert_eq!(
+        session.data().binding.endpoint,
+        "http://192.168.1.10:1234/v1"
+    );
+    // The same raw history continues on the new endpoint.
+    drop(h.wrap(&mut session).unwrap());
+    let recorded = events(&h, "alice");
+    assert!(recorded.iter().any(|event| event["content"]
+        .as_str()
+        .is_some_and(|text| text.contains("qwen"))));
+
+    // Another environment is still refused for the same conversation.
+    let mut copied = session.data().clone();
+    copied.binding.environment = "other".into();
+    let other = SessionBinding {
+        environment: "other".into(),
+        ..session.data().binding.clone()
+    };
+    drop(session);
+    let path = root.path().join("other.json");
+    std::fs::write(&path, serde_json::to_vec(&copied).unwrap()).unwrap();
+    let mut other = Session::open(&path, other, false).unwrap();
+    let error = h.wrap(&mut other).err().unwrap().to_string();
+    assert!(error.contains("別のユーザー・環境"), "{error}");
+}

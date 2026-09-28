@@ -3,6 +3,7 @@
 
 pub mod chatgpt;
 pub mod chronotope;
+pub mod fallback;
 pub(crate) mod fs;
 pub mod mcp;
 pub mod mcp_oauth;

@@ -46,6 +46,16 @@ pub enum SessionStatus {
     Failed,
 }
 
+/// 会話で明示的に選ばれた接続先とモデル。セッションを再開するとき、
+/// 指定がなければ同じ組み合わせを使う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelChoice {
+    /// `[providers]` の名前。`default` は `[api]`。
+    pub provider: String,
+    pub model: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionData {
@@ -66,6 +76,8 @@ pub struct SessionData {
     pub usage: UsageSummary,
     #[serde(default)]
     pub compactions: Vec<CompactionRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelChoice>,
     pending_calls: Vec<Value>,
 }
 
@@ -84,6 +96,7 @@ impl SessionData {
             plan: TaskPlan::default(),
             usage: UsageSummary::default(),
             compactions: Vec::new(),
+            model: None,
             pending_calls: Vec::new(),
         }
     }
@@ -184,6 +197,26 @@ impl SessionData {
         self.ensure_compactable()?;
         self.history = history;
         self.compactions.push(record);
+        Ok(())
+    }
+
+    /// 以後の応答を `choice` のモデルで、`endpoint` の接続先から受け取る。
+    /// 接続先が変わる場合は、元の接続先でしか読めない暗号化された推論を
+    /// 履歴から除く。リモート圧縮の結果は会話そのものなので、除けず移動を断る。
+    pub fn switch_model(&mut self, choice: &ModelChoice, endpoint: &str) -> Result<()> {
+        if self.status == SessionStatus::Running {
+            bail!("cannot switch models during a turn");
+        }
+        let endpoint = endpoint.trim_end_matches('/');
+        if self.binding.endpoint != endpoint {
+            if self.history.iter().any(|item| item["type"] == "compaction") {
+                bail!("this conversation was compacted by {} into a form only that endpoint can read; start a new conversation to use {endpoint}", self.binding.endpoint);
+            }
+            self.history.retain(|item| item["type"] != "reasoning");
+            self.last_response_id = None;
+            self.binding.endpoint = endpoint.to_string();
+        }
+        self.model = Some(choice.clone());
         Ok(())
     }
 

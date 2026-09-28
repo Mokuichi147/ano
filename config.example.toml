@@ -23,6 +23,34 @@ stream = true
 # Only api.openai.com requires the key; for other endpoints, requests are sent
 # without an Authorization header when the api_key_env variable is not set.
 
+# Named providers besides [api] ("default"); `ano provider add/set/remove`
+# edits them without opening this file. Choose one with --provider NAME,
+# `provider = "NAME"` in an environment, or /provider NAME in `ano chat`.
+# timeout_secs, max_retries, and stream default to the [api] values;
+# base_url and api_key_env do not (they default to OpenAI's).
+# OPENAI_BASE_URL only overrides [api], never a named provider.
+# [providers.lan]
+# base_url = "http://192.168.1.10:1234/v1"
+# Model to switch to with this provider; without it the current model is kept.
+# model = "qwen/qwen3-coder-30b"
+# Reviewer for approval_mode = "auto" on this provider; defaults to the model.
+# approval_model = "qwen/qwen3-4b"
+# Models of this provider that may be used: an allowlist and a denylist of
+# exact names or prefixes ending in *. Edit them with `ano model enable`,
+# `ano model disable`, or `ano model edit` (with --provider NAME).
+# [api] takes them too.
+# allowed_models = ["qwen/*"]
+# disabled_models = ["qwen/qwen3-4b"]
+# Providers to try in order while this one cannot be reached, times out, or
+# is overloaded (408, 429, 5xx). The conversation is sent to them.
+# fallback = ["default"]
+# enabled = false keeps the settings but refuses to use the provider.
+# enabled = true
+#
+# [providers.codex]
+# auth = "chatgpt"
+# model = "gpt-5-codex"
+
 [agent]
 # This default is suitable for text/image + tool use. For native audio input,
 # choose an audio-capable Responses model (for example gpt-audio-1.5).
@@ -107,6 +135,9 @@ enabled = false
 # a leading ~ expands to the home directory.
 [environments.default]
 workspace = "."
+# Provider and model of this environment (webhook jobs and --environment runs).
+# provider = "lan"
+# model = "qwen/qwen3-coder-30b"
 allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_find", "workspace_check", "history_*"]
 allow_writes = false
 # Environments default to "deny" because webhook jobs have nobody to ask.

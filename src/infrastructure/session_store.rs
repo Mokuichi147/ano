@@ -6,7 +6,7 @@ use crate::{
     domain::{
         compaction::CompactionRecord,
         plan::TaskPlan,
-        session::{SessionBinding, SessionData, SessionStatus},
+        session::{ModelChoice, SessionBinding, SessionData, SessionStatus},
         usage::UsageSummary,
     },
     infrastructure::fs::atomic_write,
@@ -198,6 +198,16 @@ impl ConversationStore for Session {
     fn fail(&mut self, error: &str) -> Result<()> {
         self.data.fail(error)?;
         self.save()
+    }
+
+    fn switch_model(&mut self, choice: &ModelChoice, endpoint: &str) -> Result<()> {
+        let original = self.data.clone();
+        self.data.switch_model(choice, endpoint)?;
+        if let Err(error) = self.save() {
+            self.data = original;
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -408,5 +418,80 @@ mod tests {
             .find(|entry| entry.file_name().to_string_lossy().contains("archive-"))
             .unwrap();
         assert_eq!(Session::inspect(archive.path()).unwrap().history, original);
+    }
+
+    #[test]
+    fn switching_endpoints_drops_reasoning_and_survives_reopening() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.json");
+        let mut session = Session::open(&path, binding(), false).unwrap();
+        session
+            .begin_turn(&json!([{"role":"user","content":"hello"}]))
+            .unwrap();
+        session
+            .record_response(
+                "r1",
+                &[
+                    json!({"type":"reasoning", "id":"rs1", "encrypted_content":"opaque", "summary":[]}),
+                    json!({"type":"message", "role":"assistant", "content":[{"type":"output_text","text":"hi"}]}),
+                ],
+            )
+            .unwrap();
+        session.complete().unwrap();
+        let choice = ModelChoice {
+            provider: "local".into(),
+            model: "qwen".into(),
+        };
+        // Another model on the same endpoint can read the reasoning.
+        session
+            .switch_model(&choice, "http://127.0.0.1:1234/v1/")
+            .unwrap();
+        assert_eq!(session.data.history.len(), 3);
+        session
+            .switch_model(&choice, "http://192.168.1.10:1234/v1/")
+            .unwrap();
+        assert_eq!(session.data.history.len(), 2);
+        assert!(session
+            .data
+            .history
+            .iter()
+            .all(|item| item["type"] != "reasoning"));
+        drop(session);
+
+        let moved = SessionBinding {
+            endpoint: "http://192.168.1.10:1234/v1".into(),
+            ..binding()
+        };
+        assert!(Session::open(&path, binding(), false).is_err());
+        let session = Session::open(&path, moved, false).unwrap();
+        assert_eq!(session.data.model, Some(choice));
+    }
+
+    #[test]
+    fn remotely_compacted_or_running_conversations_do_not_switch_endpoints() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut session =
+            Session::open(directory.path().join("session.json"), binding(), false).unwrap();
+        let choice = ModelChoice {
+            provider: "local".into(),
+            model: "qwen".into(),
+        };
+        session
+            .begin_turn(&json!([{"role":"user","content":"hello"}]))
+            .unwrap();
+        assert!(session
+            .switch_model(&choice, "http://other.invalid/v1")
+            .is_err());
+        session.complete().unwrap();
+        session.data.history = vec![json!({"type":"compaction","encrypted_content":"opaque"})];
+        let error = session
+            .switch_model(&choice, "http://other.invalid/v1")
+            .unwrap_err();
+        assert!(error.to_string().contains("start a new conversation"));
+        assert_eq!(session.data.binding, binding());
+        // The same endpoint keeps the window it can read.
+        session
+            .switch_model(&choice, "http://127.0.0.1:1234/v1")
+            .unwrap();
     }
 }

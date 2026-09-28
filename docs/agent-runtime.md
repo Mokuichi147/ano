@@ -59,7 +59,8 @@ ano session .ano/review.json          # 状態・計画・累積使用量を表�
 ano session .ano/review.json --json   # 保存内容をすべて JSON で表示
 ```
 
-- セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。
+- セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。endpoint だけは `--provider` の明示か `ano chat` の `/provider` で切り替えられます。その際、元の endpoint でしか読めない暗号化された推論を履歴から除きます。リモート圧縮済みの会話は移せません（[複数の接続先を切り替える](../README.md#複数の接続先を切り替える)）。
+- `--provider`・`--model` や `/provider`・`/model` で選んだ接続先とモデルはセッションに記録され、指定なしで再開したときに引き継がれます。
 - 履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。
 - 実行中のセッションは sidecar lock（`<名前>.lock`）で二重起動を防ぎます。壊れたファイルはそのまま残して読み込みを拒否します。サイズ上限は 32 MiB です。
 - プロセスが中断して `running` のまま残ったセッションは、workspace の状態を確認してから `--recover-session` を付けて再開します。エラーを記録して `failed` になったセッションは通常どおり再開できます。

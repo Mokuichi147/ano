@@ -1,6 +1,9 @@
 //! HTTP client for the OpenAI Responses API and compatible endpoints.
 
-use crate::application::ports::{replay_deltas, DeltaSink, ResponseDelta, ResponsesApi};
+use crate::{
+    application::ports::{replay_deltas, DeltaSink, ResponseDelta, ResponsesApi},
+    domain::provider::ModelFilter,
+};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -45,6 +48,20 @@ pub struct ApiSettings {
     /// Request server-sent events so answers appear while they are generated.
     /// An endpoint that ignores the request and returns JSON still works.
     pub stream: bool,
+    /// `OPENAI_BASE_URL` で `base_url` を上書きするか。`[api]` だけが従い、
+    /// `[providers.*]` の接続先は環境変数に左右されない。
+    #[serde(skip, default = "yes")]
+    pub use_base_url_env: bool,
+    /// When set, only these models (exact names or `prefix*`) may be used.
+    pub allowed_models: Option<Vec<String>>,
+    pub disabled_models: Vec<String>,
+    /// Providers to try in order when this one cannot be reached or is
+    /// overloaded.
+    pub fallback: Vec<String>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for ApiSettings {
@@ -57,8 +74,118 @@ impl Default for ApiSettings {
             timeout_secs: 600,
             max_retries: 2,
             stream: true,
+            use_base_url_env: true,
+            allowed_models: None,
+            disabled_models: Vec::new(),
+            fallback: Vec::new(),
         }
     }
+}
+
+impl ApiSettings {
+    /// 実際に接続する URL。`use_base_url_env` なら `OPENAI_BASE_URL` を優先する。
+    pub fn effective_base_url(&self) -> String {
+        std::env::var("OPENAI_BASE_URL")
+            .ok()
+            .filter(|_| self.use_base_url_env)
+            .unwrap_or_else(|| self.base_url.clone())
+    }
+
+    /// The models of this provider that may be used.
+    pub fn models(&self) -> ModelFilter {
+        ModelFilter {
+            allowed: self.allowed_models.clone(),
+            disabled: self.disabled_models.clone(),
+        }
+    }
+}
+
+/// `[providers.NAME]`：`[api]` とは別の名前付き接続先。省略した通信設定は
+/// `[api]` から引き継ぎ、接続先そのもの（URL・認証）は引き継がない。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProviderSettings {
+    /// `false` keeps the settings but refuses to use the provider.
+    pub enabled: bool,
+    pub auth: ApiAuth,
+    pub chatgpt_auth_file: Option<PathBuf>,
+    /// 省略時は OpenAI の公式 endpoint。
+    pub base_url: Option<String>,
+    /// 省略時は `OPENAI_API_KEY`。
+    pub api_key_env: Option<String>,
+    pub timeout_secs: Option<u64>,
+    pub max_retries: Option<u32>,
+    pub stream: Option<bool>,
+    /// この接続先へ切り替えたときに使うモデル。省略時は切り替え前のモデルを使う。
+    pub model: Option<String>,
+    /// この接続先での `approval_mode = "auto"` の審査モデル。省略時は `model`。
+    pub approval_model: Option<String>,
+    pub allowed_models: Option<Vec<String>>,
+    pub disabled_models: Vec<String>,
+    pub fallback: Vec<String>,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            auth: ApiAuth::default(),
+            chatgpt_auth_file: None,
+            base_url: None,
+            api_key_env: None,
+            timeout_secs: None,
+            max_retries: None,
+            stream: None,
+            model: None,
+            approval_model: None,
+            allowed_models: None,
+            disabled_models: Vec::new(),
+            fallback: Vec::new(),
+        }
+    }
+}
+
+impl ProviderSettings {
+    /// `[api]` の通信設定を引き継いだ、この接続先の設定。
+    pub fn api_settings(&self, base: &ApiSettings) -> ApiSettings {
+        ApiSettings {
+            auth: self.auth,
+            chatgpt_auth_file: self.chatgpt_auth_file.clone(),
+            base_url: self.base_url.clone().unwrap_or_else(default_base_url),
+            api_key_env: self.api_key_env.clone().unwrap_or_else(default_api_key_env),
+            timeout_secs: self.timeout_secs.unwrap_or(base.timeout_secs),
+            max_retries: self.max_retries.unwrap_or(base.max_retries),
+            stream: self.stream.unwrap_or(base.stream),
+            use_base_url_env: false,
+            allowed_models: self.allowed_models.clone(),
+            disabled_models: self.disabled_models.clone(),
+            fallback: self.fallback.clone(),
+        }
+    }
+}
+
+/// The provider could not be reached, timed out, or is overloaded (408, 429,
+/// or 5xx after the retries): another provider may take the request.
+#[derive(Debug)]
+pub struct Unavailable(pub String);
+
+impl std::fmt::Display for Unavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Unavailable {}
+
+/// Whether `error` means the provider is unavailable rather than that the
+/// request itself was rejected.
+pub fn is_unavailable(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<Unavailable>().is_some()
+}
+
+/// Statuses that mean the provider is unavailable for now.
+pub(super) fn is_unavailable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT || is_retryable(status) || status.is_server_error()
 }
 
 /// 認証方式に対応する通信アダプターを生成する。
@@ -92,8 +219,7 @@ impl OpenAiClient {
         if settings.auth != ApiAuth::ApiKey {
             bail!("ChatGPT 認証には infrastructure::openai::create_client を使用してください");
         }
-        let base_url =
-            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| settings.base_url.clone());
+        let base_url = settings.effective_base_url();
         let api_key = resolve_api_key(
             &base_url,
             &settings.api_key_env,
@@ -164,6 +290,36 @@ impl OpenAiClient {
         read_event_stream(response, on_delta).await
     }
 
+    /// `GET /models`: the models the endpoint offers, sorted by name.
+    pub async fn list_models(&self) -> Result<Vec<String>> {
+        let mut request = self.http.get(format!("{}/models", self.base_url));
+        if let Some(api_key) = &self.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) if error.is_connect() || error.is_timeout() => {
+                return Err(error).context(Unavailable("failed to list the models".into()))
+            }
+            Err(error) => return Err(error).context("failed to list the models"),
+        };
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            bail!("listing the models failed ({status}): {}", truncate(&body));
+        }
+        let body = read_json(response, "models").await?;
+        let mut models: Vec<String> = body["data"]
+            .as_array()
+            .context("the models response has no data array")?
+            .iter()
+            .filter_map(|model| model["id"].as_str().map(str::to_string))
+            .collect();
+        models.sort();
+        models.dedup();
+        Ok(models)
+    }
+
     async fn post_json(&self, endpoint: &str, payload: &Value) -> Result<Value> {
         let response = self.send(endpoint, payload).await?;
         read_json(response, endpoint).await
@@ -186,6 +342,11 @@ impl OpenAiClient {
                     attempt += 1;
                     tokio::time::sleep(backoff(attempt, None)).await;
                     continue;
+                }
+                Err(error) if error.is_connect() || error.is_timeout() => {
+                    return Err(error).context(Unavailable(format!(
+                        "failed to send OpenAI {endpoint} request"
+                    )))
                 }
                 Err(error) => {
                     return Err(error)
@@ -211,7 +372,11 @@ impl OpenAiClient {
                     Ok(value) => error_text(&value),
                     Err(_) => truncate(&body),
                 };
-                bail!("OpenAI {endpoint} request failed ({status}): {message}");
+                let message = format!("OpenAI {endpoint} request failed ({status}): {message}");
+                if is_unavailable_status(status) {
+                    return Err(Unavailable(message).into());
+                }
+                bail!(message);
             }
             return Ok(response);
         }
@@ -320,6 +485,10 @@ impl ResponsesApi for OpenAiClient {
         on_delta: DeltaSink<'_>,
     ) -> Result<Value> {
         OpenAiClient::create_response_streaming(self, payload, on_delta).await
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        OpenAiClient::list_models(self).await
     }
 
     fn supports_remote_compaction(&self) -> bool {
@@ -590,5 +759,25 @@ mod tests {
             server.abort();
             assert!(format!("{error:#}").contains(expected), "{error:#}");
         }
+    }
+
+    #[tokio::test]
+    async fn lists_the_models_of_the_endpoint() {
+        let app = Router::new().route(
+            "/v1/models",
+            axum::routing::get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer key");
+                Json(
+                    json!({"object":"list", "data":[{"id":"qwen"}, {"id":"gpt-5"}, {"id":"qwen"}]}),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = OpenAiClient::new(
+            "key",
+            format!("http://{}/v1", listener.local_addr().unwrap()),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(client.list_models().await.unwrap(), ["gpt-5", "qwen"]);
     }
 }

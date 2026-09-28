@@ -37,14 +37,14 @@ pub use application::{
     registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
     settings::AgentSettings,
 };
-pub use config::AppConfig;
+pub use config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PROVIDER};
 pub use domain::{
     compaction::CompactionRecord,
     environment::{CheckConfig, EnvironmentConfig},
     mcp::{McpApprovalMode, McpServerConfig, McpToolCatalog, McpTransport},
     plan::{PlanStep, RunOutcome, StepStatus, TaskPlan, TASK_PLAN_NAME},
     policy::UserPolicy,
-    session::{SessionBinding, SessionData, SessionStatus},
+    session::{ModelChoice, SessionBinding, SessionData, SessionStatus},
     tool::{
         ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME, WORKSPACE_EXEC_NAME,
     },
@@ -53,7 +53,7 @@ pub use domain::{
 pub use infrastructure::{
     chronotope::{Chronotope, HistorySettings},
     mcp::McpPool,
-    openai::{create_client, ApiAuth, ApiSettings, OpenAiClient},
+    openai::{create_client, ApiAuth, ApiSettings, OpenAiClient, ProviderSettings},
     session_store::Session,
     tools::register_builtin_tools,
 };

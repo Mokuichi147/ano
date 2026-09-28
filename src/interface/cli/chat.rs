@@ -9,22 +9,23 @@
 
 use super::{
     output::{self, ProgressHold},
-    prepare_agent, AgentOptions, PreparedAgent,
+    prepare_agent, AgentOptions, ApprovalFactory, PreparedAgent,
 };
 use crate::{
     application::{
-        agent::RunRequest,
+        agent::{Agent, RunRequest},
         input::InputPart,
         ports::{ApprovalHandler, ConversationStore, McpApprovalRequest},
         registry::ToolRegistry,
     },
-    config::AppConfig,
+    config::{AppConfig, ModelRequest, ModelSelection},
     domain::{
         plan::TaskGoal,
         session::SessionStatus,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
     },
     infrastructure::memory_store::MemoryConversation,
+    interface::connect_provider,
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -42,6 +43,11 @@ const HELP: &str = "Commands:
   /goal    show the goal;  /goal clear  clear it
   /skill [FOCUS]
            save what worked in this conversation as a skill for later runs
+  /model [NAME]
+           show the model, or switch to NAME on the current provider
+  /models  list the models the current provider offers
+  /provider [NAME [MODEL]]
+           list providers, or switch to NAME (and MODEL) and continue there
   /usage   show token usage of this conversation
   /compact compact the conversation now (summarize it to save context)
   /clear   start a new conversation (not with --session)
@@ -162,12 +168,14 @@ pub(super) async fn run(
     let interactive = std::io::stdin().is_terminal();
     let lines = LineReader::spawn(interactive);
     let PreparedAgent {
-        agent,
+        mut agent,
         context,
-        binding,
+        mut binding,
         session,
         mcp,
         answer,
+        mut selection,
+        approval,
     } = prepare_agent(
         &config,
         &user_id,
@@ -240,6 +248,64 @@ pub(super) async fn run(
                     } else {
                         store = Box::new(MemoryConversation::new(binding.clone()));
                         eprintln!("(started a new conversation)");
+                    }
+                    continue;
+                }
+                "/model" => {
+                    eprintln!(
+                        "model {} on {} ({})",
+                        selection.choice.model,
+                        selection.choice.provider,
+                        agent.endpoint()
+                    );
+                    continue;
+                }
+                "/provider" => {
+                    eprintln!("{}", format_providers(&config, &selection));
+                    continue;
+                }
+                "/models" => {
+                    match agent.list_models().await {
+                        Ok(models) => eprintln!("{}", format_models(&selection, &models)),
+                        Err(error) => eprintln!("error: {error:#}"),
+                    }
+                    continue;
+                }
+                command if command.starts_with("/model ") || command.starts_with("/provider ") => {
+                    let mut words = command.split_whitespace();
+                    let request = match (words.next(), words.next(), words.next(), words.next()) {
+                        (Some("/model"), Some(model), None, None) => ModelRequest {
+                            provider: None,
+                            model: Some(model.to_string()),
+                        },
+                        (Some("/provider"), Some(provider), model, None) => ModelRequest {
+                            provider: Some(provider.to_string()),
+                            model: model.map(str::to_string),
+                        },
+                        _ => {
+                            eprintln!("usage: /model NAME  or  /provider NAME [MODEL]");
+                            continue;
+                        }
+                    };
+                    let switched = switch_model(
+                        &config,
+                        request,
+                        &mut agent,
+                        store.as_mut(),
+                        &approval,
+                        &mut selection,
+                    );
+                    match switched {
+                        Ok(()) => {
+                            binding.endpoint = store.data().binding.endpoint.clone();
+                            eprintln!(
+                                "(switched to model {} on {} ({}))",
+                                selection.choice.model,
+                                selection.choice.provider,
+                                agent.endpoint()
+                            );
+                        }
+                        Err(error) => eprintln!("error: {error:#}"),
                     }
                     continue;
                 }
@@ -366,6 +432,90 @@ pub(super) async fn run(
     result
 }
 
+/// Continue the conversation in `store` with the model `request` chooses,
+/// layered over the current one. Nothing changes when any step fails.
+fn switch_model(
+    config: &AppConfig,
+    request: ModelRequest,
+    agent: &mut Agent,
+    store: &mut dyn ConversationStore,
+    approval: &ApprovalFactory,
+    selection: &mut ModelSelection,
+) -> Result<()> {
+    let next = config.select_model(&[ModelRequest::from(&selection.choice), request])?;
+    let client = connect_provider(config, &next.choice.provider)?;
+    store.switch_model(&next.choice, client.base_url())?;
+    agent.replace_model(
+        client.clone(),
+        next.choice.model.clone(),
+        next.approval_model.clone(),
+        approval.build(client, &next),
+    );
+    *selection = next;
+    Ok(())
+}
+
+/// Every provider, marking the current one, with its endpoint and model.
+fn format_providers(config: &AppConfig, selection: &ModelSelection) -> String {
+    config
+        .provider_names()
+        .map(|name| {
+            let marker = if name == selection.choice.provider {
+                "*"
+            } else {
+                " "
+            };
+            let endpoint = config
+                .provider_settings(name)
+                .map(|api| match api.auth {
+                    crate::infrastructure::openai::ApiAuth::Chatgpt => {
+                        "ChatGPT subscription".to_string()
+                    }
+                    _ => api.effective_base_url(),
+                })
+                .unwrap_or_default();
+            let model = match config.providers.get(name) {
+                Some(provider) => provider.model.as_deref(),
+                None => Some(config.agent.model.as_str()),
+            };
+            let mut line = match model {
+                Some(model) => format!("{marker} {name}  {endpoint}  (model {model})"),
+                None => format!("{marker} {name}  {endpoint}"),
+            };
+            if !config.provider_enabled(name) {
+                line.push_str("  [disabled]");
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The models of the current provider, marking the one in use and those the
+/// config disables.
+fn format_models(selection: &ModelSelection, models: &[String]) -> String {
+    if models.is_empty() {
+        return format!("provider '{}' lists no models", selection.choice.provider);
+    }
+    let filter = selection.api.models();
+    models
+        .iter()
+        .map(|model| {
+            let marker = if *model == selection.choice.model {
+                "*"
+            } else {
+                " "
+            };
+            if filter.is_enabled(model) {
+                format!("{marker} {model}")
+            } else {
+                format!("{marker} {model}  [disabled]")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// The request that `/skill` sends: turn what worked in this conversation
 /// into a skill, or say that nothing is worth keeping.
 fn skill_prompt(focus: &str) -> String {
@@ -375,4 +525,85 @@ fn skill_prompt(focus: &str) -> String {
         format!(" The user wants it to cover: {focus}")
     };
     format!("Look back over this conversation and save the approach that worked as a skill with {SKILL_SAVE_NAME}.{focus} If a skill for the same kind of task is listed, read it with {SKILL_READ_NAME} and save the improved version under the same name instead of adding a new one. Keep what will help with similar tasks later: the steps, commands, checks, and pitfalls, not the details of this one case. If nothing in this conversation is worth saving, say so and do not save. Reply in the language the user has been using.")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_providers, switch_model};
+    use crate::{
+        application::{
+            agent::Agent, approval::AlwaysApprove, ports::ConversationStore, registry::ToolRegistry,
+        },
+        config::{AppConfig, ModelRequest},
+        domain::{approval::ApprovalMode, policy::UserPolicy, session::SessionBinding},
+        infrastructure::{mcp::McpPool, memory_store::MemoryConversation, openai::OpenAiClient},
+        interface::cli::ApprovalFactory,
+    };
+    use serde_json::json;
+    use std::sync::Arc;
+
+    #[test]
+    fn switches_provider_and_model_and_keeps_the_old_ones_on_failure() {
+        let config = AppConfig::parse("[agent]\nmodel = 'gpt-main'\n[api]\nbase_url = 'http://127.0.0.1:1234/v1'\n[providers.lan]\nbase_url = 'http://192.168.1.10:1234/v1/'\nmodel = 'qwen'").unwrap();
+        let mut selection = config.select_model(&[]).unwrap();
+        let mut agent = Agent::new(
+            OpenAiClient::new("", "http://127.0.0.1:1234/v1"),
+            Default::default(),
+            Arc::new(McpPool::new(Vec::new())),
+            ToolRegistry::new(),
+            UserPolicy::default(),
+            Arc::new(AlwaysApprove),
+        );
+        let approval = ApprovalFactory {
+            mode: ApprovalMode::Ask,
+            ask_user: Arc::new(AlwaysApprove),
+        };
+        let binding = SessionBinding {
+            endpoint: "http://127.0.0.1:1234/v1".into(),
+            ..SessionBinding::new(&Default::default(), "").unwrap()
+        };
+        let mut store = MemoryConversation::new(binding);
+        store
+            .begin_turn(&json!([{"role":"user","content":"hello"}]))
+            .unwrap();
+        store
+            .record_response(
+                "r1",
+                &[json!({"type":"reasoning","encrypted_content":"opaque"})],
+            )
+            .unwrap();
+        store.complete().unwrap();
+        let mut switch = |provider: Option<&str>, model: Option<&str>| {
+            switch_model(
+                &config,
+                ModelRequest {
+                    provider: provider.map(str::to_string),
+                    model: model.map(str::to_string),
+                },
+                &mut agent,
+                &mut store,
+                &approval,
+                &mut selection,
+            )
+        };
+
+        switch(None, Some("gpt-other")).unwrap();
+        switch(Some("lan"), None).unwrap();
+        assert!(switch(Some("missing"), None).is_err());
+        switch(None, Some("llama")).unwrap();
+
+        assert_eq!(selection.choice.provider, "lan");
+        assert_eq!(agent.model(), "llama");
+        assert_eq!(agent.endpoint(), "http://192.168.1.10:1234/v1");
+        assert_eq!(store.data().binding.endpoint, "http://192.168.1.10:1234/v1");
+        assert!(store
+            .data()
+            .history
+            .iter()
+            .all(|item| item["type"] != "reasoning"));
+        let listing = format_providers(&config, &selection);
+        // OPENAI_BASE_URL of the test environment may redirect [api].
+        assert!(listing.contains("  default  ") && listing.contains("(model gpt-main)"));
+        assert!(listing.contains("* lan  http://192.168.1.10:1234/v1/  (model qwen)"));
+    }
 }

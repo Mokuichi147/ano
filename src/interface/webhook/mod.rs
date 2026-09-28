@@ -17,11 +17,12 @@ use crate::{
         ports::{McpGateway, ResponsesApi},
         registry::ToolRegistry,
     },
-    config::AppConfig,
+    config::{AppConfig, ModelRequest, DEFAULT_PROVIDER},
     domain::plan::{RunOutcome, TaskGoal},
     infrastructure::{
         chronotope::Chronotope, project::read_project_instructions, skills::SkillLibrary,
     },
+    interface::connect_provider,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -96,7 +97,10 @@ struct WebhookState {
     history: Option<Arc<Chronotope>>,
     skills: Option<Arc<SkillLibrary>>,
     config: AppConfig,
+    /// The client of `[api]`.
     client: Arc<dyn ResponsesApi>,
+    /// Clients of the `[providers]` that environments use, by name.
+    providers: HashMap<String, Arc<dyn ResponsesApi>>,
     registry: ToolRegistry,
     /// MCP connections shared by every job.
     mcp: Arc<dyn McpGateway>,
@@ -152,6 +156,23 @@ pub async fn serve(
         eprintln!("warning: webhook authentication is disabled (loopback only)");
     }
 
+    // Connect to every provider an environment uses up front, so a missing
+    // login or API key fails at startup instead of in a job.
+    let mut providers = HashMap::new();
+    for (name, environment) in &config.environments {
+        if let Some(provider) = environment
+            .provider
+            .as_ref()
+            .filter(|provider| *provider != DEFAULT_PROVIDER && config.provider_enabled(provider))
+        {
+            if !providers.contains_key(provider) {
+                let client = connect_provider(&config, provider).with_context(|| {
+                    format!("failed to connect provider '{provider}' of environment '{name}'")
+                })?;
+                providers.insert(provider.clone(), client);
+            }
+        }
+    }
     let history = Chronotope::from_settings(&config.history, &registry)?;
     let skills = SkillLibrary::from_settings(&config.skills, &registry)?;
     let state = Arc::new(WebhookState {
@@ -161,6 +182,7 @@ pub async fn serve(
         mcp,
         config,
         client: Arc::new(client),
+        providers,
         registry,
         jobs: RwLock::new(HashMap::new()),
         shutdown: watch::channel(false).0,
@@ -467,6 +489,16 @@ async fn execute_job(
     let mut profile = state
         .config
         .execution_profile(&request.user, &request.environment, &[])?;
+    let environment = state.config.environment_for(&request.environment)?;
+    let selection = state.config.select_model(&[ModelRequest {
+        provider: environment.provider.clone(),
+        model: environment.model.clone(),
+    }])?;
+    selection.apply_to(&mut profile.settings);
+    let client = match state.providers.get(&selection.choice.provider) {
+        Some(client) => Arc::clone(client),
+        None => Arc::clone(&state.client),
+    };
     if let Some(workspace) = profile.context.workspace.clone() {
         let names = profile.settings.project_instructions.clone();
         let sources =
@@ -485,9 +517,9 @@ async fn execute_job(
     }
     // A webhook has nobody to ask: requests that would go to the user, and
     // those automatic review does not clearly allow, are denied.
-    let approval = profile.approval_handler(Arc::clone(&state.client), Arc::new(DenyApproval));
+    let approval = profile.approval_handler(Arc::clone(&client), Arc::new(DenyApproval));
     let mut agent = Agent::new(
-        Arc::clone(&state.client),
+        client,
         profile.settings,
         Arc::clone(&state.mcp),
         state.registry.clone(),

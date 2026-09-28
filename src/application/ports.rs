@@ -65,6 +65,11 @@ pub trait ResponsesApi: Send + Sync {
     fn requires_full_history(&self) -> bool {
         false
     }
+
+    /// The models the endpoint offers (`GET /models`), sorted by name.
+    async fn list_models(&self) -> Result<Vec<String>> {
+        anyhow::bail!("this endpoint cannot list its models")
+    }
 }
 
 /// Report the messages of a completed response to `on_delta`, one delta per
@@ -128,6 +133,10 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
     fn requires_full_history(&self) -> bool {
         (**self).requires_full_history()
     }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        (**self).list_models().await
+    }
 }
 
 /// Durable storage of one conversation. Every method that changes the
@@ -180,6 +189,15 @@ pub trait ConversationStore: Send + Sync {
     fn skip_pending(&mut self, message: &str) -> Result<()>;
     fn complete(&mut self) -> Result<()>;
     fn fail(&mut self, error: &str) -> Result<()>;
+    /// 以後の応答を別のモデル・接続先から受け取る。
+    /// 詳細は [`crate::domain::session::SessionData::switch_model`]。
+    fn switch_model(
+        &mut self,
+        _choice: &crate::domain::session::ModelChoice,
+        _endpoint: &str,
+    ) -> Result<()> {
+        anyhow::bail!("this conversation store cannot switch models")
+    }
 }
 
 /// 実行用の会話ストアに、圧縮されない原文の記録と非同期の同期を追加する。

@@ -7,7 +7,9 @@ mod auth;
 mod chat;
 mod history;
 mod mcp;
+mod model;
 mod output;
+mod provider;
 mod skills;
 
 pub use approval::InteractiveApproval;
@@ -18,23 +20,22 @@ use crate::{
         approval::DenyApproval,
         input::InputPart,
         ports::{ApprovalHandler, McpGateway},
-        profile::ExecutionProfile,
+        profile::{approval_handler, ExecutionProfile},
         registry::ToolRegistry,
     },
-    config::AppConfig,
+    config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PROVIDER},
     domain::{
         approval::ApprovalMode,
         mcp::McpTransport,
         plan::{TaskGoal, TASK_PLAN_NAME},
-        session::SessionBinding,
+        session::{ModelChoice, SessionBinding},
         tool::{ToolContext, DELEGATE_TASK_NAME, WEB_FETCH_NAME, WORKSPACE_EXEC_NAME},
     },
     infrastructure::{
-        chronotope::Chronotope, mcp::McpPool, openai::create_client,
-        project::read_project_instructions, session_store::Session, skills::SkillLibrary,
-        tools::register_builtin_tools,
+        chronotope::Chronotope, mcp::McpPool, project::read_project_instructions,
+        session_store::Session, skills::SkillLibrary, tools::register_builtin_tools,
     },
-    interface::webhook,
+    interface::{connect_provider, webhook},
 };
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -79,6 +80,10 @@ enum Command {
     Session(SessionArgs),
     /// Manage the authorization and the enabled tools of MCP servers.
     Mcp(mcp::McpArgs),
+    /// Add, change, and remove providers, and enable or disable them.
+    Provider(provider::ProviderArgs),
+    /// List the models of providers, and enable or disable them.
+    Model(model::ModelArgs),
     /// 原文履歴の同期状態を調べ、chronotope へ再送・検索する。
     History(history::HistoryArgs),
     /// List the saved skills, or show one.
@@ -118,8 +123,15 @@ struct AgentOptions {
     #[arg(long = "disable-tool", value_name = "NAME")]
     disabled_tools: Vec<String>,
 
-    #[arg(long)]
+    #[arg(long, help = "Model to use (on the selected provider)")]
     model: Option<String>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Connect to a provider from [providers] ('default' is [api])"
+    )]
+    provider: Option<String>,
 
     #[arg(
         long,
@@ -319,6 +331,8 @@ pub async fn run() -> Result<()> {
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
+        Command::Provider(args) => provider::run(&config, &config_path, args).await,
+        Command::Model(args) => model::run(&config, &config_path, args).await,
         Command::History(args) => history::run(&config, &cli.user, args).await,
         Command::Skills(args) => skills::run(&config, &cli.user, args),
     }
@@ -447,6 +461,40 @@ struct PreparedAgent {
     mcp: Arc<dyn McpGateway>,
     /// Prints the answer while it is generated, when streaming.
     answer: Option<Arc<output::AnswerStream>>,
+    /// The provider and model in use, to switch from in `ano chat`.
+    selection: ModelSelection,
+    /// Rebuilds the approval handler when the model changes.
+    approval: ApprovalFactory,
+}
+
+/// What an approval handler is built from, so it can be rebuilt for another
+/// client when `ano chat` switches models.
+struct ApprovalFactory {
+    mode: ApprovalMode,
+    ask_user: Arc<dyn ApprovalHandler>,
+}
+
+impl ApprovalFactory {
+    fn build(
+        &self,
+        client: Arc<dyn crate::application::ports::ResponsesApi>,
+        selection: &ModelSelection,
+    ) -> Arc<dyn ApprovalHandler> {
+        let reviewer = selection
+            .approval_model
+            .as_deref()
+            .unwrap_or(&selection.choice.model);
+        approval_handler(self.mode, client, reviewer, Arc::clone(&self.ask_user))
+    }
+}
+
+/// The resolved settings of a run before its adapters are created.
+struct RunContext {
+    profile: ExecutionProfile,
+    selection: ModelSelection,
+    /// Whether `--provider` or `--model` chose the model. Only then is the
+    /// choice saved to a session, or a session moved to another endpoint.
+    explicit: bool,
 }
 
 fn prepare_agent(
@@ -458,13 +506,17 @@ fn prepare_agent(
     stdin_is_terminal: bool,
     stream: Option<output::TextFormat>,
 ) -> Result<PreparedAgent> {
-    let mut profile = resolve_run_context(config, user_id, options)?;
+    let RunContext {
+        mut profile,
+        selection,
+        explicit,
+    } = resolve_run_context(config, user_id, options)?;
     if let Some(skills) = SkillLibrary::from_settings(&config.skills, &registry)? {
         for problem in skills.add_to_instructions(&mut profile)? {
             eprintln!("warning: skipped skill {problem}");
         }
     }
-    let client = create_client(&config.api)?;
+    let client = connect_provider(config, &selection.choice.provider)?;
     let ask_user: Arc<dyn ApprovalHandler> = if stdin_is_terminal {
         ask_user
     } else {
@@ -479,7 +531,11 @@ fn prepare_agent(
         }
         Arc::new(DenyApproval)
     };
-    let approval = profile.approval_handler(client.clone(), ask_user);
+    let approval = ApprovalFactory {
+        mode: profile.approval_mode,
+        ask_user,
+    };
+    let approval_handler = approval.build(client.clone(), &selection);
     let ExecutionProfile {
         settings,
         policy,
@@ -490,7 +546,14 @@ fn prepare_agent(
     let session = options
         .session
         .as_ref()
-        .map(|path| Session::open(path, binding.clone(), options.recover_session))
+        .map(|path| {
+            open_session(
+                path,
+                &binding,
+                options.recover_session,
+                explicit.then_some(&selection.choice),
+            )
+        })
         .transpose()?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let history = Chronotope::from_settings(&config.history, &registry)?;
@@ -500,7 +563,7 @@ fn prepare_agent(
         Arc::clone(&mcp),
         registry,
         policy,
-        approval,
+        approval_handler,
     );
     if let Some(history) = history {
         agent = agent.with_history(history);
@@ -527,7 +590,46 @@ fn prepare_agent(
         session,
         mcp,
         answer,
+        selection,
+        approval,
     })
+}
+
+/// Open a saved conversation. With an explicitly chosen model, the choice is
+/// saved, and a conversation saved with another endpoint moves to this one.
+/// Without one, a conversation stays on the endpoint it was saved with.
+fn open_session(
+    path: &std::path::Path,
+    binding: &SessionBinding,
+    recover: bool,
+    choice: Option<&ModelChoice>,
+) -> Result<Session> {
+    let saved = Session::inspect(path).ok().map(|data| data.binding);
+    let moves = saved.as_ref().is_some_and(|saved| {
+        saved.endpoint != binding.endpoint
+            && SessionBinding {
+                endpoint: binding.endpoint.clone(),
+                ..saved.clone()
+            } == *binding
+    });
+    let Some(choice) = choice else {
+        if moves {
+            let saved = saved.map(|saved| saved.endpoint).unwrap_or_default();
+            bail!("the session is on {saved}, not {}; pass --provider (and --model) to continue it there", binding.endpoint);
+        }
+        return Session::open(path, binding.clone(), recover);
+    };
+    let mut opened = binding.clone();
+    if moves {
+        opened.endpoint = saved.map(|saved| saved.endpoint).unwrap_or_default();
+    }
+    let mut session = Session::open(path, opened, recover)?;
+    crate::application::ports::ConversationStore::switch_model(
+        &mut session,
+        choice,
+        &binding.endpoint,
+    )?;
+    Ok(session)
 }
 
 async fn run_agent(
@@ -624,7 +726,7 @@ fn resolve_run_context(
     config: &AppConfig,
     user_id: &str,
     args: &AgentOptions,
-) -> Result<ExecutionProfile> {
+) -> Result<RunContext> {
     let mut profile = match &args.environment {
         Some(name) => config.execution_profile(user_id, name, &args.disabled_tools)?,
         None => ExecutionProfile {
@@ -661,9 +763,35 @@ fn resolve_run_context(
     if let Some(limit) = args.max_total_tokens {
         settings.max_total_tokens = Some(limit);
     }
-    if let Some(model) = &args.model {
-        settings.model.clone_from(model);
-    }
+    let command_line = ModelRequest {
+        provider: args.provider.clone(),
+        model: args.model.clone(),
+    };
+    let environment = match &args.environment {
+        Some(name) => {
+            let environment = config.environment_for(name)?;
+            ModelRequest {
+                provider: environment.provider.clone(),
+                model: environment.model.clone(),
+            }
+        }
+        None => ModelRequest::default(),
+    };
+    // A resumed session keeps the model it was last switched to.
+    let saved = match &args.session {
+        Some(path) if command_line.is_empty() && path.exists() => Session::inspect(path)
+            .ok()
+            .and_then(|data| data.model)
+            .map(|choice| ModelRequest::from(&choice)),
+        _ => None,
+    };
+    let selection = match &saved {
+        Some(saved) => config
+            .select_model(&[environment, saved.clone()])
+            .context("the session's saved provider is unavailable; choose one with --provider")?,
+        None => config.select_model(&[environment, command_line.clone()])?,
+    };
+    selection.apply_to(settings);
     if let Some(effort) = &args.reasoning_effort {
         settings.reasoning_effort = Some(effort.clone());
     }
@@ -689,7 +817,11 @@ fn resolve_run_context(
         let sources = read_project_instructions(workspace, &profile.settings.project_instructions)?;
         profile.settings.append_project_instructions(&sources);
     }
-    Ok(profile)
+    Ok(RunContext {
+        profile,
+        selection,
+        explicit: !command_line.is_empty(),
+    })
 }
 
 async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -> Result<()> {
@@ -702,7 +834,7 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
     if args.allow_unauthenticated {
         config.webhook.allow_unauthenticated = true;
     }
-    let client = create_client(&config.api)?;
+    let client = connect_provider(&config, DEFAULT_PROVIDER)?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = webhook::serve(config, client, Arc::clone(&mcp), registry).await;
     // Close MCP connections after jobs have stopped, even on failure.
@@ -747,7 +879,9 @@ mod tests {
             policy,
             context,
             approval_mode,
-        } = resolve_run_context(&config, "default", &args.agent).unwrap();
+        } = resolve_run_context(&config, "default", &args.agent)
+            .unwrap()
+            .profile;
         assert_eq!(settings.model, "profile-model");
         assert_eq!(settings.instructions, "Review only");
         assert!(policy.is_allowed("workspace_read"));
@@ -795,5 +929,70 @@ mod tests {
         let missing = directory.path().join("missing");
         let args = run_args(&["run", "--workspace", missing.to_str().unwrap(), "hello"]);
         assert!(resolve_run_context(&config, "default", &args.agent).is_err());
+    }
+
+    #[test]
+    fn provider_and_model_choices_carry_over_to_resumed_sessions() {
+        let config = AppConfig::parse("[agent]\nmodel = 'gpt-main'\n[providers.local]\nbase_url = 'http://127.0.0.1:1234/v1'\nmodel = 'qwen'\n[providers.lan]\nbase_url = 'http://192.168.1.10:1234/v1'\n[environments.dev]\nprovider = 'local'").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.json");
+        let session = path.to_str().unwrap();
+        let context = |arguments: &[&str]| {
+            let mut all = vec!["run", "--session", session, "--workspace", "."];
+            all.extend(arguments);
+            all.push("hello");
+            resolve_run_context(&config, "default", &run_args(&all).agent).unwrap()
+        };
+        let open = |run: &RunContext| {
+            let binding =
+                SessionBinding::new(&run.profile.context, &run.selection.api.base_url).unwrap();
+            open_session(
+                &path,
+                &binding,
+                false,
+                run.explicit.then_some(&run.selection.choice),
+            )
+        };
+
+        let first = context(&["--provider", "local"]);
+        assert!(first.explicit);
+        assert_eq!(first.profile.settings.model, "qwen");
+        drop(open(&first).unwrap());
+
+        // Without --provider or --model, the saved choice is used again.
+        let resumed = context(&[]);
+        assert!(!resumed.explicit);
+        assert_eq!(resumed.selection.choice.provider, "local");
+        assert_eq!(resumed.profile.settings.model, "qwen");
+        drop(open(&resumed).unwrap());
+
+        // Choosing another provider moves the conversation there.
+        let moved = context(&["--provider", "lan", "--model", "llama"]);
+        assert_eq!(moved.selection.choice.model, "llama");
+        let session = open(&moved).unwrap();
+        assert_eq!(
+            session.data().binding.endpoint,
+            "http://192.168.1.10:1234/v1"
+        );
+        drop(session);
+
+        // A conversation never follows a changed [api] silently.
+        let stay = context(&["--provider", "default"]);
+        drop(open(&stay).unwrap());
+        let mut unchosen = context(&[]);
+        unchosen.explicit = false;
+        unchosen.selection.api.base_url = "http://elsewhere.invalid/v1".into();
+        let error = open(&unchosen).err().unwrap().to_string();
+        assert!(error.contains("--provider"), "{error}");
+
+        let environment = resolve_run_context(
+            &config,
+            "default",
+            &run_args(&["run", "--environment", "dev", "hello"]).agent,
+        )
+        .unwrap();
+        assert_eq!(environment.selection.choice.provider, "local");
+        assert_eq!(environment.profile.settings.model, "qwen");
+        assert!(!environment.explicit);
     }
 }

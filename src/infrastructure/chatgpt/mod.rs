@@ -3,7 +3,9 @@
 
 pub mod auth;
 
-use super::openai::{backoff, is_retryable, read_event_stream, ApiSettings};
+use super::openai::{
+    backoff, is_retryable, is_unavailable_status, read_event_stream, ApiSettings, Unavailable,
+};
 use crate::application::ports::{replay_deltas, DeltaSink, ResponsesApi};
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -27,8 +29,7 @@ impl ChatGptClient {
     pub fn from_settings(settings: &ApiSettings) -> Result<Self> {
         // OAuth トークンを任意の互換 API へ送信させない。
         if settings.base_url.trim_end_matches('/') != "https://api.openai.com/v1"
-            || std::env::var("OPENAI_BASE_URL")
-                .is_ok_and(|url| url.trim_end_matches('/') != "https://api.openai.com/v1")
+            || settings.effective_base_url().trim_end_matches('/') != "https://api.openai.com/v1"
         {
             bail!("auth = \"chatgpt\" の接続先は固定です。api.base_url と OPENAI_BASE_URL のカスタム設定を外してください");
         }
@@ -74,6 +75,10 @@ impl ChatGptClient {
                     tokio::time::sleep(backoff(attempt, None)).await;
                     continue;
                 }
+                Err(error) if error.is_connect() || error.is_timeout() => {
+                    return Err(error)
+                        .context(Unavailable("ChatGPT にリクエストを送信できません".into()))
+                }
                 Err(error) => return Err(error).context("ChatGPT にリクエストを送信できません"),
             };
             let status = response.status();
@@ -97,10 +102,16 @@ impl ChatGptClient {
                 continue;
             }
             if !status.is_success() {
+                if is_unavailable_status(status) {
+                    let message = match status {
+                        StatusCode::TOO_MANY_REQUESTS => "ChatGPT の利用上限またはレート制限に達しました。利用状況を確認し、時間をおいて再実行してください".to_string(),
+                        _ => format!("ChatGPT が一時的に応答できません ({status})。時間をおいて再実行してください"),
+                    };
+                    return Err(Unavailable(message).into());
+                }
                 match status {
                     StatusCode::UNAUTHORIZED => bail!("ChatGPT 認証が失効しています。ano auth login を再実行してください"),
                     StatusCode::FORBIDDEN => bail!("ChatGPT へのアクセスが拒否されました。プラン、モデル、ワークスペースの利用権限を確認してください"),
-                    StatusCode::TOO_MANY_REQUESTS => bail!("ChatGPT の利用上限またはレート制限に達しました。利用状況を確認し、時間をおいて再実行してください"),
                     _ => bail!("ChatGPT のリクエストに失敗しました ({status})。モデルと入力・ツールの対応状況を確認してください"),
                 }
             }
