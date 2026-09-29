@@ -116,3 +116,67 @@ async fn cli_rejects_unknown_user_before_connecting() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("unknown user 'typo'"));
 }
+
+#[tokio::test]
+async fn runs_continue_without_mcp_servers_that_fail_to_connect() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&requests);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(payload): Json<Value>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                captured.lock().unwrap().push(payload);
+                Json(json!({"id": "resp_1", "status": "completed", "output": [{
+                    "type": "message", "content": [{"type": "output_text", "text": "done"}]
+                }]}))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("agent.toml"),
+        "[api]\nmax_retries = 0\n\n[[mcp_servers]]\nlabel = \"web\"\ntransport = \"streamable_http\"\nurl = \"https://mcp.example.invalid/mcp\"\nauthorization_env = \"ANO_TEST_MISSING_TOKEN\"\n",
+    )
+    .unwrap();
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(15),
+        Command::new(env!("CARGO_BIN_EXE_ano"))
+            .current_dir(directory.path())
+            .env("OPENAI_BASE_URL", &endpoint)
+            .env("OPENAI_API_KEY", "mock-key")
+            .env_remove("ANO_TEST_MISSING_TOKEN")
+            .args(["--config", "agent.toml", "run", "--json", "hello"])
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("[mcp unavailable] web"), "{stderr}");
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["text"], "done");
+    assert!(result["events"].as_array().unwrap().iter().any(|event| {
+        event["type"] == "mcp_server_unavailable" && event["server_label"] == "web"
+    }));
+    let instructions = requests.lock().unwrap()[0]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        instructions.contains("unavailable in this run: web.")
+            && !instructions.contains("ANO_TEST_MISSING_TOKEN"),
+        "{instructions}"
+    );
+    assert!(stderr.contains("ANO_TEST_MISSING_TOKEN"), "{stderr}");
+}

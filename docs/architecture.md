@@ -64,12 +64,13 @@ src/
 │   ├── tool.rs             ToolDefinition・ToolContext・予約名
 │   ├── mcp.rs              MCP サーバー設定と公開可否の判定
 │   ├── skill.rs            スキルの名前・説明・本文の検証
-│   └── environment.rs      実行環境と検証コマンドの設定
+│   ├── environment.rs      実行環境と検証コマンドの設定
+│   └── github.rs           git remote の URL から GitHub のリポジトリ名を読む
 ├── application/
 │   ├── ports.rs            外部依存のトレイト
 │   ├── agent/
 │   │   ├── mod.rs          実行ループ（Agent::run / run_in_session）
-│   │   ├── dispatch.rs     function call・MCP 呼び出し・承認・サブエージェントの実行
+│   │   ├── dispatch.rs     function call・MCP 呼び出し・承認・サブエージェントとレビュー（review_changes）の実行
 │   │   ├── discovery.rs    tool_search による遅延公開
 │   │   ├── mcp_runtime.rs  1回の実行で使う MCP 接続とポリシー適用
 │   │   ├── events.rs       AgentEvent と逐次通知
@@ -96,6 +97,7 @@ src/
 │       ├── glob.rs         パスのグロブ照合
 │       ├── checks.rs       workspace_check
 │       ├── exec.rs         workspace_exec（シェルコマンド）
+│       ├── git.rs          git_diff・git_commit_push（差分と、指定ファイルのコミットと push）
 │       ├── web.rs          web_fetch（公開 Web ページの取得と Markdown 変換）
 │       └── process.rs      子プロセスの実行（期限・出力上限・プロセスグループの停止）
 └── interface/

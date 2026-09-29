@@ -308,14 +308,33 @@ pub trait DirectMcpServer: Send + Sync {
     async fn call_tool(&self, tool_name: &str, arguments: Map<String, Value>) -> Result<Value>;
 }
 
+/// A direct MCP server that a run could not connect, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerFailure {
+    pub label: String,
+    pub error: String,
+}
+
 /// Provides MCP connections to runs.
 #[async_trait]
 pub trait McpGateway: Send + Sync {
     /// Every configured server, including Responses-managed ones.
     fn configs(&self) -> &[McpServerConfig];
     /// Connections to the direct servers a run with `policy` may use. Servers
-    /// disabled for the policy must not be connected at all.
+    /// disabled for the policy must not be connected at all. Fails when any
+    /// of them cannot be connected.
     async fn connect(&self, policy: &UserPolicy) -> Result<Vec<Arc<dyn DirectMcpServer>>>;
+    /// Like [`Self::connect`], but a server that cannot be connected is left
+    /// out and reported, so one unreachable or misconfigured server does not
+    /// stop runs that may not need it. Runs use this. The default calls
+    /// `connect`, so it still fails as a whole; implement it to report
+    /// failures per server, as `McpPool` does.
+    async fn connect_available(
+        &self,
+        policy: &UserPolicy,
+    ) -> Result<(Vec<Arc<dyn DirectMcpServer>>, Vec<McpServerFailure>)> {
+        Ok((self.connect(policy).await?, Vec::new()))
+    }
     /// Close connections and stop server processes.
     async fn shutdown(&self);
 }

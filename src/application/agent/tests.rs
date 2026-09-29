@@ -57,6 +57,7 @@ async fn with_scope<T>(active: &ActiveTools, body: impl AsyncFnOnce(RoundScope<'
         events: &events,
         plan: &plan,
         depth: 0,
+        read_only: false,
         token_budget: None,
         delegated_usage: &delegated_usage,
     })
@@ -226,7 +227,7 @@ fn initial_tool_payload_is_constant_size() {
     );
 
     let tools = agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0)
+        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0, false)
         .unwrap();
     let names = tools
         .iter()
@@ -236,7 +237,7 @@ fn initial_tool_payload_is_constant_size() {
 
     // Sub-agents cannot delegate further.
     let tools = agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 1)
+        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 1, false)
         .unwrap();
     assert_eq!(tools.len(), 2);
 }
@@ -621,7 +622,7 @@ async fn disabled_task_plan_cannot_be_called_or_exposed() {
     let mut agent = agent(ToolRegistry::new(), vec![]);
     agent.policy = UserPolicy::new(vec!["task_plan".into()], None);
     assert!(!agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0)
+        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0, false)
         .unwrap()
         .iter()
         .any(|tool| tool["name"] == "task_plan"));
@@ -1334,6 +1335,7 @@ async fn sub_agents_cannot_delegate_further() {
         events: &events,
         plan: &plan,
         depth: 1,
+        read_only: false,
         token_budget: None,
         delegated_usage: &delegated_usage,
     };

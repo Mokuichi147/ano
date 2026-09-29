@@ -8,6 +8,7 @@
 pub mod approval;
 pub mod compaction;
 pub mod environment;
+pub mod github;
 pub mod mcp;
 pub mod plan;
 pub mod policy;

@@ -89,6 +89,12 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// A directly connected MCP server could not be connected, so the run
+    /// goes on without it.
+    McpServerUnavailable {
+        server_label: String,
+        error: String,
+    },
     ToolSearch {
         round: usize,
         query: String,

@@ -6,7 +6,10 @@ use crate::domain::{
     mcp::{McpServerConfig, McpTransport},
     plan::TASK_PLAN_NAME,
     policy::UserPolicy,
-    tool::{ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
+    tool::{
+        ToolContext, ToolDefinition, DELEGATE_TASK_NAME, GIT_DIFF_NAME, REVIEW_CHANGES_NAME,
+        TOOL_SEARCH_NAME,
+    },
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -85,6 +88,7 @@ impl Agent {
         active: &ActiveTools,
         mcp_runtime: &McpRuntime,
         depth: usize,
+        allow_writes: bool,
     ) -> Result<Vec<Value>> {
         let mut tools = Vec::new();
         if !self.policy.is_disabled(TOOL_SEARCH_NAME) {
@@ -95,6 +99,14 @@ impl Agent {
         }
         if depth == 0 && !self.policy.is_disabled(DELEGATE_TASK_NAME) {
             tools.push(delegate_task_definition().as_response_tool());
+        }
+        // Only runs that can change files have changes to review.
+        if depth == 0
+            && allow_writes
+            && !self.policy.is_disabled(REVIEW_CHANGES_NAME)
+            && self.registry.is_registered(GIT_DIFF_NAME)
+        {
+            tools.push(review_changes_definition().as_response_tool());
         }
 
         tools.extend(
@@ -467,6 +479,21 @@ pub fn delegate_task_definition() -> ToolDefinition {
                 "task": {"type": "string", "description": "Complete instructions for the sub-agent"}
             },
             "required": ["task"],
+            "additionalProperties": false
+        }),
+    )
+}
+
+pub fn review_changes_definition() -> ToolDefinition {
+    ToolDefinition::new(
+        REVIEW_CHANGES_NAME,
+        "Have the uncommitted changes of the workspace reviewed by a read-only reviewer in a fresh conversation, which sees only the diff, the code, and your description of the request, and get back its findings. Call it after making changes and before git_commit_push, which commits files only in the state the last review saw: after changing anything again, call it again. Judge each finding on its merits: fix the ones that are right, and keep the reasons for rejecting the others (for example for the pull request description).",
+        json!({
+            "type": "object",
+            "properties": {
+                "request": {"type": "string", "description": "What the changes are meant to do: the task or issue with its requirements and constraints, since the reviewer cannot see this conversation"}
+            },
+            "required": ["request"],
             "additionalProperties": false
         }),
     )

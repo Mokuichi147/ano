@@ -216,6 +216,18 @@ allow_writes = false
 # which rewrite allowed_tools, or disabled_tools when there is no allowlist.
 # disabled_tools = ["delete_page"]
 
+# GitHub's MCP server: read issues and pull requests, open pull requests, and
+# comment. Local changes are committed and pushed with the git_commit_push
+# tool (needs allow_writes), whose result create_pull_request takes.
+# export GITHUB_MCP_TOKEN="$(gh auth token)"   # or a personal access token
+# [[mcp_servers]]
+# label = "github"
+# transport = "streamable_http"
+# url = "https://api.githubcopilot.com/mcp/"
+# authorization_env = "GITHUB_MCP_TOKEN"
+# Leave out merging, deleting, and creating repositories.
+# allowed_tools = ["issue_read", "list_issues", "search_issues", "pull_request_read", "list_pull_requests", "search_pull_requests", "get_file_contents", "create_pull_request", "update_pull_request", "add_issue_comment", "pull_request_review_write", "add_comment_to_pending_review"]
+
 # A Streamable HTTP server that requires OAuth. Run `ano mcp login docs_oauth`
 # once; the tokens are refreshed automatically and saved in the OS data directory:
 #   macOS:   ~/Library/Application Support/ano/oauth

@@ -31,7 +31,7 @@ pub use application::{
     input::{build_user_input, InputPart},
     ports::{
         ApprovalHandler, ApprovalSource, ConversationStore, DirectMcpServer, DirectMcpTool,
-        HistoryBackend, McpApprovalRequest, McpGateway, ResponsesApi,
+        HistoryBackend, McpApprovalRequest, McpGateway, McpServerFailure, ResponsesApi,
     },
     profile::ExecutionProfile,
     registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
@@ -46,7 +46,8 @@ pub use domain::{
     policy::UserPolicy,
     session::{ModelChoice, SessionBinding, SessionData, SessionStatus},
     tool::{
-        ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME, WORKSPACE_EXEC_NAME,
+        ToolContext, ToolDefinition, DELEGATE_TASK_NAME, REVIEW_CHANGES_NAME, TOOL_SEARCH_NAME,
+        WORKSPACE_EXEC_NAME,
     },
     usage::{ApiOperation, StopReason, UsageSummary},
 };

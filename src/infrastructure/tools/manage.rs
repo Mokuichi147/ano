@@ -4,7 +4,9 @@
 
 use super::{
     non_strict_definition,
-    workspace::{optional_bool, relative_path, workspace_root, writable_workspace_path},
+    workspace::{
+        inside_git_dir, optional_bool, relative_path, workspace_root, writable_workspace_path,
+    },
 };
 use crate::{application::registry::ToolRegistry, domain::tool::ToolContext};
 use anyhow::{bail, Context, Result};
@@ -90,10 +92,7 @@ fn protected_path(raw: &str) -> Result<PathBuf> {
     if relative.file_name().is_none() {
         bail!("path must name an entry inside the workspace, not the workspace itself");
     }
-    if relative
-        .components()
-        .any(|component| component.as_os_str() == ".git")
-    {
+    if inside_git_dir(&relative) {
         bail!("entries inside .git cannot be moved or deleted");
     }
     Ok(relative)

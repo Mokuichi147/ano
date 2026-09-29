@@ -1,8 +1,10 @@
 //! Built-in local tools: `echo`, `unix_time`, workspace file access and
-//! management, configured validation checks, shell commands, and web pages.
+//! management, configured validation checks, shell commands, git commits and
+//! pushes, and web pages.
 
 mod checks;
 mod exec;
+mod git;
 mod glob;
 mod manage;
 mod process;

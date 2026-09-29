@@ -29,7 +29,10 @@ use crate::{
         mcp::McpTransport,
         plan::{TaskGoal, TASK_PLAN_NAME},
         session::{ModelChoice, SessionBinding},
-        tool::{ToolContext, DELEGATE_TASK_NAME, WEB_FETCH_NAME, WORKSPACE_EXEC_NAME},
+        tool::{
+            ToolContext, DELEGATE_TASK_NAME, GIT_COMMIT_PUSH_NAME, REVIEW_CHANGES_NAME,
+            WEB_FETCH_NAME, WORKSPACE_EXEC_NAME,
+        },
     },
     infrastructure::{
         chronotope::Chronotope, mcp::McpPool, project::read_project_instructions,
@@ -365,6 +368,11 @@ fn list_tools(
             "  delegate_task - Hand a task to a sub-agent with a fresh context (always available)"
         );
     }
+    if !policy.is_disabled(REVIEW_CHANGES_NAME) {
+        println!(
+            "  review_changes - Have a read-only reviewer in a fresh context review the uncommitted changes; git_commit_push needs it (always available)"
+        );
+    }
     for definition in registry.definitions(&policy) {
         let mut notes = Vec::new();
         if definition.name == WORKSPACE_EXEC_NAME {
@@ -379,6 +387,13 @@ fn list_tools(
                 Some(environment) if environment.allow_web => "enabled by allow_web",
                 Some(_) => "unavailable: allow_web is not set",
                 None => "needs --allow-web",
+            });
+        }
+        if definition.name == GIT_COMMIT_PUSH_NAME {
+            notes.push(match environment {
+                Some(environment) if environment.allow_writes => "enabled by allow_writes",
+                Some(_) => "unavailable: allow_writes is not set",
+                None => "needs --allow-writes",
             });
         }
         if definition.requires_approval {

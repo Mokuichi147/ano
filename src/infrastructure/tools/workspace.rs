@@ -162,8 +162,9 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
             }
         },
     )?;
-    // Moves and deletes share the lock, so they never race an edit.
-    super::manage::register(registry, mutations)?;
+    // Moves, deletes, and commits share the lock, so they never race an edit.
+    super::manage::register(registry, Arc::clone(&mutations))?;
+    super::git::register(registry, mutations)?;
     Ok(())
 }
 
@@ -807,13 +808,26 @@ pub(super) async fn existing_workspace_path(
     Ok(candidate)
 }
 
+/// Whether `relative` is inside repository metadata, where a written hook or
+/// config (`core.fsmonitor`, filters) would run commands on the next git
+/// call. Compared without case for case-insensitive filesystems.
+pub(super) fn inside_git_dir(relative: &Path) -> bool {
+    relative
+        .components()
+        .any(|component| component.as_os_str().eq_ignore_ascii_case(".git"))
+}
+
 /// Resolve a write target without ever touching the filesystem outside the
 /// workspace: each parent directory is checked before the next one is
-/// created, and the final path must not be a symbolic link.
+/// created, and the final path must not be a symbolic link. Paths inside
+/// `.git` are refused.
 pub(super) async fn writable_workspace_path(
     context: &ToolContext,
     relative: &Path,
 ) -> Result<PathBuf> {
+    if inside_git_dir(relative) {
+        bail!("files inside .git cannot be written");
+    }
     let root = workspace_root(context).await?;
     let file_name = relative
         .file_name()
@@ -1510,6 +1524,39 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert!(!workspace.path().join("note.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn repository_metadata_is_never_written() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(workspace.path().join(".git/hooks")).unwrap();
+        std::fs::write(workspace.path().join(".git/config"), "[core]\n").unwrap();
+        let registry = registry();
+        let context = context(workspace.path(), true);
+        for path in [".git/hooks/pre-commit", ".GIT/config", "sub/.git/config"] {
+            let error = registry
+                .execute_with_context(
+                    "workspace_write",
+                    json!({"path": path, "content": "#!/bin/sh\n"}),
+                    &context,
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(".git"), "{path}: {error}");
+        }
+        let edit = registry
+            .execute_with_context(
+                "workspace_edit",
+                json!({"path": ".git/config", "edits": [{"old_text": "[core]", "new_text": "[core]\nfsmonitor = evil"}]}),
+                &context,
+            )
+            .await;
+        assert!(edit.is_err());
+        assert!(!workspace.path().join(".git/hooks/pre-commit").exists());
+        assert_eq!(
+            std::fs::read_to_string(workspace.path().join(".git/config")).unwrap(),
+            "[core]\n"
+        );
     }
 
     #[cfg(unix)]

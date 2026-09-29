@@ -20,7 +20,8 @@ use crate::{
         plan::{PlanChange, RunOutcome, TaskPlan, TASK_PLAN_NAME},
         tool::{
             ToolContext, DELEGATE_TASK_NAME, EXEC_DEFAULT_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS,
-            TOOL_SEARCH_NAME, WORKSPACE_EXEC_NAME,
+            GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME, REVIEW_CHANGES_NAME, TOOL_SEARCH_NAME,
+            WORKSPACE_EXEC_NAME,
         },
         usage::UsageSummary,
     },
@@ -28,7 +29,13 @@ use crate::{
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use serde_json::{json, Value};
-use std::{collections::BTreeSet, future::Future, pin::Pin, sync::Mutex, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    future::Future,
+    pin::Pin,
+    sync::Mutex,
+    time::Duration,
+};
 
 /// State shared by every output item of one Responses API round.
 ///
@@ -47,6 +54,8 @@ pub(super) struct RoundScope<'a> {
     pub plan: &'a Mutex<TaskPlan>,
     /// Nesting of the run: 0, or 1 inside a sub-agent.
     pub depth: usize,
+    /// A reviewer's run: every call that needs approval is denied.
+    pub read_only: bool,
     /// Tokens left in the run's budget, if it has one.
     pub token_budget: Option<u64>,
     /// Collects the usage of sub-agents started in this round.
@@ -232,6 +241,10 @@ impl Agent {
             return Ok((self.delegate_task(&arguments, scope).await, None));
         }
 
+        if name == REVIEW_CHANGES_NAME {
+            return Ok((self.review_changes(&arguments, scope).await, None));
+        }
+
         if name == TOOL_SEARCH_NAME {
             if self.policy.is_disabled(TOOL_SEARCH_NAME) {
                 events.push(AgentEvent::LocalToolBlocked {
@@ -350,21 +363,34 @@ impl Agent {
                 None,
             ));
         }
+        if name == GIT_COMMIT_PUSH_NAME {
+            if let Some(refusal) = self.unreviewed_files(&arguments, tool_context).await {
+                events.push(AgentEvent::LocalToolResult {
+                    round,
+                    name: name.to_string(),
+                    output: refusal.clone(),
+                });
+                return Ok((refusal, None));
+            }
+        }
         if let Some(definition) = self
             .registry
             .definition(name)
             .filter(|definition| definition.requires_approval)
         {
             let decision = self
-                .request_approval(McpApprovalRequest {
-                    approval_request_id: uuid::Uuid::new_v4().to_string(),
-                    source: ApprovalSource::LocalTool,
-                    tool_name: name.to_string(),
-                    arguments: arguments.clone(),
-                    tool_description: Some(definition.description),
-                    user_request: scope.user_request.to_string(),
-                    ..McpApprovalRequest::default()
-                })
+                .request_approval(
+                    scope.read_only,
+                    McpApprovalRequest {
+                        approval_request_id: uuid::Uuid::new_v4().to_string(),
+                        source: ApprovalSource::LocalTool,
+                        tool_name: name.to_string(),
+                        arguments: arguments.clone(),
+                        tool_description: Some(definition.description),
+                        user_request: scope.user_request.to_string(),
+                        ..McpApprovalRequest::default()
+                    },
+                )
                 .await?;
             events.push(AgentEvent::LocalToolApproval {
                 round,
@@ -401,6 +427,13 @@ impl Agent {
                 .min(EXEC_MAX_TIMEOUT_SECS)
                 .saturating_add(5),
             _ => self.settings.tool_timeout_secs,
+        };
+        // The commit checks the files again under the workspace lock, so an
+        // edit racing this call cannot slip in: hand it what was reviewed.
+        let arguments = if name == GIT_COMMIT_PUSH_NAME {
+            self.with_reviewed_files(arguments, tool_context)
+        } else {
+            arguments
         };
         let output = match self
             .with_tool_timeout(
@@ -439,21 +472,8 @@ impl Agent {
     }
 
     async fn delegate_task_inner(&self, arguments: &Value, scope: RoundScope<'_>) -> Value {
-        let RoundScope { round, events, .. } = scope;
-        if self.policy.is_disabled(DELEGATE_TASK_NAME) || scope.depth > 0 {
-            events.push(AgentEvent::LocalToolBlocked {
-                round,
-                name: DELEGATE_TASK_NAME.into(),
-            });
-            return json!({
-                "error": "tool_disabled",
-                "tool": DELEGATE_TASK_NAME,
-                "message": if scope.depth > 0 {
-                    "A sub-agent cannot delegate further; do the work yourself."
-                } else {
-                    "Delegation is disabled for the current user."
-                }
-            });
+        if let Some(refusal) = self.subagent_refusal(DELEGATE_TASK_NAME, scope) {
+            return refusal;
         }
         let Some(task) = arguments["task"]
             .as_str()
@@ -466,42 +486,11 @@ impl Agent {
                 "message": "task must be a non-empty string."
             });
         };
-        events.push(AgentEvent::SubagentStarted {
-            round,
-            task: task.to_string(),
-        });
-        let spent = Mutex::new(UsageSummary::default());
-        let request = RunRequest {
-            input: vec![InputPart::Text(task.to_string())],
-            raw_input: None,
-            context: scope.tool_context.clone(),
-            goal: None,
-        };
-        let origin = RunOrigin {
-            parent_conversation: scope.conversation.map(str::to_string),
-            parent_call_id: scope.call_id.map(str::to_string),
-            depth: scope.depth + 1,
-            token_limit: scope.token_budget,
-            user_request: Some(scope.user_request.to_string()),
-            usage_sink: Some(&spent),
-        };
-        let result = self.run_inner(request, None, origin).await;
-        let spent = spent
-            .into_inner()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        scope
-            .delegated_usage
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .add(&spent);
-        match result {
+        match self
+            .run_subagent(task, scope.tool_context.clone(), false, scope)
+            .await
+        {
             Ok(result) => {
-                events.push(AgentEvent::SubagentFinished {
-                    round,
-                    outcome: Some(result.outcome),
-                    usage: spent,
-                    error: None,
-                });
                 let mut output = json!({
                     "report": result.text,
                     "outcome": result.outcome,
@@ -512,25 +501,268 @@ impl Agent {
                 }
                 output
             }
-            Err(error) => {
-                let message = format!("{error:#}");
-                events.push(AgentEvent::SubagentFinished {
-                    round,
-                    outcome: None,
-                    usage: spent,
-                    error: Some(message.clone()),
-                });
-                json!({
-                    "error": "subagent_failed",
-                    "tool": DELEGATE_TASK_NAME,
-                    "message": message,
-                })
-            }
+            Err(error) => json!({
+                "error": "subagent_failed",
+                "tool": DELEGATE_TASK_NAME,
+                "message": format!("{error:#}"),
+            }),
         }
     }
 
+    /// Why the sub-agent tool `name` cannot run here, if it cannot.
+    fn subagent_refusal(&self, name: &str, scope: RoundScope<'_>) -> Option<Value> {
+        if !self.policy.is_disabled(name) && scope.depth == 0 {
+            return None;
+        }
+        scope.events.push(AgentEvent::LocalToolBlocked {
+            round: scope.round,
+            name: name.into(),
+        });
+        Some(json!({
+            "error": "tool_disabled",
+            "tool": name,
+            "message": if scope.depth > 0 {
+                "A sub-agent cannot start another sub-agent; do the work yourself."
+            } else {
+                "This tool is disabled for the current user."
+            }
+        }))
+    }
+
+    /// Run `task` in a sub-agent with a fresh conversation in `context`,
+    /// counting its usage into the round. `reviewer` makes it the read-only
+    /// reviewer of `review_changes`.
+    async fn run_subagent(
+        &self,
+        task: &str,
+        context: ToolContext,
+        reviewer: bool,
+        scope: RoundScope<'_>,
+    ) -> Result<super::AgentResult> {
+        let RoundScope { round, events, .. } = scope;
+        events.push(AgentEvent::SubagentStarted {
+            round,
+            task: task.to_string(),
+        });
+        let spent = Mutex::new(UsageSummary::default());
+        let request = RunRequest {
+            input: vec![InputPart::Text(task.to_string())],
+            raw_input: None,
+            context,
+            goal: None,
+        };
+        let origin = RunOrigin {
+            parent_conversation: scope.conversation.map(str::to_string),
+            parent_call_id: scope.call_id.map(str::to_string),
+            depth: scope.depth + 1,
+            token_limit: scope.token_budget,
+            user_request: Some(scope.user_request.to_string()),
+            usage_sink: Some(&spent),
+            reviewer,
+        };
+        let result = self.run_inner(request, None, origin).await;
+        let spent = spent
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        scope
+            .delegated_usage
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .add(&spent);
+        events.push(AgentEvent::SubagentFinished {
+            round,
+            outcome: result.as_ref().ok().map(|result| result.outcome),
+            usage: spent,
+            error: result.as_ref().err().map(|error| format!("{error:#}")),
+        });
+        result
+    }
+
+    /// Have a read-only reviewer in a fresh conversation review the
+    /// uncommitted changes, and record the reviewed state of the files when
+    /// they did not change during the review.
+    fn review_changes<'a>(
+        &'a self,
+        arguments: &'a Value,
+        scope: RoundScope<'a>,
+    ) -> Pin<Box<dyn Future<Output = Value> + Send + 'a>> {
+        Box::pin(self.review_changes_inner(arguments, scope))
+    }
+
+    async fn review_changes_inner(&self, arguments: &Value, scope: RoundScope<'_>) -> Value {
+        let failure = |error: &str, message: String| json!({"error": error, "tool": REVIEW_CHANGES_NAME, "message": message});
+        if let Some(refusal) = self.subagent_refusal(REVIEW_CHANGES_NAME, scope) {
+            return refusal;
+        }
+        let Some(request) = arguments["request"]
+            .as_str()
+            .map(str::trim)
+            .filter(|request| !request.is_empty())
+        else {
+            return failure(
+                "invalid_arguments",
+                "request must describe what the changes are meant to do.".into(),
+            );
+        };
+        let context = scope.tool_context;
+        let Some(workspace) = context.workspace.clone() else {
+            return failure("review_unavailable", "no workspace is configured.".into());
+        };
+        let before = match self.workspace_changes(context).await {
+            Ok(changes) if changes.files.is_empty() => {
+                return failure(
+                    "nothing_to_review",
+                    "The workspace has no uncommitted changes.".into(),
+                )
+            }
+            Ok(changes) => changes,
+            Err(error) => return failure("review_unavailable", format!("{error:#}")),
+        };
+        let files: Vec<String> = before.files.keys().cloned().collect();
+        let task = format!(
+            "Review the uncommitted changes in this workspace.\n\n\
+             The request the changes are meant to fulfil, as the implementing agent described it:\n\
+             <request>\n{request}\n</request>\n\n\
+             Changed files: {}\n\n\
+             The diff{}:\n```diff\n{}\n```",
+            serde_json::to_string(&files).unwrap_or_default(),
+            if before.truncated {
+                " (cut short; read the rest with git_diff and workspace_read)"
+            } else {
+                ""
+            },
+            before.diff
+        );
+        // The reviewer reads, runs the configured checks, and reports; it
+        // cannot write, run commands, or get calls approved.
+        let reviewer_context = ToolContext {
+            allow_writes: false,
+            allow_exec: false,
+            ..context.clone()
+        };
+        let result = self
+            .run_subagent(&task, reviewer_context, true, scope)
+            .await;
+        let report = match result {
+            Ok(result) => result.text,
+            Err(error) => return failure("review_failed", format!("{error:#}")),
+        };
+        let after = self.workspace_changes(context).await;
+        let recorded = matches!(&after, Ok(after) if after.files == before.files);
+        if recorded {
+            self.reviews
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(workspace, before.files);
+        }
+        json!({
+            "report": report,
+            "reviewed_files": files,
+            // The reviewer got a shortened diff and had to read the rest.
+            "diff_truncated": before.truncated,
+            "recorded": recorded,
+            "next": if recorded {
+                "Judge each finding on its merits: fix the ones that are right, and note why you reject the others (for example in the pull request description). git_commit_push commits only files as they were reviewed, so after any further change call review_changes again."
+            } else {
+                "The files changed while they were reviewed, so this review was not recorded; call review_changes again before git_commit_push."
+            },
+        })
+    }
+
+    /// The uncommitted changes of the workspace from `git_diff`.
+    async fn workspace_changes(&self, context: &ToolContext) -> Result<WorkspaceChanges> {
+        let output = self
+            .registry
+            .execute_with_context(GIT_DIFF_NAME, json!({}), context)
+            .await?;
+        Ok(WorkspaceChanges {
+            files: file_hashes(&output),
+            diff: output["diff"].as_str().unwrap_or_default().to_string(),
+            truncated: output["diff_truncated"].as_bool().unwrap_or(false),
+        })
+    }
+
+    /// `git_commit_push` arguments with `reviewed` set to the files of the
+    /// last review of the workspace (or null), replacing any the model sent.
+    fn with_reviewed_files(&self, mut arguments: Value, context: &ToolContext) -> Value {
+        let reviewed = context.workspace.as_ref().and_then(|workspace| {
+            self.reviews
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .get(workspace)
+                .cloned()
+        });
+        if let Some(arguments) = arguments.as_object_mut() {
+            arguments.insert("reviewed".into(), json!(reviewed));
+        }
+        arguments
+    }
+
+    /// Why `git_commit_push` must not commit its files yet: a file is not in
+    /// the state the last `review_changes` saw, or there was no review.
+    async fn unreviewed_files(&self, arguments: &Value, context: &ToolContext) -> Option<Value> {
+        let refusal = |message: String| {
+            Some(json!({
+                "error": "review_required",
+                "tool": GIT_COMMIT_PUSH_NAME,
+                "message": message,
+            }))
+        };
+        let Some(workspace) = &context.workspace else {
+            return None; // The tool itself reports the missing workspace.
+        };
+        let Some(paths) = arguments.get("files").filter(|files| files.is_array()) else {
+            return None; // The tool itself reports the invalid arguments.
+        };
+        let current = match self
+            .registry
+            .execute_with_context(GIT_DIFF_NAME, json!({ "paths": paths }), context)
+            .await
+        {
+            Ok(output) => file_hashes(&output),
+            Err(error) => {
+                return refusal(format!(
+                    "could not check that the files were reviewed: {error:#}"
+                ))
+            }
+        };
+        let reviewed = self
+            .reviews
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(workspace)
+            .cloned();
+        let Some(reviewed) = reviewed else {
+            return refusal(format!(
+                "The changes have not been reviewed. Call {REVIEW_CHANGES_NAME} first, judge its findings, and then commit."
+            ));
+        };
+        let unreviewed: Vec<&String> = current
+            .iter()
+            .filter(|(path, hash)| reviewed.get(*path) != Some(*hash))
+            .map(|(path, _)| path)
+            .collect();
+        if unreviewed.is_empty() {
+            return None;
+        }
+        refusal(format!(
+            "These files changed after the last review or were not part of it: {}. Call {REVIEW_CHANGES_NAME} again before committing them.",
+            serde_json::to_string(&unreviewed).unwrap_or_default()
+        ))
+    }
+
     /// Ask the approval handler, one request at a time.
-    async fn request_approval(&self, request: McpApprovalRequest) -> Result<ApprovalDecision> {
+    async fn request_approval(
+        &self,
+        read_only: bool,
+        request: McpApprovalRequest,
+    ) -> Result<ApprovalDecision> {
+        if read_only {
+            return Ok(ApprovalDecision {
+                approved: false,
+                reason: Some("a read-only reviewer cannot make calls that need approval".into()),
+            });
+        }
         let _guard = self.approval_lock.lock().await;
         self.approval_handler.decide(request).await
     }
@@ -579,7 +811,7 @@ impl Agent {
                     .find(|tool| tool.name == request.tool_name)
                     .and_then(|tool| tool.description.clone())
             });
-            self.request_approval(request).await?
+            self.request_approval(scope.read_only, request).await?
         } else {
             events.push(AgentEvent::McpToolBlocked {
                 round,
@@ -650,7 +882,9 @@ impl Agent {
                 user_request: scope.user_request.to_string(),
                 review: None,
             };
-            let decision = self.request_approval(approval_request).await?;
+            let decision = self
+                .request_approval(scope.read_only, approval_request)
+                .await?;
             events.push(AgentEvent::McpApproval {
                 round,
                 server_label: server_label.clone(),
@@ -732,4 +966,22 @@ fn denial_message(reason: Option<&str>, what: &str) -> String {
     format!(
         "{denial} Do not retry the same call; continue without it, or tell the user what you need."
     )
+}
+
+/// The uncommitted changes `review_changes` shows its reviewer.
+struct WorkspaceChanges {
+    /// Changed files with the sha256 of their content (null when deleted).
+    files: BTreeMap<String, Value>,
+    diff: String,
+    truncated: bool,
+}
+
+/// `path -> sha256` from the `files` of a `git_diff` result.
+fn file_hashes(output: &Value) -> BTreeMap<String, Value> {
+    output["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|file| Some((file["path"].as_str()?.to_string(), file["sha256"].clone())))
+        .collect()
 }

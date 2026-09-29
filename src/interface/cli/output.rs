@@ -667,6 +667,10 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
                 emit_progress(line);
             }
         }
+        AgentEvent::McpServerUnavailable {
+            server_label,
+            error,
+        } => progress!("[mcp unavailable] {server_label}: {error} (continuing without it)"),
         AgentEvent::ToolSearch { query, results, .. } => {
             status(format!(
                 "[tool search] {query} -> {} result(s)",

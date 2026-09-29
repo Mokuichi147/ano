@@ -16,6 +16,16 @@ pub const DELEGATE_TASK_NAME: &str = "delegate_task";
 pub const WORKSPACE_EXEC_NAME: &str = "workspace_exec";
 /// Built-in tool that reads web pages when `ToolContext::allow_web` is set.
 pub const WEB_FETCH_NAME: &str = "web_fetch";
+/// Built-in tool that commits workspace files and pushes them; it changes
+/// the checkout, so it needs `ToolContext::allow_writes`.
+pub const GIT_COMMIT_PUSH_NAME: &str = "git_commit_push";
+/// Built-in tool that shows the uncommitted changes of the workspace, with a
+/// content hash per file that reviews are recorded against.
+pub const GIT_DIFF_NAME: &str = "git_diff";
+/// Reserved runtime tool that has a read-only sub-agent in a fresh
+/// conversation review the uncommitted changes. `git_commit_push` only
+/// commits files in the state a review last saw.
+pub const REVIEW_CHANGES_NAME: &str = "review_changes";
 
 /// Default and maximum `timeout_secs` of one `workspace_exec` command.
 pub const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -105,6 +115,7 @@ impl ToolContext {
         match tool_name {
             WORKSPACE_EXEC_NAME => self.allow_exec,
             WEB_FETCH_NAME => self.allow_web,
+            GIT_COMMIT_PUSH_NAME => self.allow_writes,
             _ => true,
         }
     }
@@ -120,8 +131,8 @@ pub fn validate_tool_name(name: &str) -> Result<()> {
     if name == TOOL_SEARCH_NAME {
         bail!("tool name '{TOOL_SEARCH_NAME}' is reserved for lazy discovery");
     }
-    if name == DELEGATE_TASK_NAME {
-        bail!("tool name '{DELEGATE_TASK_NAME}' is reserved for sub-agents");
+    if name == DELEGATE_TASK_NAME || name == REVIEW_CHANGES_NAME {
+        bail!("tool name '{name}' is reserved for sub-agents");
     }
     if name.starts_with(DIRECT_MCP_PREFIX) {
         bail!("tool name prefix '{DIRECT_MCP_PREFIX}' is reserved for MCP tools");

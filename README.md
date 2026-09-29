@@ -39,6 +39,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 
 **入出力と連携**
 - テキスト・画像・音声入力（音声は文字起こしせず native `input_audio` として送信）
+- GitHub MCP と組み合わせた、Issue の解決から Pull Request 作成・レビューまでの対話的な作業（別の新しい会話でのレビュー `review_changes` を push 前に必須とし、指定ファイルだけをコミットして push する `git_commit_push`）
 - 名前付き実行環境を選べる署名付き Webhook と、実行中の進捗確認・中止・タイムアウトに対応した非同期ジョブ API
 - LM Studio などの OpenAI 互換 `/v1/responses` endpoint
 - 名前付きの複数の接続先（`[providers]`）と、実行ごと・環境ごと・対話の途中（`/provider`・`/model`）での接続先とモデルの切り替え
@@ -345,17 +346,20 @@ fallback = ["lan2", "codex"]      # lan が使えなければ lan2、次に code
 | `workspace_check` | 環境の `checks` に登録した検証コマンドを実行。`name:null` で一覧 | `checks` |
 | `workspace_exec` | シェルコマンドを workspace で実行し、終了コードと出力を返す。呼び出しごとに承認が必要（[詳細](#コマンド実行workspace_exec)） | `allow_exec` |
 | `web_fetch` | 公開 Web ページを取得し、HTML を Markdown に変換して返す。`offset`・`max_bytes` で分割して読む。呼び出しごとに承認が必要（[詳細](#web-ページの取得web_fetch)） | `allow_web` |
+| `git_diff` | 未コミットの変更（新規ファイルを含む）の差分と、ファイルごとの状態と sha256（内容と実行ビットから計算）を返す | workspace |
+| `git_commit_push` | 指定したファイルだけをコミットし、ブランチを remote へ push する。既定ブランチには直接コミットしない。`review_changes` を受けた内容のファイルだけをコミットできる。呼び出しごとに承認が必要（[詳細](#github-の-issue-と-pull-request)） | `allow_writes` |
 | `skill_read` | 保存済みスキルの手順を名前で読む（[詳細](docs/agent-runtime.md#スキルskill_read--skill_save)） | `[skills]` |
 | `skill_save` | 上手くいった手順をスキルとして保存・更新する。呼び出しごとに承認が必要 | `[skills]` |
 | `task_plan` | 作業計画の読み書き（[詳細](docs/agent-runtime.md#作業計画と完了判定)） | 常時 |
 | `tool_search` | 登録済み tool・MCP の検索（[詳細](docs/agent-runtime.md#tool-の遅延公開tool_search)） | 常時 |
 | `delegate_task` | 作業をサブエージェントに任せ、報告を受け取る（[詳細](docs/agent-runtime.md#サブエージェントdelegate_task)） | 常時 |
+| `review_changes` | 未コミットの変更を、新しい会話の読み取り専用のレビュー担当に確認させ、指摘を受け取る（[詳細](docs/agent-runtime.md#変更のレビューreview_changes)） | `allow_writes` |
 | `echo` / `unix_time` | 動作確認用 | なし |
 
 実際に使える tool は、ユーザーと環境の `allowed_tools` / `disabled_tools` で決まります。読み取り専用の環境で検索を使うには `allowed_tools` に `workspace_search`・`workspace_find` を加えてください。`workspace_*` は移動・削除・コマンド実行（`allow_exec` のとき）も許可する点に注意してください。
 
 - **workspace の外には出ません。** 絶対パスや `..` を拒否し、既存の親ディレクトリを1階層ずつ正規化して workspace 内であることを確認します。シンボリックリンクを経由した書き込みも拒否し、リンクの削除・移動ではリンク先に触れません。
-- **`.git` と workspace ルートは移動・削除できません。**
+- **`.git` の中は書き込み・移動・削除できません。** hook や `.git/config` の書き換えで、次の git 操作時にコマンドが実行されるのを防ぐためです。workspace ルートも移動・削除できません。
 - **検索量に上限があります。** `workspace_search`・`workspace_find` は 10,000 エントリ（検索はさらに 32 MiB）までを走査し、リンク・バイナリ・10 MiB 超のファイルと、`.git`・`node_modules`・`target` などの生成物ディレクトリを省略します。上限に達したら範囲を狭めて再検索します。
 - **`.gitignore` に従います。** workspace 内の各ディレクトリの `.gitignore` と `.git/info/exclude` に一致するファイル・ディレクトリは検索しません（Git リポジトリでなくても適用）。`path` で明示したディレクトリは、それ自体が無視対象でも検索します。省いた数は結果の `ignored` / `skipped_ignored` に入ります。
 - **検証コマンドは設定で固定されます。** `workspace_check` のコマンドと引数は設定ファイルで決まり、workspace を作業ディレクトリとして実行し、出力は上限付きで返します。検証ごとの `timeout_secs` を優先し、タイムアウト時も取得済みの出力を返します。Webhook のジョブ全体の制限は引き続き適用されます。
@@ -389,6 +393,42 @@ ano chat --allow-web --approval-mode auto
 - HTML は Markdown に変換し（`script`・`style`・`nav` などは除外）、`title` を返します。テキスト・JSON・XML はそのまま返し、画像などのバイナリは扱いません。`raw:true` で HTML をそのまま返します。
 - 1回の取得は 30 秒・5 MiB まで、返す内容は既定 32 KiB（`max_bytes` で最大 256 KiB）です。続きは `next_offset` を `offset` に渡して読みます。
 - Cookie や認証情報は送りません。ログインが必要なページは読めません。
+
+### GitHub の Issue と Pull Request
+
+GitHub の操作は [GitHub MCP Server](https://github.com/github/github-mcp-server) に任せ、手元の変更のコミットと push は `git_commit_push` で行います。組み合わせると、`ano chat` で「Issue を解決して PR を作成して」と頼むだけで、Issue の読み取りから PR の作成まで進みます。
+
+```toml
+[[mcp_servers]]
+label = "github"
+transport = "streamable_http"
+url = "https://api.githubcopilot.com/mcp/"
+authorization_env = "GITHUB_MCP_TOKEN"
+description = "GitHub の Issue・Pull Request・リポジトリを操作します"
+# マージ・削除・リポジトリ作成などは含めない
+allowed_tools = ["issue_read", "list_issues", "search_issues", "pull_request_read", "list_pull_requests", "search_pull_requests", "get_file_contents", "create_pull_request", "update_pull_request", "add_issue_comment", "pull_request_review_write", "add_comment_to_pending_review"]
+```
+
+```sh
+export GITHUB_MCP_TOKEN="$(gh auth token)"   # または Personal Access Token
+cd /path/to/clone
+ano chat --allow-writes
+> https://github.com/OWNER/REPO/issues/6 を解決して PR を作成して
+> PR #8 をレビューして、気になる点をコメントして
+```
+
+モデルは `issue_read` で Issue を読み、workspace を編集し、`review_changes` で別の新しい会話のレビュー担当にレビューさせ、指摘を判断して対処してから、`git_commit_push` で push し、`create_pull_request` で PR を作ります。レビューは必須で、レビュー後にファイルを変えた場合は再度レビューを受けるまで push できません（[変更のレビュー](docs/agent-runtime.md#変更のレビューreview_changes)）。push と PR 作成はそれぞれ承認を求めます（既定の `ask` では `[y/N]` で確認）。自分のリポジトリなど信頼できる Issue だけを扱う場合は、`--approval-mode auto` で判定用モデルに任せることもできます。利用できる tool は `ano mcp tools github` で確認できます（`ano mcp edit github` で選択）。
+
+`git_commit_push` の動作は次のとおりです。
+
+- `files` に挙げたファイル（追加・変更・削除）だけをコミットします。ほかの未コミットの変更には触れません。ディレクトリは指定できません。
+- `review_changes` でレビューを受けた時点と同じ内容のファイルだけをコミットできます（[変更のレビュー](docs/agent-runtime.md#変更のレビューreview_changes)）。
+- remote の既定ブランチには直接コミットしません。既定ブランチにいるときは `branch` の名前で新しいブランチを現在のコミットから作り、未コミットの変更ごと移ります。それ以外のブランチにいるときはそのブランチに追加でコミットするため、レビューを受けた修正も同じ PR に積めます。
+- push 先は `origin`（無ければ最初の remote）です。git コマンドを使うため、git の認証設定（credential helper・SSH 鍵）で push します。結果として、ブランチ・既定ブランチ（PR の向き先）・`OWNER/REPO`・コミットを返し、MCP の `create_pull_request` にそのまま渡せます。
+- 既定ブランチは毎回 push 先の remote に問い合わせます（clone 時に記録された `origin/HEAD` は、既定ブランチの変更で古くなるため）。確かめられない場合と、remote に同名のブランチが既にある場合は、何も変更せずに中止します。
+- push に失敗してもコミットは残り、同じブランチで再度呼び出すと push だけをやり直します。
+- リポジトリの hook（`core.hooksPath` を含む）と `core.fsmonitor` は実行しません。一方、利用者の git 設定にある clean/smudge filter（git-lfs など）とコミット署名（`commit.gpgSign`）は、コミットの正しさに関わるためそのまま使います。そのため、これらに設定した外部プログラム（filter のコマンド、gpg・ssh などの署名プログラム）は `git_commit_push` から実行されます。対話が必要な署名（パスフレーズの入力など）は失敗することがあります。これらは `.git/config` か利用者の設定にしか定義できず、`.git` はエージェントから書き換えられません。hook はモデルが書き込めるファイルのため、実行すると `allow_writes` だけでコマンドを実行できてしまうからです。コミット前の検証は `workspace_check` で行ってください。
+- push は外部への公開になるため、呼び出しごとに承認が必要です（`workspace_exec` と同じ[承認モード](docs/mcp.md#承認モード)）。`allow_exec` は不要です。
 
 ## ライブラリとして使う
 
@@ -455,4 +495,5 @@ cargo test
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。
 - `AGENTS.md` はモデルへの指示として送られます。信頼できないリポジトリを扱う環境では `project_instructions = []` にしてください。
 - スキルは以後のすべての実行で指示として参照されます。`skill_save` と `approval_mode = "allow"` を併用すると、Web ページなどに埋め込まれた指示がスキルとして確認なしに残る可能性があります。保存された `SKILL.md` は `ano skills` で確認し、不要なものはディレクトリごと削除してください。
+- Issue・PR・コメントは第三者が書けます。GitHub MCP で読んだ文面に埋め込まれた指示でモデルが動く可能性があるため、公開リポジトリでは `approval_mode = "allow"` を避け、GitHub MCP の `allowed_tools` を必要な操作に絞ってください。作られた PR の差分はマージ前に確認してください。
 - 中止・タイムアウト・トークン上限による停止は、完了済みのファイル書き込みや外部操作を巻き戻しません。

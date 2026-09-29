@@ -54,6 +54,8 @@ allowed_tools = ["read_file", "list_files"]
 
 直接接続では、接続時に MCP server から tool 名・説明・schema を取得しますが、モデルへは検索カタログの名前と説明だけを使います。`tool_search` が選んだ関数の schema だけを次の Responses 要求に含めます。server の `allowed_tools`・`disabled_tools` とユーザー別 `disabled_tools` のすべてを適用し、Webhook ジョブも同じ制限・承認フローを使います。
 
+接続できない server（起動に失敗する、環境変数やトークンがない、応答しない）があっても、実行は止めずにその server を外して続けます。進捗に `[mcp unavailable] <label>: <理由>` を表示し、`--json` の `events`（Webhook では `recent_events`）に `mcp_server_unavailable` を記録します。理由の文は、URL の認証情報とクエリ（API キーを載せることが多いため）を伏せ、300 文字までに切り詰めます。モデルには使えない server の名前だけを伝えます（理由の文は server が返した内容を含みうるため渡しません）。必要な場合、モデルは利用者にその server が使えないことを説明します。接続を確かめるには `ano mcp tools <label>` を使います（こちらは失敗をエラーとして報告します）。
+
 ### OAuth 認証
 
 OAuth（MCP Authorization）が必要な Streamable HTTP の server は、`oauth = true` を指定して一度 `ano mcp login` を実行します。
