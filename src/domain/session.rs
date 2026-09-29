@@ -51,9 +51,12 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ModelChoice {
-    /// `[providers]` の名前。`default` は `[api]`。
+    /// `[providers]` の名前。`api` は `[api]`。
     pub provider: String,
     pub model: String,
+    /// 推論の強さ。`None` はモデルの既定値。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

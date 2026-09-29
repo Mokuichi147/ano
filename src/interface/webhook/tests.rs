@@ -56,7 +56,7 @@ fn state() -> WebhookState {
         history: None,
         config,
         client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:1234/v1")),
-        providers: HashMap::new(),
+        connections: Default::default(),
         registry: ToolRegistry::new(),
         mcp: Arc::new(McpPool::new(Vec::new())),
         jobs: RwLock::new(HashMap::new()),
@@ -654,7 +654,7 @@ async fn environments_run_on_their_own_provider_and_model() {
     )
     .unwrap();
     // The [api] client points at a closed port, so only the provider answers.
-    state.providers.insert("local".into(), Arc::new(local));
+    state.connections.insert("local", Arc::new(local));
     let state = Arc::new(state);
     let id = enqueue(&state, "hello").await;
     wait_for_job(&state, &id, JobState::Completed).await;

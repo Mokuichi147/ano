@@ -344,6 +344,7 @@ fn switching_the_model_endpoint_keeps_the_raw_history_of_the_conversation() {
     let choice = crate::domain::session::ModelChoice {
         provider: "local".into(),
         model: "qwen".into(),
+        reasoning_effort: None,
     };
     h.wrap(&mut session)
         .unwrap()

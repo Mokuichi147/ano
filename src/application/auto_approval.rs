@@ -52,6 +52,8 @@ enum Verdict {
 pub struct AutoApproval {
     client: Arc<dyn ResponsesApi>,
     model: String,
+    /// `reasoning.effort` of the reviews; `None` uses the model's default.
+    reasoning_effort: Option<String>,
     fallback: Arc<dyn ApprovalHandler>,
     /// Final verdicts for identical calls within this handler's lifetime.
     cache: Mutex<HashMap<String, (Verdict, String)>>,
@@ -67,9 +69,16 @@ impl AutoApproval {
         Self {
             client,
             model: model.into(),
+            reasoning_effort: None,
             fallback,
             cache: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Review with `effort` as `reasoning.effort`.
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
     }
 
     async fn review(&self, request: &McpApprovalRequest) -> Result<(Verdict, String)> {
@@ -84,7 +93,7 @@ impl AutoApproval {
             "tool_description": request.tool_description.as_deref().map(truncate),
             "arguments": truncate(&request.arguments.to_string()),
         });
-        let payload = json!({
+        let mut payload = json!({
             "model": self.model,
             "instructions": REVIEW_INSTRUCTIONS,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": format!("Tool call to review:\n{call:#}")}]}],
@@ -104,6 +113,9 @@ impl AutoApproval {
             }},
             "store": false,
         });
+        if let Some(effort) = &self.reasoning_effort {
+            payload["reasoning"] = json!({"effort": effort});
+        }
         let mut attempt = 1;
         loop {
             let response = self.client.create_response(&payload).await?;
@@ -357,6 +369,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reviews_send_the_reasoning_effort_of_the_reviewer() {
+        let reviewer = FakeReviewer::text(r#"{"decision":"allow","reason":"Requested."}"#);
+        let approval = AutoApproval::new(reviewer.clone(), "reviewer", Arc::new(DenyApproval))
+            .with_reasoning_effort(Some("low".into()));
+        assert!(
+            approval
+                .decide(request("list_issues"))
+                .await
+                .unwrap()
+                .approved
+        );
+        let sent = reviewer.requests.lock().unwrap()[0].clone();
+        assert_eq!(sent["reasoning"], json!({"effort": "low"}));
+    }
+
+    #[tokio::test]
     async fn allowed_and_denied_calls_do_not_ask_and_are_cached() {
         let reviewer =
             FakeReviewer::text(r#"{"decision":"allow","reason":"Read-only and requested."}"#);
@@ -377,6 +405,7 @@ mod tests {
         assert_eq!(fallback.asked.load(Ordering::SeqCst), 0);
         let sent = reviewer.requests.lock().unwrap()[0].clone();
         assert_eq!(sent["model"], "reviewer");
+        assert!(sent.get("reasoning").is_none());
         assert_eq!(sent["text"]["format"]["type"], "json_schema");
         let text = sent["input"][0]["content"][0]["text"].as_str().unwrap();
         assert!(text.contains("Summarize open issues") && text.contains("List issues"));

@@ -115,6 +115,43 @@ const SUMMARY_INSTRUCTIONS: &str = "You compact the history of an AI agent's con
 /// Transcript size for a summary when no compaction threshold is set.
 const DEFAULT_SUMMARY_TRANSCRIPT_BYTES: usize = 128 * 1024;
 
+/// Where requests go: a client, the model on it, and the reasoning effort.
+#[derive(Clone)]
+pub struct ModelTarget {
+    pub client: Arc<dyn ResponsesApi>,
+    pub model: String,
+    /// `None` uses the model's default.
+    pub reasoning_effort: Option<String>,
+}
+
+/// The models sub-agents run on. `None` runs them on the agent's own client,
+/// model, and effort.
+#[derive(Clone, Default)]
+pub struct SubagentModels {
+    /// Sub-agents started by `delegate_task`.
+    pub delegate: Option<ModelTarget>,
+    /// The reviewer started by `review_changes`.
+    pub review: Option<ModelTarget>,
+}
+
+/// The model one run uses, borrowed from the agent.
+#[derive(Clone, Copy)]
+struct Target<'a> {
+    client: &'a Arc<dyn ResponsesApi>,
+    model: &'a str,
+    reasoning_effort: Option<&'a str>,
+}
+
+impl<'a> From<&'a ModelTarget> for Target<'a> {
+    fn from(target: &'a ModelTarget) -> Self {
+        Self {
+            client: &target.client,
+            model: &target.model,
+            reasoning_effort: target.reasoning_effort.as_deref(),
+        }
+    }
+}
+
 /// How a run was started: by the caller, or by `delegate_task` in another run.
 #[derive(Default)]
 pub(super) struct RunOrigin<'a> {
@@ -151,6 +188,7 @@ pub struct Agent {
     /// the sha256 of their content (null when deleted). `git_commit_push`
     /// only commits files still in that state.
     reviews: Mutex<HashMap<PathBuf, BTreeMap<String, Value>>>,
+    subagent_models: SubagentModels,
 }
 
 impl Agent {
@@ -177,23 +215,53 @@ impl Agent {
             text_listener: None,
             history: None,
             reviews: Mutex::default(),
+            subagent_models: SubagentModels::default(),
         }
     }
 
-    /// 以後の実行を別の接続先・モデルで行う。`approval_handler` は
-    /// `client` で審査するものに作り直して渡す。会話の履歴は
-    /// [`ConversationStore::switch_model`] で別途移す。
+    /// 以後の実行を別の接続先・モデル・推論の強さで行う。`approval_handler`
+    /// と `subagent_models` は新しいモデルに合わせて作り直して渡す。会話の
+    /// 履歴は [`ConversationStore::switch_model`] で別途移す。
     pub fn replace_model(
         &mut self,
-        client: Arc<dyn ResponsesApi>,
-        model: String,
+        target: ModelTarget,
         approval_model: Option<String>,
         approval_handler: Arc<dyn ApprovalHandler>,
+        subagent_models: SubagentModels,
     ) {
-        self.client = client;
-        self.settings.model = model;
+        self.client = target.client;
+        self.settings.model = target.model;
+        self.settings.reasoning_effort = target.reasoning_effort;
         self.settings.approval_model = approval_model;
         self.approval_handler = approval_handler;
+        self.subagent_models = subagent_models;
+    }
+
+    /// Run sub-agents on their own models instead of the agent's.
+    pub fn with_subagent_models(mut self, models: SubagentModels) -> Self {
+        self.subagent_models = models;
+        self
+    }
+
+    /// The model of the caller's runs.
+    fn main_target(&self) -> Target<'_> {
+        Target {
+            client: &self.client,
+            model: &self.settings.model,
+            reasoning_effort: self.settings.reasoning_effort.as_deref(),
+        }
+    }
+
+    /// The model of a run started as `origin` describes.
+    fn target(&self, origin: &RunOrigin<'_>) -> Target<'_> {
+        let role = if origin.reviewer {
+            self.subagent_models.review.as_ref()
+        } else if origin.depth > 0 {
+            self.subagent_models.delegate.as_ref()
+        } else {
+            None
+        };
+        role.map_or_else(|| self.main_target(), Target::from)
     }
 
     /// The endpoint of the current client, as recorded in session bindings.
@@ -305,18 +373,19 @@ impl Agent {
         if previous.is_empty() {
             bail!("the conversation is empty");
         }
-        let response = self.request_compaction(&previous).await?;
+        let target = self.main_target();
+        let response = self.request_compaction(target, &previous).await?;
         store.record_usage(&UsageSummary::from_response(
             &response,
             ApiOperation::Compaction,
         ))?;
-        let (history, record) = self.compaction_result(&response, &previous)?;
+        let (history, record) = self.compaction_result(target, &response, &previous)?;
         store.replace_history(history, record)
     }
 
-    fn remote_compaction(&self) -> bool {
+    fn remote_compaction(&self, target: Target<'_>) -> bool {
         match self.settings.compaction {
-            CompactionMethod::Auto => self.client.supports_remote_compaction(),
+            CompactionMethod::Auto => target.client.supports_remote_compaction(),
             CompactionMethod::Remote => true,
             CompactionMethod::Summary => false,
         }
@@ -324,14 +393,14 @@ impl Agent {
 
     /// Ask the endpoint to compact `history`. The caller records the usage of
     /// the returned response before `compaction_result` checks it.
-    async fn request_compaction(&self, history: &[Value]) -> Result<Value> {
-        if self.remote_compaction() {
+    async fn request_compaction(&self, target: Target<'_>, history: &[Value]) -> Result<Value> {
+        if self.remote_compaction(target) {
             let payload = json!({
-                "model": self.settings.model,
+                "model": target.model,
                 "instructions": self.settings.instructions,
                 "input": history,
             });
-            return self.client.compact_response(&payload).await.context(
+            return target.client.compact_response(&payload).await.context(
                 "context compaction failed; original history was preserved. Set agent.compaction = \"summary\" for endpoints without /responses/compact support",
             );
         }
@@ -344,12 +413,13 @@ impl Agent {
             .unwrap_or(DEFAULT_SUMMARY_TRANSCRIPT_BYTES)
             .max(8 * 1024);
         let payload = json!({
-            "model": self.settings.model,
+            "model": target.model,
             "instructions": SUMMARY_INSTRUCTIONS,
             "input": [{"role": "user", "content": [{"type": "input_text", "text": summary_transcript(history, limit)}]}],
             "store": false,
         });
-        self.client
+        target
+            .client
             .create_response(&payload)
             .await
             .context("context compaction by summary failed; original history was preserved")
@@ -357,10 +427,11 @@ impl Agent {
 
     fn compaction_result(
         &self,
+        target: Target<'_>,
         response: &Value,
         previous: &[Value],
     ) -> Result<(Vec<Value>, CompactionRecord)> {
-        if self.remote_compaction() {
+        if self.remote_compaction(target) {
             return compacted_history(response, previous);
         }
         if let Some(error) = response["error"]["message"].as_str() {
@@ -392,7 +463,7 @@ impl Agent {
             None => {
                 memory = history.transcript_store(SessionBinding::new(
                     &request.context,
-                    self.client.base_url(),
+                    self.target(&origin).client.base_url(),
                 )?);
                 memory.as_mut()
             }
@@ -430,6 +501,7 @@ impl Agent {
         origin: RunOrigin<'_>,
     ) -> Result<AgentResult> {
         self.settings.validate()?;
+        let target = self.target(&origin);
 
         let goal = request.goal.clone().filter(|_| origin.depth == 0);
         let mut input = request.input.clone();
@@ -483,7 +555,7 @@ impl Agent {
         }
         let mut local_history = (!replay
             && (self.settings.compact_threshold_bytes.is_some()
-                || self.client.requires_full_history()))
+                || target.client.requires_full_history()))
         .then(|| user_input.as_array().cloned().unwrap_or_default());
         let mut previous_compact_size = session.as_ref().filter(|_| replay).and_then(|session| {
             session
@@ -542,7 +614,7 @@ impl Agent {
                     previous_compact_size,
                 )? {
                     let previous = history.clone();
-                    let compacted = self.request_compaction(&previous).await?;
+                    let compacted = self.request_compaction(target, &previous).await?;
                     observe_usage(
                         &compacted,
                         ApiOperation::Compaction,
@@ -552,7 +624,8 @@ impl Agent {
                         &events,
                         origin.usage_sink,
                     )?;
-                    let (history, mut record) = self.compaction_result(&compacted, &previous)?;
+                    let (history, mut record) =
+                        self.compaction_result(target, &compacted, &previous)?;
                     previous_compact_size = Some(record.after_bytes);
                     if let Some(session) = session.as_deref_mut().filter(|_| replay) {
                         record = session.replace_history(history, record)?;
@@ -593,7 +666,7 @@ impl Agent {
                 )?
             };
             let mut payload = json!({
-                "model": self.settings.model,
+                "model": target.model,
                 "instructions": instructions,
                 "input": match &session { Some(session) if replay => Value::Array(session.data().history.clone()), _ => local_history.as_ref().map(|history| Value::Array(history.clone())).unwrap_or_else(|| next_input.clone()) },
                 "tools": tools,
@@ -603,7 +676,7 @@ impl Agent {
             if let Some(max_output_tokens) = self.settings.max_output_tokens {
                 payload["max_output_tokens"] = json!(max_output_tokens);
             }
-            if let Some(reasoning) = self.settings.reasoning() {
+            if let Some(reasoning) = self.settings.reasoning_with(target.reasoning_effort) {
                 payload["reasoning"] = reasoning;
             }
             if replay || local_history.is_some() {
@@ -615,11 +688,12 @@ impl Agent {
 
             let response = match text_listener {
                 Some(listener) => {
-                    self.client
+                    target
+                        .client
                         .create_response_streaming(&payload, listener.as_ref())
                         .await?
                 }
-                None => self.client.create_response(&payload).await?,
+                None => target.client.create_response(&payload).await?,
             };
             observe_usage(
                 &response,

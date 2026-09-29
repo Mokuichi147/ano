@@ -9,8 +9,11 @@ use anyhow::{bail, Result};
 use serde::Deserialize;
 use std::path::{Component, Path};
 
-/// Values accepted for `reasoning.effort`. Which ones a model supports varies.
-pub const REASONING_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+/// Values accepted for `reasoning.effort`. Which ones a model supports varies:
+/// `max` and `ultra` are those of Codex models on a ChatGPT subscription.
+pub const REASONING_EFFORTS: &[&str] = &[
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 /// Values accepted for `reasoning.summary`.
 pub const REASONING_SUMMARIES: &[&str] = &["auto", "concise", "detailed"];
 /// Upper bound on the project instructions appended to one run.
@@ -66,6 +69,47 @@ pub struct AgentSettings {
     /// The provider runs use unless one is chosen, from `[providers]`.
     /// Without it, runs connect through `[api]`.
     pub provider: Option<String>,
+    /// A preset from `[presets]` applied over `provider`, `model`, and
+    /// `reasoning_effort` for runs that choose none.
+    pub preset: Option<String>,
+    /// Presets that sub-agents and the approval reviewer use.
+    pub roles: ModelRoles,
+}
+
+/// The presets (`[presets]` names) that roles other than the main agent use.
+/// A role without one uses the main agent's current provider, model, and
+/// effort. A preset applies over them, so one that sets only
+/// `reasoning_effort` keeps the model and changes the effort.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ModelRoles {
+    /// Sub-agents started by `delegate_task`.
+    pub delegate: Option<String>,
+    /// The reviewer started by `review_changes`.
+    pub review: Option<String>,
+    /// The reviewer of `approval_mode = "auto"`; takes precedence over
+    /// `approval_model`.
+    pub approval: Option<String>,
+}
+
+impl ModelRoles {
+    /// Every role with its name in the config and its preset.
+    pub fn iter(&self) -> impl Iterator<Item = (&'static str, Option<&str>)> {
+        [
+            ("delegate", self.delegate.as_deref()),
+            ("review", self.review.as_deref()),
+            ("approval", self.approval.as_deref()),
+        ]
+        .into_iter()
+    }
+}
+
+/// Check a `reasoning_effort` value; `field` names it in the error.
+pub fn validate_reasoning_effort(field: &str, effort: &str) -> Result<()> {
+    if !REASONING_EFFORTS.contains(&effort) {
+        bail!("{field} must be one of {}", REASONING_EFFORTS.join(", "));
+    }
+    Ok(())
 }
 
 impl Default for AgentSettings {
@@ -89,6 +133,8 @@ impl Default for AgentSettings {
             approval_mode: ApprovalMode::Ask,
             approval_model: None,
             provider: None,
+            preset: None,
+            roles: ModelRoles::default(),
         }
     }
 }
@@ -135,12 +181,7 @@ impl AgentSettings {
             bail!("agent.max_tool_output_bytes must be at least 4096");
         }
         if let Some(effort) = &self.reasoning_effort {
-            if !REASONING_EFFORTS.contains(&effort.as_str()) {
-                bail!(
-                    "agent.reasoning_effort must be one of {}",
-                    REASONING_EFFORTS.join(", ")
-                );
-            }
+            validate_reasoning_effort("agent.reasoning_effort", effort)?;
         }
         if let Some(summary) = &self.reasoning_summary {
             if !REASONING_SUMMARIES.contains(&summary.as_str()) {
@@ -177,12 +218,18 @@ impl AgentSettings {
 
     /// The `reasoning` request parameter, when any reasoning option is set.
     pub fn reasoning(&self) -> Option<serde_json::Value> {
-        if self.reasoning_effort.is_none() && self.reasoning_summary.is_none() {
+        self.reasoning_with(self.reasoning_effort.as_deref())
+    }
+
+    /// The `reasoning` request parameter with `effort` in place of
+    /// `reasoning_effort`, for a run on another model.
+    pub fn reasoning_with(&self, effort: Option<&str>) -> Option<serde_json::Value> {
+        if effort.is_none() && self.reasoning_summary.is_none() {
             return None;
         }
         let mut reasoning = serde_json::Map::new();
-        if let Some(effort) = &self.reasoning_effort {
-            reasoning.insert("effort".into(), effort.clone().into());
+        if let Some(effort) = effort {
+            reasoning.insert("effort".into(), effort.into());
         }
         if let Some(summary) = &self.reasoning_summary {
             reasoning.insert("summary".into(), summary.clone().into());

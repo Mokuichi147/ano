@@ -13,9 +13,13 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(default, deny_unknown_fields)]
 pub struct EnvironmentConfig {
     pub workspace: Option<PathBuf>,
-    /// `[providers]` の接続先名。`default` は `[api]`。省略時は `[api]`。
+    /// `[presets]` のプリセット名。`provider`・`model`・`reasoning_effort`
+    /// はその上に重なる。
+    pub preset: Option<String>,
+    /// `[providers]` の接続先名。`api` は `[api]`。省略時は既定の接続先。
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
     pub instructions: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
     pub disabled_tools: Vec<String>,

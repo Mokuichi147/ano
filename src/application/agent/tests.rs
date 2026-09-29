@@ -4,7 +4,7 @@ use super::{
     events::{AgentEvent, EventLog},
     mcp_runtime::McpRuntime,
     response::extract_output_text,
-    Agent, RunRequest,
+    Agent, ModelTarget, RunOrigin, RunRequest, SubagentModels,
 };
 use crate::{
     application::{
@@ -1295,6 +1295,75 @@ async fn delegated_tasks_run_in_a_fresh_sub_agent_and_return_its_report() {
         serde_json::from_str(requests[2]["input"][0]["output"].as_str().unwrap()).unwrap();
     assert_eq!(report["report"], "Found three files");
     assert_eq!(report["outcome"], "completed");
+}
+
+#[tokio::test]
+async fn sub_agents_run_on_the_model_of_their_role() {
+    let parent = mock_responses(vec![
+        delegate_response("parent", "Survey the files"),
+        text_response("done", "All done"),
+    ])
+    .await;
+    let quick = mock_responses(vec![text_response("sub", "Found three files")]).await;
+    let mut agent = agent(ToolRegistry::new(), Vec::new()).with_subagent_models(SubagentModels {
+        delegate: Some(ModelTarget {
+            client: Arc::new(OpenAiClient::new("test", &quick.url)),
+            model: "quick-model".into(),
+            reasoning_effort: Some("low".into()),
+        }),
+        review: None,
+    });
+    agent.client = Arc::new(OpenAiClient::new("test", &parent.url));
+    agent.settings.model = "main-model".into();
+    agent.settings.reasoning_effort = Some("high".into());
+    agent.settings.reasoning_summary = Some("auto".into());
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "All done");
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SubagentStarted { model, .. } if model == "quick-model"
+    )));
+    let main = parent.requests.lock().unwrap();
+    assert_eq!(main.len(), 2);
+    assert!(main.iter().all(|request| request["model"] == "main-model"
+        && request["reasoning"] == json!({"effort": "high", "summary": "auto"})));
+    let sub = quick.requests.lock().unwrap();
+    assert_eq!(sub.len(), 1);
+    assert_eq!(sub[0]["model"], "quick-model");
+    // The summary setting is the agent's; the effort is the role's.
+    assert_eq!(
+        sub[0]["reasoning"],
+        json!({"effort": "low", "summary": "auto"})
+    );
+}
+
+#[test]
+fn each_kind_of_run_uses_the_model_of_its_role() {
+    let review = ModelTarget {
+        client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:9/v1")),
+        model: "review-model".into(),
+        reasoning_effort: None,
+    };
+    let agent = agent(ToolRegistry::new(), Vec::new()).with_subagent_models(SubagentModels {
+        delegate: None,
+        review: Some(review),
+    });
+    let model = |depth, reviewer| {
+        agent
+            .target(&RunOrigin {
+                depth,
+                reviewer,
+                ..RunOrigin::default()
+            })
+            .model
+            .to_string()
+    };
+    assert_eq!(model(0, false), agent.settings.model);
+    // Without a delegate model, sub-agents run on the agent's own.
+    assert_eq!(model(1, false), agent.settings.model);
+    assert_eq!(model(1, true), "review-model");
 }
 
 #[tokio::test]

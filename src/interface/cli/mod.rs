@@ -9,6 +9,7 @@ mod history;
 mod mcp;
 mod model;
 mod output;
+mod preset;
 mod provider;
 mod skills;
 
@@ -16,7 +17,7 @@ pub use approval::InteractiveApproval;
 
 use crate::{
     application::{
-        agent::{Agent, RunRequest},
+        agent::{Agent, ModelTarget, RunRequest},
         approval::DenyApproval,
         input::InputPart,
         ports::{ApprovalHandler, McpGateway},
@@ -38,7 +39,7 @@ use crate::{
         chronotope::Chronotope, mcp::McpPool, project::read_project_instructions,
         session_store::Session, skills::SkillLibrary, tools::register_builtin_tools,
     },
-    interface::{connect_provider, webhook},
+    interface::{connect_provider, webhook, Connections, RunModels},
 };
 use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -85,6 +86,9 @@ enum Command {
     Mcp(mcp::McpArgs),
     /// Add, change, and remove providers, and enable or disable them.
     Provider(provider::ProviderArgs),
+    /// Manage presets: named sets of a provider, a model, and a reasoning
+    /// effort, and the presets of sub-agents and the approval reviewer.
+    Preset(preset::PresetArgs),
     /// List the models of providers, and enable or disable them.
     Model(model::ModelArgs),
     /// 原文履歴の同期状態を調べ、chronotope へ再送・検索する。
@@ -126,6 +130,13 @@ struct AgentOptions {
     #[arg(long = "disable-tool", value_name = "NAME")]
     disabled_tools: Vec<String>,
 
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Use a preset from [presets] (provider, model, and effort); 'default' is [agent]. --provider, --model, and --reasoning-effort apply over it"
+    )]
+    preset: Option<String>,
+
     #[arg(long, help = "Model to use (on the selected provider)")]
     model: Option<String>,
 
@@ -139,7 +150,7 @@ struct AgentOptions {
     #[arg(
         long,
         value_name = "LEVEL",
-        help = "Reasoning effort: none, minimal, low, medium, high, or xhigh"
+        help = "Reasoning effort: none, minimal, low, medium, high, xhigh, max, or ultra (which ones work depends on the model)"
     )]
     reasoning_effort: Option<String>,
 
@@ -335,6 +346,7 @@ pub async fn run() -> Result<()> {
         Command::Serve(args) => serve(config, args, registry).await,
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
         Command::Provider(args) => provider::run(&config, &config_path, args).await,
+        Command::Preset(args) => preset::run(&config, &config_path, args),
         Command::Model(args) => model::run(&config, &config_path, args).await,
         Command::History(args) => history::run(&config, &cli.user, args).await,
         Command::Skills(args) => skills::run(&config, &cli.user, args),
@@ -478,6 +490,11 @@ struct PreparedAgent {
     answer: Option<Arc<output::AnswerStream>>,
     /// The provider and model in use, to switch from in `ano chat`.
     selection: ModelSelection,
+    /// The choice under the run's own: the environment's. `default` in
+    /// `ano chat` and in roles returns to it.
+    base: Vec<ModelRequest>,
+    /// Clients of the providers in use, shared when the model changes.
+    connections: Connections,
     /// Rebuilds the approval handler when the model changes.
     approval: ApprovalFactory,
 }
@@ -490,16 +507,8 @@ struct ApprovalFactory {
 }
 
 impl ApprovalFactory {
-    fn build(
-        &self,
-        client: Arc<dyn crate::application::ports::ResponsesApi>,
-        selection: &ModelSelection,
-    ) -> Arc<dyn ApprovalHandler> {
-        let reviewer = selection
-            .approval_model
-            .as_deref()
-            .unwrap_or(&selection.choice.model);
-        approval_handler(self.mode, client, reviewer, Arc::clone(&self.ask_user))
+    fn build(&self, reviewer: ModelTarget) -> Arc<dyn ApprovalHandler> {
+        approval_handler(self.mode, reviewer, Arc::clone(&self.ask_user))
     }
 }
 
@@ -507,8 +516,11 @@ impl ApprovalFactory {
 struct RunContext {
     profile: ExecutionProfile,
     selection: ModelSelection,
-    /// Whether `--provider` or `--model` chose the model. Only then is the
-    /// choice saved to a session, or a session moved to another endpoint.
+    /// The choice under the run's own (the environment's).
+    base: Vec<ModelRequest>,
+    /// Whether `--preset`, `--provider`, `--model`, or `--reasoning-effort`
+    /// chose the model. Only then is the choice saved to a session, or a
+    /// session moved to another endpoint.
     explicit: bool,
 }
 
@@ -524,6 +536,7 @@ fn prepare_agent(
     let RunContext {
         mut profile,
         selection,
+        base,
         explicit,
     } = resolve_run_context(config, user_id, options)?;
     if let Some(skills) = SkillLibrary::from_settings(&config.skills, &registry)? {
@@ -531,7 +544,9 @@ fn prepare_agent(
             eprintln!("warning: skipped skill {problem}");
         }
     }
-    let client = connect_provider(config, &selection.choice.provider)?;
+    let mut connections = Connections::default();
+    let models = RunModels::resolve(config, &base, &selection, &mut connections)?;
+    let client = Arc::clone(&models.main.client);
     let ask_user: Arc<dyn ApprovalHandler> = if stdin_is_terminal {
         ask_user
     } else {
@@ -550,7 +565,7 @@ fn prepare_agent(
         mode: profile.approval_mode,
         ask_user,
     };
-    let approval_handler = approval.build(client.clone(), &selection);
+    let approval_handler = approval.build(models.approval);
     let ExecutionProfile {
         settings,
         policy,
@@ -579,7 +594,8 @@ fn prepare_agent(
         registry,
         policy,
         approval_handler,
-    );
+    )
+    .with_subagent_models(models.subagents);
     if let Some(history) = history {
         agent = agent.with_history(history);
     }
@@ -606,6 +622,8 @@ fn prepare_agent(
         mcp,
         answer,
         selection,
+        base,
+        connections,
         approval,
     })
 }
@@ -779,37 +797,35 @@ fn resolve_run_context(
         settings.max_total_tokens = Some(limit);
     }
     let command_line = ModelRequest {
+        preset: args.preset.clone(),
         provider: args.provider.clone(),
         model: args.model.clone(),
+        reasoning_effort: args.reasoning_effort.clone(),
     };
-    let environment = match &args.environment {
-        Some(name) => {
-            let environment = config.environment_for(name)?;
-            ModelRequest {
-                provider: environment.provider.clone(),
-                model: environment.model.clone(),
-            }
-        }
-        None => ModelRequest::default(),
+    let base = match &args.environment {
+        Some(name) => vec![config.environment_request(name)?],
+        None => Vec::new(),
     };
-    // A resumed session keeps the model it was last switched to.
+    // A resumed session keeps the model it was last switched to, unless the
+    // command line chooses another; its effort alone applies over the saved one.
     let saved = match &args.session {
-        Some(path) if command_line.is_empty() && path.exists() => Session::inspect(path)
+        Some(path) if !command_line.chooses_model() && path.exists() => Session::inspect(path)
             .ok()
             .and_then(|data| data.model)
             .map(|choice| ModelRequest::from(&choice)),
         _ => None,
     };
-    let selection = match &saved {
-        Some(saved) => config
-            .select_model(&[environment, saved.clone()])
-            .context("the session's saved provider is unavailable; choose one with --provider")?,
-        None => config.select_model(&[environment, command_line.clone()])?,
-    };
+    let mut layers = base.clone();
+    layers.extend(saved.clone());
+    layers.push(command_line.clone());
+    let selection = config.select_model(&layers).with_context(|| {
+        if saved.is_some() {
+            "the session's saved provider is unavailable; choose one with --provider or --preset"
+        } else {
+            "invalid model choice"
+        }
+    })?;
     selection.apply_to(settings);
-    if let Some(effort) = &args.reasoning_effort {
-        settings.reasoning_effort = Some(effort.clone());
-    }
     settings.validate()?;
     profile.context.workspace = profile
         .context
@@ -835,6 +851,7 @@ fn resolve_run_context(
     Ok(RunContext {
         profile,
         selection,
+        base,
         explicit: !command_line.is_empty(),
     })
 }
@@ -1009,5 +1026,85 @@ mod tests {
         assert_eq!(environment.selection.choice.provider, "local");
         assert_eq!(environment.profile.settings.model, "qwen");
         assert!(!environment.explicit);
+    }
+
+    #[test]
+    fn presets_and_efforts_carry_over_to_resumed_sessions() {
+        let config = AppConfig::parse("[agent]\nmodel = 'gpt-main'\n[providers.local]\nbase_url = 'http://127.0.0.1:1234/v1'\nmodel = 'qwen'\n[presets.quick]\nprovider = 'local'\nreasoning_effort = 'low'\n[environments.dev]\npreset = 'quick'\nreasoning_effort = 'medium'").unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("session.json");
+        let session = path.to_str().unwrap();
+        let context = |arguments: &[&str]| {
+            let mut all = vec!["run", "--session", session, "--workspace", "."];
+            all.extend(arguments);
+            all.push("hello");
+            resolve_run_context(&config, "default", &run_args(&all).agent).unwrap()
+        };
+        let open = |run: &RunContext| {
+            let binding =
+                SessionBinding::new(&run.profile.context, &run.selection.api.base_url).unwrap();
+            drop(
+                open_session(
+                    &path,
+                    &binding,
+                    false,
+                    run.explicit.then_some(&run.selection.choice),
+                )
+                .unwrap(),
+            );
+        };
+
+        let first = context(&["--preset", "quick", "--reasoning-effort", "high"]);
+        assert!(first.explicit);
+        assert_eq!(first.selection.choice.provider, "local");
+        assert_eq!(first.profile.settings.model, "qwen");
+        assert_eq!(
+            first.profile.settings.reasoning_effort.as_deref(),
+            Some("high")
+        );
+        open(&first);
+
+        let resumed = context(&[]);
+        assert_eq!(resumed.selection.choice.provider, "local");
+        assert_eq!(
+            resumed.profile.settings.reasoning_effort.as_deref(),
+            Some("high")
+        );
+
+        // Only the effort changes: the saved provider and model stay.
+        let lighter = context(&["--reasoning-effort", "minimal"]);
+        assert!(lighter.explicit);
+        assert_eq!(lighter.selection.choice.provider, "local");
+        assert_eq!(lighter.profile.settings.model, "qwen");
+        assert_eq!(
+            lighter.profile.settings.reasoning_effort.as_deref(),
+            Some("minimal")
+        );
+
+        // `default` returns to [agent], leaving the saved choice.
+        let default = context(&["--preset", "default"]);
+        assert_eq!(default.selection.choice.provider, "api");
+        assert_eq!(default.profile.settings.reasoning_effort, None);
+
+        let environment = resolve_run_context(
+            &config,
+            "default",
+            &run_args(&["run", "--environment", "dev", "hello"]).agent,
+        )
+        .unwrap();
+        assert_eq!(environment.selection.choice.model, "qwen");
+        assert_eq!(
+            environment.profile.settings.reasoning_effort.as_deref(),
+            Some("medium")
+        );
+        assert_eq!(
+            environment.base,
+            [config.environment_request("dev").unwrap()]
+        );
+
+        let invalid = run_args(&["run", "--preset", "missing", "hello"]);
+        assert!(resolve_run_context(&config, "default", &invalid.agent).is_err());
+        let invalid = run_args(&["run", "--reasoning-effort", "hight", "hello"]);
+        assert!(resolve_run_context(&config, "default", &invalid.agent).is_err());
     }
 }

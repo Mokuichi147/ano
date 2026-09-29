@@ -170,6 +170,9 @@ Responses API 管理方式の server は、`url` へ Streamable HTTP で接続�
 approval_mode = "auto"
 approval_model = "判定用のモデル名"   # 省略時は agent.model。速く安価なモデルが向く
 
+[agent.roles]
+approval = "quick"                   # 接続先・推論の強さも含めて選ぶ場合はプリセットで（approval_model より優先）
+
 [environments.coding]
 approval_mode = "auto"          # Webhook では ask 判定は拒否になる
 ```

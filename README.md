@@ -43,6 +43,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - 名前付き実行環境を選べる署名付き Webhook と、実行中の進捗確認・中止・タイムアウトに対応した非同期ジョブ API
 - LM Studio などの OpenAI 互換 `/v1/responses` endpoint
 - 名前付きの複数の接続先（`[providers]`）と、実行ごと・環境ごと・対話の途中（`/provider`・`/model`）での接続先とモデルの切り替え
+- 接続先・モデル・推論の強さをまとめて切り替えるプリセット（`[presets]`）と、サブエージェント・レビュー担当・承認の判定用モデルごとのプリセット指定
 - ChatGPT サブスクリプションの OAuth 認証による Codex 接続（実験的）
 - JSON 出力とログ量の切り替え
 
@@ -78,6 +79,8 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |
 | `ano provider list` | 接続先の一覧（有効・無効、URL、既定モデル、モデルの絞り込み、フォールバック先）を表示します（[接続先の管理](#接続先の管理)） |
 | `ano provider add/set/remove/enable/disable NAME` | 設定ファイルを直接編集せずに、接続先を追加・変更・削除・有効化・無効化します |
+| `ano preset list/add/set/remove/use NAME` | 接続先・モデル・推論の強さの組（プリセット）を管理し、既定のプリセットを選びます（[プリセット](#プリセットとロール)） |
+| `ano preset role ROLE NAME` | サブエージェント（`delegate`）・レビュー担当（`review`）・承認の判定（`approval`）に使うプリセットを選びます |
 | `ano model list [--provider NAME]` | 接続先に接続して提供されるモデル（と登録したモデル）をすべて表示し、設定で有効なものに印を付けます（[モデルの有効化](#接続先の管理)） |
 | `ano model add/remove MODEL... [--provider NAME]` | モデル一覧を返さない接続先（ChatGPT サブスクリプションなど）に、使うモデル名を登録・削除します |
 | `ano model edit [--provider NAME]` | 接続先のモデルをチェックリストで有効化・無効化し、設定ファイルに保存します（`ano model enable/disable MODEL... [--provider NAME]` でも可） |
@@ -93,9 +96,10 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `--workspace PATH` / `--allow-writes` | 環境を指定しない場合の workspace（既定はカレントディレクトリ）と書き込み許可 |
 | `--allow-exec` | 環境を指定しない場合に、`workspace_exec` でのコマンド実行を許可（[コマンド実行](#コマンド実行workspace_exec)） |
 | `--allow-web` | 環境を指定しない場合に、`web_fetch` での Web ページ取得を許可（[Web ページの取得](#web-ページの取得web_fetch)） |
+| `--preset NAME` | `[presets]` のプリセット（接続先・モデル・推論の強さ）を使う。`default` は `[agent]` の設定。`--provider`・`--model`・`--reasoning-effort` はその上に重なる（[プリセット](#プリセットとロール)） |
 | `--provider NAME` | `[providers]` の接続先を使う（省略時は既定の接続先、`api` は `[api]`）。接続先に `model` があれば、そのモデルに切り替わる（[接続先の切り替え](#複数の接続先を切り替える)） |
 | `--model NAME` | モデルを変更（選んだ接続先でのモデル名） |
-| `--reasoning-effort LEVEL` | 推論の深さ（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`。対応範囲はモデルによる） |
+| `--reasoning-effort LEVEL` | 推論の深さ（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`・`max`・`ultra`。対応範囲はモデルによる。`max`・`ultra` は ChatGPT サブスクリプションの Codex モデルなど） |
 | `--goal TEXT` | ゴール（最終的にどうなっていればよいか。満たすべき条件も文中に書ける）を指定し、達成が確認されるまで作業を続ける。プロンプトは省略可（`run` のみ。chat では `/goal`。[ゴールと完了条件](docs/agent-runtime.md#ゴールと完了条件)） |
 | `--image PATH` / `--audio PATH` | 画像・音声を入力に追加（複数指定可、`run` のみ） |
 | `--disable-tool NAME` | この実行だけ tool を無効化（複数指定可） |
@@ -130,6 +134,8 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | `/model [NAME]` | 現在のモデルを表示 / 今の接続先のまま NAME に切り替える |
 | `/models` | 今の接続先が提供するモデルの一覧（使用中と無効なものに印を付ける） |
 | `/provider [NAME [MODEL]]` | 接続先の一覧を表示 / 接続先 NAME（とモデル MODEL）に切り替えて会話を続ける（[接続先の切り替え](#複数の接続先を切り替える)） |
+| `/preset [NAME]` | プリセットの一覧を表示（今の設定と一致するものに印） / プリセット NAME の接続先・モデル・推論の強さに切り替える。`/preset default` で設定の既定に戻る（[プリセット](#プリセットとロール)） |
+| `/effort [LEVEL]` | 推論の強さを表示 / LEVEL に変える（モデルはそのまま） |
 | `/goal TEXT` | ゴールを指定して作業を始める。`/goal` で表示、`/goal clear` で解除 |
 | `/skill [観点]` | この会話で上手くいった手順をスキルとして保存するよう依頼する（`[skills]` 有効時。保存は承認モードで確認） |
 | `/compact` | 会話を今すぐ圧縮する（要約などで履歴を小さくし、コンテキストを空ける。[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)） |
@@ -147,7 +153,7 @@ MCP の tool 呼び出しを毎回確認せずに進めるには、`ano chat --a
 
 ### 実行環境
 
-`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--allow-exec`・`--allow-web`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--provider`・`--model` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。環境の `provider`・`model` で、その環境の既定の接続先とモデルを指定できます（Webhook のジョブもこれに従います）。
+`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--allow-exec`・`--allow-web`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--preset`・`--provider`・`--model`・`--reasoning-effort` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。環境の `preset`・`provider`・`model`・`reasoning_effort` で、その環境の既定の接続先・モデル・推論の強さを指定できます（Webhook のジョブもこれに従います）。
 
 ```toml
 [environments.coding]
@@ -192,6 +198,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | --- | --- | --- |
 | `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ・ストリーミング | [ローカル AI](#ローカル-ailm-studioollama-など) |
 | `[providers.<name>]` | `[api]` とは別の名前付き接続先と、その既定モデル・使えるモデル・フォールバック先 | [接続先の切り替え](#複数の接続先を切り替える) |
+| `[presets.<name>]` / `[agent.roles]` | 接続先・モデル・推論の強さの組と、サブエージェント・レビュー担当・承認の判定に使うプリセット | [プリセット](#プリセットとロール) |
 | `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・tool 出力の上限・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
 | `[environments.<name>]` | workspace・許可する tool・書き込み・コマンド実行・Web 取得・承認モード・検証コマンド | [実行環境](#実行環境) |
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
@@ -275,11 +282,11 @@ ano chat --environment review                    # 環境の provider（codex）
 
 - `[api]` を使っていない場合（既定の接続先でもなく、environment やフォールバック先からも参照されていない場合）、一覧には `api` を表示しません。`[api]` の接続設定を名前付きの接続先に移すには `ano provider rename api NAME` を使います（下記）。
 - 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`timeout_secs`・`max_retries`・`stream`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url` と `api_key_env` は引き継がず、省略時は OpenAI の既定値になります。
-- モデルは「環境の指定 → `--provider`/`--model` → 対話中の `/provider`/`/model`」の順に上書きします。接続先だけを選んだ場合は、その接続先の `model` に切り替わります。接続先に `model` がなければ、それまでのモデルをそのまま使います。
+- モデルは「環境の指定 → `--preset`/`--provider`/`--model` → 対話中の `/preset`/`/provider`/`/model`」の順に上書きします（[プリセット](#プリセットとロール)）。接続先だけを選んだ場合は、その接続先の `model` に切り替わります。接続先に `model` がなければ、それまでのモデルをそのまま使います。
 - `[agent].model` は `[api]` のモデルで、`model` のない既定の接続先でも使います。`[agent].approval_model` は `[api]` 用です。ほかの接続先では、その接続先の `approval_model`（省略時は使用中のモデル）で審査します。
 - `ano chat` では `/provider lan` や `/model qwen3:30b` で、会話を保ったまま切り替えられます。接続先を変えると、それまでの会話が新しい接続先へ送られます。元の接続先でしか読めない暗号化された推論は履歴から除きます。OpenAI の `/responses/compact` で圧縮済みの会話は、ほかの接続先では読めないため移せません（`/clear` か新しいセッションで始めてください）。
-- `--session` の会話は、切り替えた接続先とモデルを記録し、次に `--provider`・`--model` を付けずに再開したときもそれを使います。保存時と異なる接続先で再開するには `--provider` を明示してください。明示しない限り、別の接続先へ会話を送ることはありません。
-- `ano serve` は、環境が参照する接続先へ起動時に接続を確認し、ジョブごとに環境の接続先とモデルを使います。
+- `--session` の会話は、切り替えた接続先・モデル・推論の強さを記録し、次に `--preset`・`--provider`・`--model` を付けずに再開したときもそれを使います（`--reasoning-effort` だけを付けた場合は、記録した接続先とモデルのまま推論の強さだけを変えます）。保存時と異なる接続先で再開するには `--provider` を明示してください。明示しない限り、別の接続先へ会話を送ることはありません。
+- `ano serve` は、環境とロールが参照する接続先へ起動時に接続を確認し、ジョブごとに環境の接続先・モデル・推論の強さを使います。無効にした接続先やモデルを選ぶ環境は起動を止めず、その環境のジョブがエラーになります（あとで有効にすれば再起動は不要です）。
 
 #### 接続先の管理
 
@@ -330,6 +337,52 @@ fallback = ["lan2", "codex"]      # lan が使えなければ lan2、次に code
 - 会話は元の接続先に紐づいたままです。切り替え先には、元の接続先でしか読めない暗号化された推論を除いた履歴を送ります。切り替え先の推論も履歴には残しません。OpenAI の `/responses/compact` で圧縮済みの会話と `/responses/compact` 自体は、元の接続先でしか扱えないため切り替えません。
 - フォールバック先は、設定した順に1段だけたどります（フォールバック先の `fallback` はたどりません）。無効な接続先や、使うモデルが無効な接続先は飛ばします。起動時にログインや API キーの不足で使えない接続先は、警告を出して飛ばします。
 - 会話の内容が別の接続先へ送られるため、送り先として問題のない接続先だけを `fallback` に並べてください。
+
+### プリセットとロール
+
+接続先・モデル・推論の強さ（`reasoning_effort`）は、組にして `[presets.<name>]` に登録できます。調査は LAN のローカルモデルで低く、設計の判断は Codex で高く、のように用途ごとの組を名前で切り替えられます。
+
+```toml
+[presets.quick]
+provider = "lan"
+model = "qwen/qwen3-4b"
+reasoning_effort = "low"
+description = "範囲の狭い調査"          # 一覧に表示（省略可）
+
+[presets.deep]
+provider = "codex"
+model = "gpt-5-codex"
+reasoning_effort = "high"
+
+[presets.lighter]
+reasoning_effort = "minimal"             # 推論の強さだけ（接続先とモデルはそのまま）
+
+[agent]
+preset = "quick"                         # 既定のプリセット（省略可。`ano preset use quick` でも設定できる）
+
+[agent.roles]
+delegate = "quick"                       # delegate_task のサブエージェント
+review = "deep"                          # review_changes のレビュー担当
+approval = "lighter"                     # approval_mode = "auto" の判定用モデル
+
+[environments.review]
+preset = "deep"                          # この環境の既定（provider・model・reasoning_effort で上書き可）
+```
+
+```sh
+ano run --preset deep "この設計の問題点を洗い出して"
+ano run --preset quick --reasoning-effort medium "..."   # プリセットの上に個別の指定を重ねる
+ano preset add deep --provider codex --model gpt-5-codex --reasoning-effort high
+ano preset role review deep                              # レビュー担当のプリセット（--unset で解除）
+ano preset use default                                   # 既定を [agent] の設定に戻す
+ano preset list
+```
+
+- プリセットは、下の層で選んだ接続先・モデル・推論の強さの上に、書いた項目だけを重ねます。接続先だけを書いたプリセットはその接続先の `model` に切り替わり、`reasoning_effort` だけを書いたプリセットはモデルを変えずに推論の強さだけを変えます。どれも書かないプリセットはエラーです。
+- `default` は予約された名前で、`[agent]`（`provider`・`model`・`reasoning_effort` と `preset`）と実行環境の指定から決まる既定の組を表します。`--preset default` や `/preset default` で、セッションに記録した組や対話中の切り替えから既定に戻せます。`[presets.default]` は定義できません。
+- ロール（`[agent.roles]`）を指定しないと、サブエージェントとレビュー担当はメインのエージェントと同じ接続先・モデル・推論の強さで動き、承認の判定は従来どおり `approval_model` で行います。指定すると、そのプリセットをメインのエージェントの**現在の**組の上に重ねたもので動きます。`/preset` などで切り替えると、ロールもそれに合わせて決め直します。ロールに `default` を指定すると、対話中の切り替えに関わらず既定の組を使います。
+- 自分の差分を同じモデルに確認させると見落としも同じになりがちなので、`review` だけ別のモデルにする使い方が効果的です。レビュー担当やサブエージェントを別の接続先にすると、その接続先へ作業の内容（依頼・差分・ファイルの内容）が送られる点に注意してください。
+- `ano preset remove` は、`[agent].preset`・ロール・環境が参照しているプリセットを削除しません。`ano provider rename` はプリセットの `provider` も書き換えます。既定のプリセットが接続先を指定している間は、`ano provider use` は使えません（`ano preset use` で既定のプリセットを変えてください）。
 
 ## 組み込み tool
 

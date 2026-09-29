@@ -677,13 +677,13 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
                 results.len()
             ));
         }
-        AgentEvent::SubagentStarted { task, .. } => {
+        AgentEvent::SubagentStarted { task, model, .. } => {
             let summary = task.lines().next().unwrap_or_default();
             let summary = match summary.char_indices().nth(80) {
                 Some((index, _)) => format!("{}…", &summary[..index]),
                 None => summary.to_string(),
             };
-            status(format!("[subagent] started: {summary}"));
+            status(format!("[subagent] started on {model}: {summary}"));
         }
         AgentEvent::SubagentFinished {
             outcome,

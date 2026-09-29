@@ -441,6 +441,7 @@ mod tests {
         let choice = ModelChoice {
             provider: "local".into(),
             model: "qwen".into(),
+            reasoning_effort: None,
         };
         // Another model on the same endpoint can read the reasoning.
         session
@@ -475,6 +476,7 @@ mod tests {
         let choice = ModelChoice {
             provider: "local".into(),
             model: "qwen".into(),
+            reasoning_effort: None,
         };
         session
             .begin_turn(&json!([{"role":"user","content":"hello"}]))

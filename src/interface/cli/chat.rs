@@ -20,14 +20,14 @@ use crate::{
         ports::{ApprovalHandler, ConversationStore, McpApprovalRequest},
         registry::ToolRegistry,
     },
-    config::{AppConfig, ModelRequest, ModelSelection},
+    config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PRESET},
     domain::{
         plan::TaskGoal,
         session::SessionStatus,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
     },
     infrastructure::memory_store::MemoryConversation,
-    interface::connect_provider,
+    interface::{Connections, RunModels},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -50,6 +50,12 @@ const HELP: &str = "Commands:
   /models  list the models the current provider offers
   /provider [NAME [MODEL]]
            list providers, or switch to NAME (and MODEL) and continue there
+  /preset [NAME]
+           list presets, or switch to the provider, model, and effort of NAME
+           ('default' returns to the configured ones)
+  /effort [LEVEL]
+           show the reasoning effort, or change it (none, minimal, low,
+           medium, high, xhigh, max, ultra)
   /usage   show token usage of this conversation
   /compact compact the conversation now (summarize it to save context)
   /clear   start a new conversation (not with --session)
@@ -177,6 +183,8 @@ pub(super) async fn run(
         mcp,
         answer,
         mut selection,
+        base,
+        mut connections,
         approval,
     } = prepare_agent(
         &config,
@@ -253,13 +261,12 @@ pub(super) async fn run(
                     }
                     continue;
                 }
-                "/model" => {
-                    eprintln!(
-                        "model {} on {} ({})",
-                        selection.choice.model,
-                        selection.choice.provider,
-                        agent.endpoint()
-                    );
+                "/model" | "/effort" => {
+                    eprintln!("{} ({})", selection.describe(), agent.endpoint());
+                    continue;
+                }
+                "/preset" => {
+                    eprintln!("{}", format_presets(&config, &base, &selection));
                     continue;
                 }
                 "/provider" => {
@@ -273,25 +280,35 @@ pub(super) async fn run(
                     }
                     continue;
                 }
-                command if command.starts_with("/model ") || command.starts_with("/provider ") => {
+                command if ["/model ", "/provider ", "/preset ", "/effort "].iter().any(|prefix| command.starts_with(prefix)) => {
                     let mut words = command.split_whitespace();
-                    let request = match (words.next(), words.next(), words.next(), words.next()) {
-                        (Some("/model"), Some(model), None, None) => ModelRequest {
-                            provider: None,
+                    let current = ModelRequest::from(&selection.choice);
+                    let layers = match (words.next(), words.next(), words.next(), words.next()) {
+                        (Some("/model"), Some(model), None, None) => vec![current, ModelRequest {
                             model: Some(model.to_string()),
-                        },
-                        (Some("/provider"), Some(provider), model, None) => ModelRequest {
+                            ..ModelRequest::default()
+                        }],
+                        (Some("/provider"), Some(provider), model, None) => vec![current, ModelRequest {
                             provider: Some(provider.to_string()),
                             model: model.map(str::to_string),
-                        },
+                            ..ModelRequest::default()
+                        }],
+                        (Some("/preset"), Some(DEFAULT_PRESET), None, None) => base.clone(),
+                        (Some("/preset"), Some(preset), None, None) => vec![current, ModelRequest::preset(preset)],
+                        (Some("/effort"), Some(effort), None, None) => vec![current, ModelRequest {
+                            reasoning_effort: Some(effort.to_string()),
+                            ..ModelRequest::default()
+                        }],
                         _ => {
-                            eprintln!("usage: /model NAME  or  /provider NAME [MODEL]");
+                            eprintln!("usage: /model NAME, /provider NAME [MODEL], /preset NAME, or /effort LEVEL");
                             continue;
                         }
                     };
                     let switched = switch_model(
                         &config,
-                        request,
+                        &layers,
+                        &base,
+                        &mut connections,
                         &mut agent,
                         store.as_mut(),
                         &approval,
@@ -301,9 +318,8 @@ pub(super) async fn run(
                         Ok(()) => {
                             binding.endpoint = store.data().binding.endpoint.clone();
                             eprintln!(
-                                "(switched to model {} on {} ({}))",
-                                selection.choice.model,
-                                selection.choice.provider,
+                                "(switched to {} ({}))",
+                                selection.describe(),
                                 agent.endpoint()
                             );
                         }
@@ -434,27 +450,84 @@ pub(super) async fn run(
     result
 }
 
-/// Continue the conversation in `store` with the model `request` chooses,
-/// layered over the current one. Nothing changes when any step fails.
+/// Continue the conversation in `store` with the model `layers` choose. The
+/// roles follow the new model; `base` is what their `default` preset stands
+/// for. Nothing changes when any step fails.
+#[allow(clippy::too_many_arguments)]
 fn switch_model(
     config: &AppConfig,
-    request: ModelRequest,
+    layers: &[ModelRequest],
+    base: &[ModelRequest],
+    connections: &mut Connections,
     agent: &mut Agent,
     store: &mut dyn ConversationStore,
     approval: &ApprovalFactory,
     selection: &mut ModelSelection,
 ) -> Result<()> {
-    let next = config.select_model(&[ModelRequest::from(&selection.choice), request])?;
-    let client = connect_provider(config, &next.choice.provider)?;
-    store.switch_model(&next.choice, client.base_url())?;
+    let next = config.select_model(layers)?;
+    let models = RunModels::resolve(config, base, &next, connections)?;
+    store.switch_model(&next.choice, models.main.client.base_url())?;
     agent.replace_model(
-        client.clone(),
-        next.choice.model.clone(),
+        models.main,
         next.approval_model.clone(),
-        approval.build(client, &next),
+        approval.build(models.approval),
+        models.subagents,
     );
     *selection = next;
     Ok(())
+}
+
+/// Every preset with its settings, marking the ones that give the current
+/// provider, model, and effort, and the roles that use each.
+fn format_presets(config: &AppConfig, base: &[ModelRequest], selection: &ModelSelection) -> String {
+    let current = &selection.choice;
+    let width = config
+        .presets
+        .keys()
+        .map(String::len)
+        .chain([DEFAULT_PRESET.len()])
+        .max()
+        .unwrap_or(0);
+    let default = config.select_model(base).ok();
+    let mut lines = vec![format!(
+        "{} {DEFAULT_PRESET:width$}  {}",
+        if default
+            .as_ref()
+            .is_some_and(|default| default.choice == *current)
+        {
+            "*"
+        } else {
+            " "
+        },
+        default
+            .map(|default| default.describe())
+            .unwrap_or_default(),
+    )];
+    for (name, preset) in &config.presets {
+        let chosen = config
+            .select_model(&[ModelRequest::from(current), ModelRequest::preset(name)])
+            .ok();
+        let marker = if chosen.is_some_and(|chosen| chosen.choice == *current) {
+            "*"
+        } else {
+            " "
+        };
+        let mut line = format!("{marker} {name:width$}  {}", preset.summary());
+        if let Some(description) = &preset.description {
+            line.push_str(&format!("  - {description}"));
+        }
+        lines.push(line);
+    }
+    let roles: Vec<String> = config
+        .agent
+        .roles
+        .iter()
+        .filter_map(|(role, preset)| preset.map(|preset| format!("{role} = {preset}")))
+        .collect();
+    if !roles.is_empty() {
+        lines.push(format!("roles: {}", roles.join(", ")));
+    }
+    lines.join("\n")
 }
 
 /// Every provider, marking the current one, with its endpoint and model.
@@ -587,13 +660,18 @@ mod tests {
             )
             .unwrap();
         store.complete().unwrap();
+        let mut connections = Default::default();
         let mut switch = |provider: Option<&str>, model: Option<&str>| {
+            let request = ModelRequest {
+                provider: provider.map(str::to_string),
+                model: model.map(str::to_string),
+                ..ModelRequest::default()
+            };
             switch_model(
                 &config,
-                ModelRequest {
-                    provider: provider.map(str::to_string),
-                    model: model.map(str::to_string),
-                },
+                &[ModelRequest::from(&selection.choice), request],
+                &[],
+                &mut connections,
                 &mut agent,
                 &mut store,
                 &approval,

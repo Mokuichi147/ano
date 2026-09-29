@@ -540,10 +540,6 @@ impl Agent {
         scope: RoundScope<'_>,
     ) -> Result<super::AgentResult> {
         let RoundScope { round, events, .. } = scope;
-        events.push(AgentEvent::SubagentStarted {
-            round,
-            task: task.to_string(),
-        });
         let spent = Mutex::new(UsageSummary::default());
         let request = RunRequest {
             input: vec![InputPart::Text(task.to_string())],
@@ -560,6 +556,11 @@ impl Agent {
             usage_sink: Some(&spent),
             reviewer,
         };
+        events.push(AgentEvent::SubagentStarted {
+            round,
+            task: task.to_string(),
+            model: self.target(&origin).model.to_string(),
+        });
         let result = self.run_inner(request, None, origin).await;
         let spent = spent
             .into_inner()

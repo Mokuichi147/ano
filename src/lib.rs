@@ -26,7 +26,10 @@ pub mod infrastructure;
 pub mod interface;
 
 pub use application::{
-    agent::{task_plan_definition, Agent, AgentEvent, AgentResult, EventListener, RunRequest},
+    agent::{
+        task_plan_definition, Agent, AgentEvent, AgentResult, EventListener, ModelTarget,
+        RunRequest, SubagentModels,
+    },
     approval::{AlwaysApprove, DenyApproval},
     input::{build_user_input, InputPart},
     ports::{
@@ -35,9 +38,11 @@ pub use application::{
     },
     profile::ExecutionProfile,
     registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
-    settings::AgentSettings,
+    settings::{AgentSettings, ModelRoles},
 };
-pub use config::{AppConfig, ModelRequest, ModelSelection, API_PROVIDER};
+pub use config::{
+    AppConfig, ModelRequest, ModelSelection, PresetSettings, API_PROVIDER, DEFAULT_PRESET,
+};
 pub use domain::{
     compaction::CompactionRecord,
     environment::{CheckConfig, EnvironmentConfig},

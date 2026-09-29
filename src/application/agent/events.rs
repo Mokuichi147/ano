@@ -105,6 +105,9 @@ pub enum AgentEvent {
     SubagentStarted {
         round: usize,
         task: String,
+        /// The model the sub-agent runs on.
+        #[serde(default)]
+        model: String,
     },
     SubagentFinished {
         round: usize,

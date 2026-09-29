@@ -25,7 +25,7 @@
 | `max_tool_output_bytes` | 131072 | tool 出力（JSON のバイト数）の上限。超えた出力は先頭と末尾だけを残し、`truncated: true` と元のサイズを付けてモデルへ返します（4096 以上） |
 | `tool_discovery_limit` | 12 | `tool_search` 1回で有効化する tool 数 |
 | `max_output_tokens` | なし | 各応答の出力トークン上限 |
-| `reasoning_effort` | なし | 推論モデルの `reasoning.effort`（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`）。CLI では `--reasoning-effort` |
+| `reasoning_effort` | なし | 推論モデルの `reasoning.effort`（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`・`max`・`ultra`。対応範囲はモデルによる）。CLI では `--reasoning-effort`、`ano chat` では `/effort`。接続先・モデルと組にするには[プリセット](../README.md#プリセットとロール)を使う |
 | `reasoning_summary` | なし | 推論の要約（`auto`・`concise`・`detailed`）。要約は `reasoning_summary` イベントとして進捗に表示 |
 | `project_instructions` | `["AGENTS.md"]` | instructions の末尾に追加する workspace 内のファイル（[README](../README.md#プロジェクト指示agentsmd)） |
 
@@ -61,7 +61,7 @@ ano session .ano/review.json --json   # 保存内容をすべて JSON で表示
 ```
 
 - セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。endpoint だけは `--provider` の明示か `ano chat` の `/provider` で切り替えられます。その際、元の endpoint でしか読めない暗号化された推論を履歴から除きます。リモート圧縮済みの会話は移せません（[複数の接続先を切り替える](../README.md#複数の接続先を切り替える)）。
-- `--provider`・`--model` や `/provider`・`/model` で選んだ接続先とモデルはセッションに記録され、指定なしで再開したときに引き継がれます。
+- `--preset`・`--provider`・`--model`・`--reasoning-effort` や `/preset`・`/provider`・`/model`・`/effort` で選んだ接続先・モデル・推論の強さはセッションに記録され、指定なしで再開したときに引き継がれます。
 - 履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。
 - 実行中のセッションは sidecar lock（`<名前>.lock`）で二重起動を防ぎます。壊れたファイルはそのまま残して読み込みを拒否します。サイズ上限は 32 MiB です。
 - プロセスが中断して `running` のまま残ったセッションは、workspace の状態を確認してから `--recover-session` を付けて再開します。エラーを記録して `failed` になったセッションは通常どおり再開できます。
@@ -214,7 +214,8 @@ MCP tool の検索対象は [MCP の設定](mcp.md#検索カタログtool_catalo
 
 `delegate_task` は、まとまった作業を新しい会話のサブエージェントに任せ、その最終回答（報告）だけを受け取るランタイム tool です。多数のファイルを調べる調査や独立した部分作業を切り出すことで、元の会話の履歴を小さく保てます。
 
-- サブエージェントは同じモデル設定・tool・ポリシー・workspace・承認ハンドラーで動き、元の会話は見えません。モデルは `task` に目的・前提・報告してほしい内容を書きます。
+- サブエージェントは同じ tool・ポリシー・workspace・承認ハンドラーで動き、元の会話は見えません。モデルは `task` に目的・前提・報告してほしい内容を書きます。
+- 接続先・モデル・推論の強さは、`[agent.roles] delegate` にプリセットを指定するとそれを使い、指定しなければ元のエージェントと同じです（[プリセットとロール](../README.md#プリセットとロール)）。進捗には `[subagent] started on MODEL` と使うモデルを表示します。
 - サブエージェントはさらに委任できません（1段まで）。1つの応答に複数の `delegate_task` があれば、他の tool と同じく並行実行します。
 - tool 出力は `report`（最終回答）・`outcome`・`stop_reason` と、サブエージェントが作った計画（`plan`）です。失敗した場合は `subagent_failed` として元のエージェントに返し、実行は続けます。
 - 承認の判定には、モデルが書いた `task` ではなく元のユーザーの依頼文を使います。
@@ -237,7 +238,7 @@ MCP tool の検索対象は [MCP の設定](mcp.md#検索カタログtool_catalo
 - 記録は `Agent` のインスタンス（`ano chat` の会話、`ano run` の1回の実行、Webhook の1ジョブ）ごとにメモリ上に持ち、プロセスや実行をまたいでは引き継ぎません。引き継げない場合は再レビューを求めるだけで、安全側に倒れます。
 - 書き込みを許可した実行（`allow_writes`）でだけモデルに提示します。`disabled_tools = ["review_changes"]` で無効化すると、`git_commit_push` によるコミットもできなくなります。
 - 強制するのは「コミットする内容がレビューを受けたものであること」までです。指摘にどう対処したか（直したか・なぜ見送ったか）は実装したエージェントの判断に任せ、最終回答や PR の本文で報告させます。レビュー担当も LLM なので、レビューはセキュリティ上の境界ではありません。差分や依頼文の中の指示には従わないよう指示していますが、PR はマージ前に人が確認してください。
-- 使用量の合算・承認の判定・イベントの扱いは `delegate_task` と同じです。
+- 使用量の合算・承認の判定・イベントの扱いは `delegate_task` と同じです。レビュー担当の接続先・モデル・推論の強さは `[agent.roles] review` のプリセットで選べます。実装と別のモデルにすると、同じモデルに特有の見落としを避けやすくなります。
 
 ## スキル（skill_read / skill_save）
 

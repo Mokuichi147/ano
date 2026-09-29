@@ -4,7 +4,10 @@
 //! the TOML file, and resolves paths relative to it.
 
 use crate::{
-    application::{profile::ExecutionProfile, settings::AgentSettings},
+    application::{
+        profile::ExecutionProfile,
+        settings::{validate_reasoning_effort, AgentSettings},
+    },
     domain::session::ModelChoice,
     domain::{environment::EnvironmentConfig, mcp::McpServerConfig, policy::UserPolicy},
     infrastructure::{
@@ -30,6 +33,9 @@ pub struct AppConfig {
     /// `[api]` 以外の名前付き接続先。`--provider`・environment の `provider`・
     /// `ano chat` の `/provider` で選ぶ。
     pub providers: BTreeMap<String, ProviderSettings>,
+    /// 接続先・モデル・推論の強さの名前付きの組。`--preset`・environment の
+    /// `preset`・`ano chat` の `/preset`・`[agent.roles]` で選ぶ。
+    pub presets: BTreeMap<String, PresetSettings>,
     pub agent: AgentSettings,
     pub mcp_servers: Vec<McpServerConfig>,
     pub users: HashMap<String, UserPolicy>,
@@ -128,6 +134,19 @@ impl AppConfig {
             self.provider_settings(provider)
                 .context("invalid agent.provider")?;
         }
+        for (name, preset) in &self.presets {
+            self.validate_preset(name, preset)
+                .with_context(|| format!("invalid presets.{name}"))?;
+        }
+        if let Some(preset) = &self.agent.preset {
+            self.check_preset(preset).context("invalid agent.preset")?;
+        }
+        for (role, preset) in self.agent.roles.iter() {
+            if let Some(preset) = preset {
+                self.check_preset(preset)
+                    .with_context(|| format!("invalid agent.roles.{role}"))?;
+            }
+        }
         for name in self.provider_names() {
             let settings = self.provider_settings(name)?;
             let table = match name {
@@ -175,6 +194,16 @@ impl AppConfig {
                 self.provider_settings(provider)
                     .with_context(|| format!("invalid environments.{name}.provider"))?;
             }
+            if let Some(preset) = &environment.preset {
+                self.check_preset(preset)
+                    .with_context(|| format!("invalid environments.{name}.preset"))?;
+            }
+            if let Some(effort) = &environment.reasoning_effort {
+                validate_reasoning_effort(
+                    &format!("environments.{name}.reasoning_effort"),
+                    effort,
+                )?;
+            }
         }
         let mut labels = HashSet::new();
         for server in &self.mcp_servers {
@@ -184,6 +213,50 @@ impl AppConfig {
             }
         }
         Ok(())
+    }
+
+    fn validate_preset(&self, name: &str, preset: &PresetSettings) -> Result<()> {
+        if name == DEFAULT_PRESET {
+            bail!("'{DEFAULT_PRESET}' is reserved for the settings of [agent]");
+        }
+        validate_name(name).context("invalid preset name")?;
+        if preset.provider.is_none() && preset.model.is_none() && preset.reasoning_effort.is_none()
+        {
+            bail!("a preset must set provider, model, or reasoning_effort");
+        }
+        for (field, value) in [("provider", &preset.provider), ("model", &preset.model)] {
+            if value.as_ref().is_some_and(|value| value.trim().is_empty()) {
+                bail!("{field} must not be empty");
+            }
+        }
+        if let Some(provider) = &preset.provider {
+            self.provider_settings(provider)?;
+        }
+        if let Some(effort) = &preset.reasoning_effort {
+            validate_reasoning_effort("reasoning_effort", effort)?;
+        }
+        Ok(())
+    }
+
+    /// Fail unless `name` is a preset or `default`.
+    pub fn check_preset(&self, name: &str) -> Result<()> {
+        if name != DEFAULT_PRESET {
+            self.preset(name)?;
+        }
+        Ok(())
+    }
+
+    /// The preset `name` from `[presets]`.
+    pub fn preset(&self, name: &str) -> Result<&PresetSettings> {
+        self.presets.get(name).with_context(|| {
+            let names: Vec<&str> = std::iter::once(DEFAULT_PRESET)
+                .chain(self.presets.keys().map(String::as_str))
+                .collect();
+            format!(
+                "unknown preset '{name}'; choose one of: {}",
+                names.join(", ")
+            )
+        })
     }
 
     /// Whether `user_id` has an entry in `[users]`. `default` always exists.
@@ -206,6 +279,17 @@ impl AppConfig {
             .with_context(|| format!("unknown execution environment '{name}'"))
     }
 
+    /// The provider, model, and effort choice of the environment `name`.
+    pub fn environment_request(&self, name: &str) -> Result<ModelRequest> {
+        let environment = self.environment_for(name)?;
+        Ok(ModelRequest {
+            preset: environment.preset.clone(),
+            provider: environment.provider.clone(),
+            model: environment.model.clone(),
+            reasoning_effort: environment.reasoning_effort.clone(),
+        })
+    }
+
     /// Names of every provider, `api` (`[api]`) first.
     pub fn provider_names(&self) -> impl Iterator<Item = &str> {
         std::iter::once(API_PROVIDER).chain(self.providers.keys().map(String::as_str))
@@ -216,6 +300,10 @@ impl AppConfig {
     /// appears beside the configured providers.
     pub fn listed_provider_names(&self) -> impl Iterator<Item = &str> {
         let api_in_use = self.default_provider() == API_PROVIDER
+            || self
+                .presets
+                .values()
+                .any(|preset| preset.provider.as_deref() == Some(API_PROVIDER))
             || self
                 .environments
                 .values()
@@ -228,10 +316,16 @@ impl AppConfig {
             .filter(move |name| api_in_use || *name != API_PROVIDER)
     }
 
-    /// The provider runs use unless one is chosen: `[agent].provider`, or
-    /// `api` without it.
+    /// The provider runs use unless one is chosen: that of the preset in
+    /// `[agent].preset`, `[agent].provider`, or `api` without either.
     pub fn default_provider(&self) -> &str {
-        self.agent.provider.as_deref().unwrap_or(API_PROVIDER)
+        self.agent
+            .preset
+            .as_deref()
+            .and_then(|name| self.presets.get(name))
+            .and_then(|preset| preset.provider.as_deref())
+            .or(self.agent.provider.as_deref())
+            .unwrap_or(API_PROVIDER)
     }
 
     /// The connection settings of the provider `name`; `api` is `[api]`.
@@ -264,38 +358,63 @@ impl AppConfig {
         }
     }
 
-    /// Resolve the provider and model of a run from `requests`, lowest
-    /// precedence first (for example the environment, then the command line).
+    /// Resolve the provider, model, and reasoning effort of a run from
+    /// `requests`, lowest precedence first (for example the environment, then
+    /// the command line).
     ///
-    /// The default provider comes first, with its model. A request that
-    /// names a model uses it. A request that names only a provider switches
-    /// to that provider's model (`[agent].model` for `api`) when it has one,
-    /// and otherwise keeps the model from lower layers.
+    /// The settings of `[agent]` come first, then the preset of
+    /// `[agent].preset`. In each request, its preset applies first and its
+    /// own fields over it. A request that names a model uses it. A request
+    /// that names only a provider switches to that provider's model
+    /// (`[agent].model` for `api`) when it has one, and otherwise keeps the
+    /// model from lower layers. The effort is kept until a layer sets one.
     pub fn select_model(&self, requests: &[ModelRequest]) -> Result<ModelSelection> {
-        let default = ModelRequest {
-            provider: Some(self.default_provider().to_string()),
-            model: None,
+        let base = ModelRequest {
+            provider: Some(
+                self.agent
+                    .provider
+                    .clone()
+                    .unwrap_or_else(|| API_PROVIDER.into()),
+            ),
+            reasoning_effort: self.agent.reasoning_effort.clone(),
+            ..ModelRequest::default()
         };
+        let default = ModelRequest::preset(self.agent.preset.as_deref().unwrap_or(DEFAULT_PRESET));
         let mut provider = API_PROVIDER.to_string();
         let mut model = self.agent.model.clone();
+        let mut reasoning_effort = None;
         let mut approval_model = self.agent.approval_model.clone();
-        for request in std::iter::once(&default).chain(requests) {
-            if let Some(name) = &request.provider {
-                self.provider_settings(name)?;
-                provider.clone_from(name);
-                if let Some(default) = self.provider_model(name) {
-                    model = default.to_string();
+        for request in [&base, &default].into_iter().chain(requests) {
+            let preset = match request.preset.as_deref() {
+                None | Some(DEFAULT_PRESET) => None,
+                Some(name) => Some(self.preset(name)?),
+            };
+            let layers = preset
+                .map(|preset| (&preset.provider, &preset.model, &preset.reasoning_effort))
+                .into_iter()
+                .chain([(&request.provider, &request.model, &request.reasoning_effort)]);
+            for (layer_provider, layer_model, layer_effort) in layers {
+                if let Some(name) = layer_provider {
+                    self.provider_settings(name)?;
+                    provider.clone_from(name);
+                    if let Some(default) = self.provider_model(name) {
+                        model = default.to_string();
+                    }
+                    approval_model = match self.providers.get(name) {
+                        Some(settings) => settings.approval_model.clone(),
+                        None => self.agent.approval_model.clone(),
+                    };
                 }
-                approval_model = match self.providers.get(name) {
-                    Some(settings) => settings.approval_model.clone(),
-                    None => self.agent.approval_model.clone(),
-                };
-            }
-            if let Some(name) = &request.model {
-                if name.trim().is_empty() {
-                    bail!("model must not be empty");
+                if let Some(name) = layer_model {
+                    if name.trim().is_empty() {
+                        bail!("model must not be empty");
+                    }
+                    model.clone_from(name);
                 }
-                model.clone_from(name);
+                if let Some(effort) = layer_effort {
+                    validate_reasoning_effort("reasoning effort", effort)?;
+                    reasoning_effort = Some(effort.clone());
+                }
             }
         }
         if !self.provider_enabled(&provider) {
@@ -307,9 +426,29 @@ impl AppConfig {
         }
         Ok(ModelSelection {
             api,
-            choice: ModelChoice { provider, model },
+            choice: ModelChoice {
+                provider,
+                model,
+                reasoning_effort,
+            },
             approval_model,
         })
+    }
+
+    /// The selection of a role that uses `preset`, applied over `current`,
+    /// the main agent's selection. `default` is the selection of `base`,
+    /// the layers under any choice made during the run (such as the
+    /// environment).
+    pub fn select_role(
+        &self,
+        base: &[ModelRequest],
+        current: &ModelChoice,
+        preset: &str,
+    ) -> Result<ModelSelection> {
+        if preset == DEFAULT_PRESET {
+            return self.select_model(base);
+        }
+        self.select_model(&[ModelRequest::from(current), ModelRequest::preset(preset)])
     }
 
     /// Resolve a run of `user_id` in the named environment.
@@ -332,30 +471,84 @@ impl AppConfig {
 /// The name of the provider configured by `[api]`.
 pub const API_PROVIDER: &str = "api";
 
-/// One layer of a provider and model choice, such as an environment or the
-/// command line. Unset fields leave the lower layers in effect.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModelRequest {
+/// The name of the preset that stands for the settings of `[agent]` (with
+/// `[agent].preset`) and, in a run, of its environment.
+pub const DEFAULT_PRESET: &str = "default";
+
+/// A named set of a provider, a model, and a reasoning effort
+/// (`[presets.NAME]`). Unset fields keep what lower layers chose.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PresetSettings {
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+    /// What the preset is for, shown in listings.
+    pub description: Option<String>,
+}
+
+impl PresetSettings {
+    /// The preset's settings in one line, such as `lan  model qwen  effort low`.
+    pub fn summary(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(provider) = &self.provider {
+            parts.push(format!("provider {provider}"));
+        }
+        if let Some(model) = &self.model {
+            parts.push(format!("model {model}"));
+        }
+        if let Some(effort) = &self.reasoning_effort {
+            parts.push(format!("effort {effort}"));
+        }
+        parts.join("  ")
+    }
+}
+
+/// One layer of a provider, model, and reasoning effort choice, such as an
+/// environment or the command line. Unset fields leave the lower layers in
+/// effect; `preset` applies before the other fields of the same layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelRequest {
+    pub preset: Option<String>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
 }
 
 impl ModelRequest {
+    pub fn preset(name: &str) -> Self {
+        Self {
+            preset: Some(name.to_string()),
+            ..Self::default()
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.provider.is_none() && self.model.is_none()
+        self.preset.is_none()
+            && self.provider.is_none()
+            && self.model.is_none()
+            && self.reasoning_effort.is_none()
+    }
+
+    /// Whether the layer chooses a model: a preset, a provider, or a model.
+    /// A layer that only sets the effort keeps the model under it.
+    pub fn chooses_model(&self) -> bool {
+        self.preset.is_some() || self.provider.is_some() || self.model.is_some()
     }
 }
 
 impl From<&ModelChoice> for ModelRequest {
     fn from(choice: &ModelChoice) -> Self {
         Self {
+            preset: None,
             provider: Some(choice.provider.clone()),
             model: Some(choice.model.clone()),
+            reasoning_effort: choice.reasoning_effort.clone(),
         }
     }
 }
 
-/// The provider and model a run uses, with the provider's connection.
+/// The provider, model, and effort a run uses, with the provider's connection.
 #[derive(Debug, Clone)]
 pub struct ModelSelection {
     pub choice: ModelChoice,
@@ -365,24 +558,45 @@ pub struct ModelSelection {
 }
 
 impl ModelSelection {
-    /// Apply the model to `settings` of a run.
+    /// Apply the model and effort to `settings` of a run.
     pub fn apply_to(&self, settings: &mut AgentSettings) {
         settings.model.clone_from(&self.choice.model);
+        settings
+            .reasoning_effort
+            .clone_from(&self.choice.reasoning_effort);
         settings.approval_model.clone_from(&self.approval_model);
     }
+
+    /// `model on provider`, with the effort when one is set.
+    pub fn describe(&self) -> String {
+        let choice = &self.choice;
+        match &choice.reasoning_effort {
+            Some(effort) => format!(
+                "model {} on {} (effort {effort})",
+                choice.model, choice.provider
+            ),
+            None => format!("model {} on {}", choice.model, choice.provider),
+        }
+    }
+}
+
+/// Names of providers and presets: ASCII letters, digits, '-', '_', and '.'.
+fn validate_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        bail!("names may contain only ASCII letters, digits, '-', '_', and '.'");
+    }
+    Ok(())
 }
 
 fn validate_provider(name: &str, provider: &ProviderSettings) -> Result<()> {
     if name == API_PROVIDER {
         bail!("'{API_PROVIDER}' is reserved for [api]");
     }
-    if name.is_empty()
-        || !name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        bail!("provider names may contain only ASCII letters, digits, '-', '_', and '.'");
-    }
+    validate_name(name).context("invalid provider name")?;
     if provider.timeout_secs == Some(0) {
         bail!("timeout_secs must be greater than zero");
     }
@@ -445,6 +659,72 @@ pub fn use_provider(path: &Path, name: &str) -> Result<()> {
             "provider",
             value.as_ref(),
         );
+        Ok(document.to_string())
+    })
+}
+
+/// Write `changes` to the preset `name` in the config file at `path`,
+/// creating the file when it does not exist. `None` removes a key. `adding`
+/// requires a new preset; otherwise it must exist.
+pub fn update_preset(
+    path: &Path,
+    name: &str,
+    adding: bool,
+    changes: &[(&str, Option<SettingValue>)],
+) -> Result<()> {
+    edit_config_file(path, true, |text| {
+        if name == DEFAULT_PRESET {
+            bail!("'{DEFAULT_PRESET}' is the settings of [agent]; change them with `ano provider set` or in the config file");
+        }
+        let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+        set_entry_values(&mut document, "presets", name, adding, changes)?;
+        Ok(document.to_string())
+    })
+}
+
+/// Remove the preset `name` from the config file at `path`. Refused while
+/// `[agent]`, a role, or an environment uses it.
+pub fn remove_preset(path: &Path, name: &str) -> Result<()> {
+    edit_config_file(path, false, |text| {
+        let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+        let removed = document
+            .get_mut("presets")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|presets| presets.remove(name));
+        if removed.is_none() {
+            bail!("preset '{name}' is not in the config file");
+        }
+        Ok(document.to_string())
+    })
+}
+
+/// Make `name` the default preset in the config file at `path`
+/// (`[agent].preset`; removed for `default`).
+pub fn use_preset(path: &Path, name: &str) -> Result<()> {
+    edit_config_file(path, true, |text| {
+        let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+        let value = (name != DEFAULT_PRESET).then(|| SettingValue::Text(name.into()));
+        set_value(table_mut(&mut document, "agent")?, "preset", value.as_ref());
+        Ok(document.to_string())
+    })
+}
+
+/// Set the preset of `role` in `[agent.roles]` of the config file at `path`,
+/// or remove it for `None`.
+pub fn set_role_preset(path: &Path, role: &str, preset: Option<&str>) -> Result<()> {
+    edit_config_file(path, true, |text| {
+        let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+        let agent = table_mut(&mut document, "agent")?;
+        let roles = agent
+            .entry("roles")
+            .or_insert(Item::Table(Table::new()))
+            .as_table_like_mut()
+            .context("agent.roles is not a table")?;
+        let value = preset.map(|name| SettingValue::Text(name.into()));
+        set_value(roles, role, value.as_ref());
+        if roles.is_empty() {
+            agent.remove("roles");
+        }
         Ok(document.to_string())
     })
 }
@@ -570,7 +850,7 @@ fn with_provider_renamed(text: &str, old: &str, new: &str) -> Result<String> {
     if let Some(api) = document.get_mut("api").and_then(Item::as_table_like_mut) {
         renamed(api, "fallback");
     }
-    for section in ["environments", "providers"] {
+    for section in ["environments", "providers", "presets"] {
         if let Some(tables) = document.get_mut(section).and_then(Item::as_table_like_mut) {
             for (_, table) in tables.iter_mut() {
                 if let Some(table) = table.as_table_like_mut() {
@@ -673,33 +953,48 @@ fn with_provider_changes(
         }
         return Ok(document.to_string());
     }
+    set_entry_values(&mut document, "providers", name, adding, changes)?;
+    Ok(document.to_string())
+}
+
+/// Apply `changes` to the table `[SECTION.NAME]` (`providers` or `presets`).
+/// `adding` requires a new entry; otherwise it must exist.
+fn set_entry_values(
+    document: &mut DocumentMut,
+    section: &str,
+    name: &str,
+    adding: bool,
+    changes: &[(&str, Option<SettingValue>)],
+) -> Result<()> {
+    // `providers` -> `provider`, `presets` -> `preset`
+    let kind = section.trim_end_matches('s');
     let exists = document
-        .get("providers")
+        .get(section)
         .and_then(Item::as_table_like)
-        .is_some_and(|providers| providers.contains_key(name));
+        .is_some_and(|entries| entries.contains_key(name));
     match (adding, exists) {
         (true, true) => {
-            bail!("provider '{name}' already exists; change it with `ano provider set {name}`")
+            bail!("{kind} '{name}' already exists; change it with `ano {kind} set {name}`")
         }
-        (false, false) => bail!("provider '{name}' is not in the config file"),
+        (false, false) => bail!("{kind} '{name}' is not in the config file"),
         _ => {}
     }
-    let providers = document.entry("providers").or_insert_with(|| {
+    let entries = document.entry(section).or_insert_with(|| {
         let mut table = Table::new();
         table.set_implicit(true);
         Item::Table(table)
     });
-    let provider = providers
+    let entry = entries
         .as_table_like_mut()
-        .context("providers is not a table")?
+        .with_context(|| format!("{section} is not a table"))?
         .entry(name)
         .or_insert(Item::Table(Table::new()))
         .as_table_like_mut()
-        .with_context(|| format!("providers.{name} is not a table"))?;
+        .with_context(|| format!("{section}.{name} is not a table"))?;
     for (key, value) in changes {
-        set_value(provider, key, value.as_ref());
+        set_value(entry, key, value.as_ref());
     }
-    Ok(document.to_string())
+    Ok(())
 }
 
 /// Set `key` to `value`, or remove it for `None`. A replaced value keeps its
@@ -791,6 +1086,7 @@ mod tests {
         ModelRequest {
             provider: provider.map(str::to_string),
             model: model.map(str::to_string),
+            ..ModelRequest::default()
         }
     }
 
@@ -836,6 +1132,129 @@ mod tests {
             .select_model(&[request(Some("missing"), None)])
             .is_err());
         assert!(config.select_model(&[request(None, Some(" "))]).is_err());
+    }
+
+    const PRESETS: &str = "[agent]\nmodel = 'gpt-main'\nreasoning_effort = 'medium'\n[providers.lan]\nbase_url = 'http://127.0.0.1:9/v1'\nmodel = 'qwen'\n[presets.quick]\nprovider = 'lan'\nreasoning_effort = 'low'\n[presets.deep]\nmodel = 'gpt-big'\nreasoning_effort = 'high'\ndescription = 'Hard problems'\n[presets.lighter]\nreasoning_effort = 'minimal'\n[environments.dev]\npreset = 'quick'\nmodel = 'qwen-small'\n";
+
+    fn choice(selection: super::ModelSelection) -> (String, String, Option<String>) {
+        let choice = selection.choice;
+        (choice.provider, choice.model, choice.reasoning_effort)
+    }
+
+    fn owned(provider: &str, model: &str, effort: &str) -> (String, String, Option<String>) {
+        (provider.into(), model.into(), Some(effort.into()))
+    }
+
+    #[test]
+    fn presets_apply_their_provider_model_and_effort_over_lower_layers() {
+        let config = AppConfig::parse(PRESETS).unwrap();
+        let chosen = |requests: &[ModelRequest]| choice(config.select_model(requests).unwrap());
+        let preset = ModelRequest::preset;
+        assert_eq!(chosen(&[]), owned("api", "gpt-main", "medium"));
+        // A provider brings its model; the effort is the preset's.
+        assert_eq!(chosen(&[preset("quick")]), owned("lan", "qwen", "low"));
+        // A preset without a provider keeps the provider under it.
+        assert_eq!(
+            chosen(&[preset("quick"), preset("deep")]),
+            owned("lan", "gpt-big", "high")
+        );
+        // One that sets only the effort keeps the model.
+        assert_eq!(
+            chosen(&[preset("quick"), preset("lighter")]),
+            owned("lan", "qwen", "minimal")
+        );
+        // The fields of a layer apply over its preset.
+        let with_effort = ModelRequest {
+            reasoning_effort: Some("high".into()),
+            ..preset("quick")
+        };
+        assert_eq!(chosen(&[with_effort]), owned("lan", "qwen", "high"));
+        assert_eq!(
+            chosen(&[config.environment_request("dev").unwrap()]),
+            owned("lan", "qwen-small", "low")
+        );
+        // `default` adds nothing to the layers under it.
+        assert_eq!(
+            chosen(&[preset("quick"), preset("default")]),
+            owned("lan", "qwen", "low")
+        );
+        assert!(config.select_model(&[preset("missing")]).is_err());
+        let invalid = ModelRequest {
+            reasoning_effort: Some("hight".into()),
+            ..ModelRequest::default()
+        };
+        assert!(config.select_model(&[invalid]).is_err());
+    }
+
+    #[test]
+    fn the_default_preset_and_the_presets_of_roles() {
+        let text = format!("{PRESETS}[agent.roles]\ndelegate = 'lighter'\nreview = 'default'\n")
+            .replace("[agent]\n", "[agent]\npreset = 'quick'\n");
+        let config = AppConfig::parse(&text).unwrap();
+        assert_eq!(config.default_provider(), "lan");
+        assert_eq!(config.listed_provider_names().collect::<Vec<_>>(), ["lan"]);
+        let default = config.select_model(&[]).unwrap();
+        assert_eq!(choice(default.clone()), owned("lan", "qwen", "low"));
+
+        // A role applies its preset over the main agent's current choice...
+        let current = config
+            .select_model(&[ModelRequest::preset("deep")])
+            .unwrap()
+            .choice;
+        let role = |preset: &str| choice(config.select_role(&[], &current, preset).unwrap());
+        assert_eq!(role("lighter"), owned("lan", "gpt-big", "minimal"));
+        // ...and `default` returns to the configured choice.
+        assert_eq!(role("default"), owned("lan", "qwen", "low"));
+        let base = [config.environment_request("dev").unwrap()];
+        assert_eq!(
+            choice(config.select_role(&base, &current, "default").unwrap()),
+            owned("lan", "qwen-small", "low")
+        );
+    }
+
+    #[test]
+    fn presets_and_their_references_are_validated() {
+        for text in [
+            "[presets.default]\nmodel = 'x'",
+            "[presets.'a b']\nmodel = 'x'",
+            "[presets.empty]\ndescription = 'nothing'",
+            "[presets.far]\nprovider = 'missing'",
+            "[presets.blank]\nmodel = ' '",
+            "[presets.hard]\nreasoning_effort = 'hight'",
+            "[presets.odd]\nmodel = 'x'\nunknown = 1",
+            "[agent]\npreset = 'missing'",
+            "[agent.roles]\nreview = 'missing'",
+            "[agent.roles]\nplanner = 'default'",
+            "[environments.dev]\npreset = 'missing'",
+            "[environments.dev]\nreasoning_effort = 'hight'",
+        ] {
+            assert!(AppConfig::parse(text).is_err(), "{text}");
+        }
+        assert!(AppConfig::parse("[agent.roles]\napproval = 'default'").is_ok());
+        // Codex models on a ChatGPT subscription go beyond xhigh.
+        for effort in ["max", "ultra"] {
+            let text = format!("[agent]\nreasoning_effort = '{effort}'\n[presets.top]\nreasoning_effort = '{effort}'");
+            assert!(AppConfig::parse(&text).is_ok(), "{effort}");
+        }
+        assert!(AppConfig::parse(PRESETS).is_ok());
+    }
+
+    #[test]
+    fn renaming_a_provider_updates_the_presets_that_use_it() {
+        let renamed = with_provider_renamed(PRESETS, "lan", "desktop").unwrap();
+        let config = AppConfig::parse(&renamed).unwrap();
+        assert_eq!(config.presets["quick"].provider.as_deref(), Some("desktop"));
+        assert!(remove_provider_text(&renamed, "desktop").is_err());
+    }
+
+    /// Whether removing the provider `name` from `text` leaves a valid config.
+    fn remove_provider_text(text: &str, name: &str) -> anyhow::Result<AppConfig> {
+        let mut document: toml_edit::DocumentMut = text.parse()?;
+        document["providers"]
+            .as_table_like_mut()
+            .unwrap()
+            .remove(name);
+        AppConfig::parse(&document.to_string())
     }
 
     #[test]
