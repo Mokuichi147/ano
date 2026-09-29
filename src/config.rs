@@ -138,9 +138,6 @@ impl AppConfig {
             self.validate_preset(name, preset)
                 .with_context(|| format!("invalid presets.{name}"))?;
         }
-        if let Some(preset) = &self.agent.preset {
-            self.check_preset(preset).context("invalid agent.preset")?;
-        }
         for (role, preset) in self.agent.roles.iter() {
             if let Some(preset) = preset {
                 self.check_preset(preset)
@@ -317,10 +314,11 @@ impl AppConfig {
     }
 
     /// The provider runs use unless one is chosen: that of the preset in
-    /// `[agent].preset`, `[agent].provider`, or `api` without either.
+    /// `[agent.roles].default`, `[agent].provider`, or `api` without either.
     pub fn default_provider(&self) -> &str {
         self.agent
-            .preset
+            .roles
+            .default
             .as_deref()
             .and_then(|name| self.presets.get(name))
             .and_then(|preset| preset.provider.as_deref())
@@ -363,7 +361,7 @@ impl AppConfig {
     /// the command line).
     ///
     /// The settings of `[agent]` come first, then the preset of
-    /// `[agent].preset`. In each request, its preset applies first and its
+    /// `[agent.roles].default`. In each request, its preset applies first and its
     /// own fields over it. A request that names a model uses it. A request
     /// that names only a provider switches to that provider's model
     /// (`[agent].model` for `api`) when it has one, and otherwise keeps the
@@ -379,7 +377,13 @@ impl AppConfig {
             reasoning_effort: self.agent.reasoning_effort.clone(),
             ..ModelRequest::default()
         };
-        let default = ModelRequest::preset(self.agent.preset.as_deref().unwrap_or(DEFAULT_PRESET));
+        let default = ModelRequest::preset(
+            self.agent
+                .roles
+                .default
+                .as_deref()
+                .unwrap_or(DEFAULT_PRESET),
+        );
         let mut provider = API_PROVIDER.to_string();
         let mut model = self.agent.model.clone();
         let mut reasoning_effort = None;
@@ -472,7 +476,7 @@ impl AppConfig {
 pub const API_PROVIDER: &str = "api";
 
 /// The name of the preset that stands for the settings of `[agent]` (with
-/// `[agent].preset`) and, in a run, of its environment.
+/// the preset of `[agent.roles].default`) and, in a run, of its environment.
 pub const DEFAULT_PRESET: &str = "default";
 
 /// A named set of a provider, a model, and a reasoning effort
@@ -683,7 +687,7 @@ pub fn update_preset(
 }
 
 /// Remove the preset `name` from the config file at `path`. Refused while
-/// `[agent]`, a role, or an environment uses it.
+/// a role or an environment uses it.
 pub fn remove_preset(path: &Path, name: &str) -> Result<()> {
     edit_config_file(path, false, |text| {
         let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
@@ -694,17 +698,6 @@ pub fn remove_preset(path: &Path, name: &str) -> Result<()> {
         if removed.is_none() {
             bail!("preset '{name}' is not in the config file");
         }
-        Ok(document.to_string())
-    })
-}
-
-/// Make `name` the default preset in the config file at `path`
-/// (`[agent].preset`; removed for `default`).
-pub fn use_preset(path: &Path, name: &str) -> Result<()> {
-    edit_config_file(path, true, |text| {
-        let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
-        let value = (name != DEFAULT_PRESET).then(|| SettingValue::Text(name.into()));
-        set_value(table_mut(&mut document, "agent")?, "preset", value.as_ref());
         Ok(document.to_string())
     })
 }
@@ -1189,7 +1182,10 @@ mod tests {
     #[test]
     fn the_default_preset_and_the_presets_of_roles() {
         let text = format!("{PRESETS}[agent.roles]\ndelegate = 'lighter'\nreview = 'default'\n")
-            .replace("[agent]\n", "[agent]\npreset = 'quick'\n");
+            .replace(
+                "delegate = 'lighter'",
+                "default = 'quick'\ndelegate = 'lighter'",
+            );
         let config = AppConfig::parse(&text).unwrap();
         assert_eq!(config.default_provider(), "lan");
         assert_eq!(config.listed_provider_names().collect::<Vec<_>>(), ["lan"]);
@@ -1222,7 +1218,8 @@ mod tests {
             "[presets.blank]\nmodel = ' '",
             "[presets.hard]\nreasoning_effort = 'hight'",
             "[presets.odd]\nmodel = 'x'\nunknown = 1",
-            "[agent]\npreset = 'missing'",
+            "[agent]\npreset = 'quick'",
+            "[agent.roles]\ndefault = 'missing'",
             "[agent.roles]\nreview = 'missing'",
             "[agent.roles]\nplanner = 'default'",
             "[environments.dev]\npreset = 'missing'",

@@ -346,7 +346,7 @@ pub async fn run() -> Result<()> {
         Command::Serve(args) => serve(config, args, registry).await,
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
         Command::Provider(args) => provider::run(&config, &config_path, args).await,
-        Command::Preset(args) => preset::run(&config, &config_path, args),
+        Command::Preset(args) => preset::run(&config, &config_path, args).await,
         Command::Model(args) => model::run(&config, &config_path, args).await,
         Command::History(args) => history::run(&config, &cli.user, args).await,
         Command::Skills(args) => skills::run(&config, &cli.user, args),

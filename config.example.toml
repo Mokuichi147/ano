@@ -58,7 +58,8 @@ stream = true
 # Presets: a provider, a model, and a reasoning effort switched together
 # (`ano preset add/set/remove` edits them). Choose one with --preset NAME,
 # `preset = "NAME"` in an environment, /preset NAME in `ano chat`, or as the
-# default with [agent].preset. A preset applies over what lower layers chose:
+# default with the default role of [agent.roles]. `ano preset edit NAME` chooses
+# them from lists. A preset applies over what lower layers chose:
 # one with only reasoning_effort keeps the model. "default" is reserved for
 # the settings of [agent].
 # [presets.quick]
@@ -118,18 +119,17 @@ max_tool_output_bytes = 131072
 # approval_mode = "ask"
 # Reviewer model for auto mode; defaults to model.
 # approval_model = "a-fast-reviewer-model"
-# The preset runs use unless one is chosen, applied over provider, model,
-# and reasoning_effort above (`ano preset use NAME`).
-# preset = "quick"
 # Omit instructions to use the built-in plan -> inspect -> edit -> verify workflow.
 # Setting this replaces the built-in instructions.
 # instructions = "Your task-agent instructions..."
 
-# Presets of the roles besides the main agent (`ano preset role ROLE NAME`).
-# A role without one uses the main agent's current provider, model, and effort;
-# with one, the preset applies over them. "default" is the configured choice
-# even after `ano chat` switched away from it.
+# Presets of the roles (`ano preset role ROLE NAME`). The default role is the
+# main agent's for runs that choose none, applied over provider, model, and
+# reasoning_effort above. Another role without one uses the main agent's
+# current provider, model, and effort; with one, the preset applies over them,
+# and "default" is the configured choice even after `ano chat` switched away.
 # [agent.roles]
+# default = "quick"     # the main agent
 # delegate = "quick"    # sub-agents of delegate_task
 # review = "deep"       # the reviewer of review_changes
 # approval = "quick"    # the reviewer of approval_mode = "auto" (over approval_model)

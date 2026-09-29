@@ -79,8 +79,9 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |
 | `ano provider list` | 接続先の一覧（有効・無効、URL、既定モデル、モデルの絞り込み、フォールバック先）を表示します（[接続先の管理](#接続先の管理)） |
 | `ano provider add/set/remove/enable/disable NAME` | 設定ファイルを直接編集せずに、接続先を追加・変更・削除・有効化・無効化します |
-| `ano preset list/add/set/remove/use NAME` | 接続先・モデル・推論の強さの組（プリセット）を管理し、既定のプリセットを選びます（[プリセット](#プリセットとロール)） |
-| `ano preset role ROLE NAME` | サブエージェント（`delegate`）・レビュー担当（`review`）・承認の判定（`approval`）に使うプリセットを選びます |
+| `ano preset list/add/set/remove NAME` | 接続先・モデル・推論の強さの組（プリセット）を管理します（[プリセット](#プリセットとロール)） |
+| `ano preset edit [NAME]` | プリセットの接続先・モデル・推論の強さを一覧から選んで変更し、設定ファイルに保存します |
+| `ano preset role ROLE NAME` | メインのエージェントの既定（`default`）・サブエージェント（`delegate`）・レビュー担当（`review`）・承認の判定（`approval`）に使うプリセットを選びます |
 | `ano model list [--provider NAME]` | 接続先に接続して提供されるモデル（と登録したモデル）をすべて表示し、設定で有効なものに印を付けます（[モデルの有効化](#接続先の管理)） |
 | `ano model add/remove MODEL... [--provider NAME]` | モデル一覧を返さない接続先（ChatGPT サブスクリプションなど）に、使うモデル名を登録・削除します |
 | `ano model edit [--provider NAME]` | 接続先のモデルをチェックリストで有効化・無効化し、設定ファイルに保存します（`ano model enable/disable MODEL... [--provider NAME]` でも可） |
@@ -198,7 +199,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | --- | --- | --- |
 | `[api]` | endpoint・API キーの環境変数名・タイムアウト・リトライ・ストリーミング | [ローカル AI](#ローカル-ailm-studioollama-など) |
 | `[providers.<name>]` | `[api]` とは別の名前付き接続先と、その既定モデル・使えるモデル・フォールバック先 | [接続先の切り替え](#複数の接続先を切り替える) |
-| `[presets.<name>]` / `[agent.roles]` | 接続先・モデル・推論の強さの組と、サブエージェント・レビュー担当・承認の判定に使うプリセット | [プリセット](#プリセットとロール) |
+| `[presets.<name>]` / `[agent.roles]` | 接続先・モデル・推論の強さの組と、メインのエージェント・サブエージェント・レビュー担当・承認の判定に使うプリセット | [プリセット](#プリセットとロール) |
 | `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・tool 出力の上限・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
 | `[environments.<name>]` | workspace・許可する tool・書き込み・コマンド実行・Web 取得・承認モード・検証コマンド | [実行環境](#実行環境) |
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
@@ -357,10 +358,8 @@ reasoning_effort = "high"
 [presets.lighter]
 reasoning_effort = "minimal"             # 推論の強さだけ（接続先とモデルはそのまま）
 
-[agent]
-preset = "quick"                         # 既定のプリセット（省略可。`ano preset use quick` でも設定できる）
-
-[agent.roles]
+[agent.roles]                            # ロールごとのプリセット（`ano preset role ROLE NAME` でも設定できる）
+default = "quick"                        # メインのエージェントの既定（--preset などで選ばない実行）
 delegate = "quick"                       # delegate_task のサブエージェント
 review = "deep"                          # review_changes のレビュー担当
 approval = "lighter"                     # approval_mode = "auto" の判定用モデル
@@ -373,16 +372,20 @@ preset = "deep"                          # この環境の既定（provider・mo
 ano run --preset deep "この設計の問題点を洗い出して"
 ano run --preset quick --reasoning-effort medium "..."   # プリセットの上に個別の指定を重ねる
 ano preset add deep --provider codex --model gpt-5-codex --reasoning-effort high
+ano preset edit deep                                     # 接続先・モデル・推論の強さを一覧から選び直す
+ano preset set deep --reasoning-effort xhigh             # 項目を指定して変更（--unset FIELD で削除）
 ano preset role review deep                              # レビュー担当のプリセット（--unset で解除）
-ano preset use default                                   # 既定を [agent] の設定に戻す
+ano preset role default quick                            # 既定のプリセット（`default` で [agent] の設定に戻す）
 ano preset list
 ```
 
 - プリセットは、下の層で選んだ接続先・モデル・推論の強さの上に、書いた項目だけを重ねます。接続先だけを書いたプリセットはその接続先の `model` に切り替わり、`reasoning_effort` だけを書いたプリセットはモデルを変えずに推論の強さだけを変えます。どれも書かないプリセットはエラーです。
-- `default` は予約された名前で、`[agent]`（`provider`・`model`・`reasoning_effort` と `preset`）と実行環境の指定から決まる既定の組を表します。`--preset default` や `/preset default` で、セッションに記録した組や対話中の切り替えから既定に戻せます。`[presets.default]` は定義できません。
-- ロール（`[agent.roles]`）を指定しないと、サブエージェントとレビュー担当はメインのエージェントと同じ接続先・モデル・推論の強さで動き、承認の判定は従来どおり `approval_model` で行います。指定すると、そのプリセットをメインのエージェントの**現在の**組の上に重ねたもので動きます。`/preset` などで切り替えると、ロールもそれに合わせて決め直します。ロールに `default` を指定すると、対話中の切り替えに関わらず既定の組を使います。
+- `default` は予約された名前で、`[agent]`（`provider`・`model`・`reasoning_effort` と、ロール `default` のプリセット）と実行環境の指定から決まる既定の組を表します。`--preset default` や `/preset default` で、セッションに記録した組や対話中の切り替えから既定に戻せます。`[presets.default]` は定義できません。
+- ロール `default` は、`--preset` などで選ばない実行でメインのエージェントが使うプリセットで、`[agent]` の設定の上に重なります。
+- それ以外のロールを指定しないと、サブエージェントとレビュー担当はメインのエージェントと同じ接続先・モデル・推論の強さで動き、承認の判定は従来どおり `approval_model` で行います。指定すると、そのプリセットをメインのエージェントの**現在の**組の上に重ねたもので動きます。`/preset` などで切り替えると、ロールもそれに合わせて決め直します。これらのロールにプリセット `default` を指定すると、対話中の切り替えに関わらず既定の組を使います。
 - 自分の差分を同じモデルに確認させると見落としも同じになりがちなので、`review` だけ別のモデルにする使い方が効果的です。レビュー担当やサブエージェントを別の接続先にすると、その接続先へ作業の内容（依頼・差分・ファイルの内容）が送られる点に注意してください。
-- `ano preset remove` は、`[agent].preset`・ロール・環境が参照しているプリセットを削除しません。`ano provider rename` はプリセットの `provider` も書き換えます。既定のプリセットが接続先を指定している間は、`ano provider use` は使えません（`ano preset use` で既定のプリセットを変えてください）。
+- `ano preset edit` は、接続先を有効な接続先から、モデルをその接続先が提供する有効なモデル（と登録したモデル）から選びます。接続先を「not set」にした場合は `[agent]` の接続先のモデルを並べます。どの一覧にも、そのプリセットの今の値を含めます（Enter だけで今の値のまま進めるように、無効にした接続先やモデルでも表示し、保存後に使えない旨を警告します）。一覧にないモデル名は入力でき、「not set」を選んだ項目は設定から外します。端末でない場合は `ano preset set` を使ってください。
+- `ano preset remove` は、ロール・環境が参照しているプリセットを削除しません。`ano provider rename` はプリセットの `provider` も書き換えます。既定のプリセットが接続先を指定している間は、`ano provider use` は使えません（`ano preset role default NAME` で既定のプリセットを変えてください）。
 
 ## 組み込み tool
 

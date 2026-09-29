@@ -224,11 +224,13 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ProviderAr
         }
         ProviderCommand::Use { name } => {
             config.provider_settings(&name)?;
-            if let Some((preset, provider)) = config.agent.preset.as_ref().and_then(|preset| {
-                let provider = config.presets.get(preset)?.provider.as_ref()?;
-                Some((preset, provider))
-            }) {
-                bail!("the default preset '{preset}' chooses provider '{provider}'; choose another default preset with `ano preset use NAME` (`default` for [agent]) first");
+            if let Some((preset, provider)) =
+                config.agent.roles.default.as_ref().and_then(|preset| {
+                    let provider = config.presets.get(preset)?.provider.as_ref()?;
+                    Some((preset, provider))
+                })
+            {
+                bail!("the default preset '{preset}' chooses provider '{provider}'; choose another with `ano preset role default NAME` (`default` for [agent]) first");
             }
             if !config.provider_enabled(&name) {
                 bail!("provider '{name}' is disabled; enable it with `ano provider enable {name}` first");
@@ -268,7 +270,7 @@ fn toggle(config: &AppConfig, config_path: &Path, name: &str, enabled: bool) -> 
         bail!("the '{API_PROVIDER}' provider is [api] and cannot be disabled; disable its models with `ano model disable` instead");
     }
     if !enabled && config.default_provider() == name {
-        match &config.agent.preset {
+        match &config.agent.roles.default {
             Some(preset)
                 if config
                     .presets
@@ -276,7 +278,7 @@ fn toggle(config: &AppConfig, config_path: &Path, name: &str, enabled: bool) -> 
                     .is_some_and(|preset| preset.provider.is_some()) =>
             {
                 bail!(
-                "provider '{name}' is the default through preset '{preset}'; choose another with `ano preset use NAME` first"
+                "provider '{name}' is the default through preset '{preset}'; choose another with `ano preset role default NAME` first"
             )
             }
             _ => bail!(

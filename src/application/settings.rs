@@ -69,20 +69,21 @@ pub struct AgentSettings {
     /// The provider runs use unless one is chosen, from `[providers]`.
     /// Without it, runs connect through `[api]`.
     pub provider: Option<String>,
-    /// A preset from `[presets]` applied over `provider`, `model`, and
-    /// `reasoning_effort` for runs that choose none.
-    pub preset: Option<String>,
-    /// Presets that sub-agents and the approval reviewer use.
+    /// Presets of the main agent, its sub-agents, and the approval reviewer.
     pub roles: ModelRoles,
 }
 
-/// The presets (`[presets]` names) that roles other than the main agent use.
-/// A role without one uses the main agent's current provider, model, and
-/// effort. A preset applies over them, so one that sets only
+/// The presets (`[presets]` names) of the roles. `default` is the main
+/// agent's preset for runs that choose none, applied over `provider`,
+/// `model`, and `reasoning_effort` of `[agent]`. A role besides it without a
+/// preset uses the main agent's current provider, model, and effort; with
+/// one, the preset applies over them, so one that sets only
 /// `reasoning_effort` keeps the model and changes the effort.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModelRoles {
+    /// The main agent, for runs that choose no preset.
+    pub default: Option<String>,
     /// Sub-agents started by `delegate_task`.
     pub delegate: Option<String>,
     /// The reviewer started by `review_changes`.
@@ -96,6 +97,7 @@ impl ModelRoles {
     /// Every role with its name in the config and its preset.
     pub fn iter(&self) -> impl Iterator<Item = (&'static str, Option<&str>)> {
         [
+            ("default", self.default.as_deref()),
             ("delegate", self.delegate.as_deref()),
             ("review", self.review.as_deref()),
             ("approval", self.approval.as_deref()),
@@ -133,7 +135,6 @@ impl Default for AgentSettings {
             approval_mode: ApprovalMode::Ask,
             approval_model: None,
             provider: None,
-            preset: None,
             roles: ModelRoles::default(),
         }
     }
