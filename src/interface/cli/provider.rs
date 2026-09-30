@@ -364,7 +364,8 @@ async fn report_models(config_path: &Path, name: &str) {
     }
 }
 
-fn endpoint(settings: &ApiSettings) -> String {
+/// Where the provider connects: its URL, or the ChatGPT subscription.
+pub(super) fn endpoint(settings: &ApiSettings) -> String {
     match settings.auth {
         ApiAuth::Chatgpt => "ChatGPT subscription".into(),
         ApiAuth::ApiKey => settings.effective_base_url(),

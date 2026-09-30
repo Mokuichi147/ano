@@ -9,9 +9,9 @@
 
 use super::{
     output::{self, ProgressHold},
-    prepare_agent,
-    provider::KnownModels,
-    AgentOptions, ApprovalFactory, PreparedAgent,
+    provider::{endpoint, KnownModels},
+    run::{prepare_agent, ApprovalFactory, PreparedAgent},
+    AgentOptions,
 };
 use crate::{
     application::{
@@ -546,12 +546,7 @@ fn format_providers(config: &AppConfig, selection: &ModelSelection) -> String {
             };
             let endpoint = config
                 .provider_settings(name)
-                .map(|api| match api.auth {
-                    crate::infrastructure::openai::ApiAuth::Chatgpt => {
-                        "ChatGPT subscription".to_string()
-                    }
-                    _ => api.effective_base_url(),
-                })
+                .map(|api| endpoint(&api))
                 .unwrap_or_default();
             let mut line = match config.provider_model(name) {
                 Some(model) => format!("{marker} {name}  {endpoint}  (model {model})"),
@@ -624,7 +619,7 @@ mod tests {
         config::{AppConfig, ModelRequest},
         domain::{approval::ApprovalMode, policy::UserPolicy, session::SessionBinding},
         infrastructure::{mcp::McpPool, memory_store::MemoryConversation, openai::OpenAiClient},
-        interface::cli::ApprovalFactory,
+        interface::cli::run::ApprovalFactory,
     };
     use serde_json::json;
     use std::sync::Arc;

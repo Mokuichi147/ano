@@ -23,7 +23,7 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-`config`（`src/config.rs`）は各層が持つ設定型を `config.toml` の1ファイルに束ねるだけのモジュールで、層の外側に置いています。
+`config`（`src/config/`）は各層が持つ設定型を `config.toml` の1ファイルに束ねるモジュールで、層の外側に置いています。束ねた設定から1回の実行の接続先・モデル・推論の強さを決める処理（`selection`）と、コメントや書式を保ったまま設定ファイルを書き換える処理（`edit`）もここに置きます。
 
 ## 依存のルール
 
@@ -53,7 +53,10 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 src/
 ├── lib.rs                  クレートのルート。よく使う型を再公開
 ├── main.rs                 バイナリ。interface::cli::run を呼ぶだけ
-├── config.rs               config.toml の読み込み（各層の設定を集約）
+├── config/
+│   ├── mod.rs              config.toml の読み込みと検証（各層の設定を集約）
+│   ├── selection.rs        プリセットと各層の指定から、接続先・モデル・推論の強さを決める
+│   └── edit.rs             ano provider / model / preset / mcp による設定ファイルの書き換え
 ├── domain/
 │   ├── approval.rs         承認モード（ask・auto・allow・deny）
 │   ├── plan.rs             作業計画と完了判定（RunOutcome）
@@ -91,7 +94,9 @@ src/
 │   ├── fs.rs               原子的なファイル置き換え
 │   └── tools/
 │       ├── mod.rs          組み込み tool の登録（echo・unix_time）
-│       ├── workspace.rs    list・read・search・find・edit・write とパスの検証
+│       ├── workspace.rs    list・read・search・find・edit・write
+│       ├── paths.rs        workspace 内に限ったパスの解決と、シンボリックリンクをたどらない書き込み
+│       ├── args.rs         tool 引数の読み取り
 │       ├── manage.rs       move・delete
 │       ├── walk.rs         上限付きのディレクトリ走査（.gitignore 対応）
 │       ├── glob.rs         パスのグロブ照合

@@ -1617,6 +1617,30 @@ fn the_repetition_notice_names_unloaded_tools_of_the_server() {
 }
 
 #[test]
+fn the_repetition_notice_names_unloaded_local_tools_like_the_repeated_one() {
+    let registry = ToolRegistry::new();
+    register_builtin_tools(&registry).unwrap();
+    let agent = agent(registry, Vec::new());
+    let context = ToolContext {
+        workspace: Some(std::env::temp_dir()),
+        ..ToolContext::default()
+    };
+    let active = selected_local_tools(&["workspace_search", "workspace_find"]);
+    let unloaded = agent.unloaded_local_siblings("workspace_search", &active, &context);
+    assert!(
+        unloaded.contains(&"workspace_read".to_string()),
+        "{unloaded:?}"
+    );
+    assert!(!unloaded.contains(&"workspace_find".to_string()));
+    assert!(unloaded.iter().all(|name| name.starts_with("workspace_")));
+    // A tool that cannot run here is not suggested.
+    assert!(!unloaded.contains(&"workspace_exec".to_string()));
+    let notice = super::repetition_notice("workspace_search", 3, None, &unloaded);
+    assert!(notice.contains("Local tools like it that are not loaded now: "));
+    assert!(notice.contains("load it with tool_search first"));
+}
+
+#[test]
 fn a_tool_search_or_another_tool_resets_the_repetition() {
     let round = |names: &[&str]| calls(names);
     let mut repetition = super::Repetition::default();
@@ -1632,6 +1656,47 @@ fn a_tool_search_or_another_tool_resets_the_repetition() {
     assert_eq!(repetition.observe(&round(&["a"])), None);
     assert_eq!(repetition.observe(&round(&["a"])), None);
     assert_eq!(repetition.observe(&round(&["a"])), Some(6));
+}
+
+#[test]
+fn reading_other_files_in_turn_is_not_a_repetition() {
+    let read = |path: &str| {
+        vec![
+            json!({"type": "function_call", "call_id": format!("read_{path}"),
+            "name": "workspace_read", "arguments": json!({"path": path}).to_string()}),
+        ]
+    };
+    let mut repetition = super::Repetition::default();
+    for path in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] {
+        assert_eq!(repetition.observe(&read(path)), None, "{path}");
+    }
+    // Reading the same thing again does not make progress.
+    assert_eq!(repetition.observe(&read("f.rs")), None);
+    assert_eq!(repetition.observe(&read("f.rs")), Some(3));
+    // Editing or running one thing after another is progress too.
+    let call = |name: &str, arguments: Value| {
+        vec![
+            json!({"type": "function_call", "call_id": "call", "name": name,
+            "arguments": arguments.to_string()}),
+        ]
+    };
+    let mut repetition = super::Repetition::default();
+    for path in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+        let edit = call("workspace_edit", json!({"path": path}));
+        assert_eq!(repetition.observe(&edit), None, "{path}");
+    }
+    let test = call("workspace_exec", json!({"command": "cargo test"}));
+    assert_eq!(repetition.observe(&test), None);
+    assert_eq!(repetition.observe(&test), None);
+    assert_eq!(repetition.observe(&test), Some(3));
+    // Searches with other queries still count.
+    let mut repetition = super::Repetition::default();
+    for query in ["a", "b"] {
+        let search = call("workspace_search", json!({"query": query}));
+        assert_eq!(repetition.observe(&search), None);
+    }
+    let search = call("workspace_search", json!({"query": "c"}));
+    assert_eq!(repetition.observe(&search), Some(3));
 }
 
 #[test]

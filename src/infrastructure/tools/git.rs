@@ -10,7 +10,7 @@
 //! repository's hooks: they are files the agent can write, and running them
 //! would turn `allow_writes` into command execution.
 
-use super::workspace::{inside_git_dir, relative_path, workspace_root};
+use super::paths::{inside_git_dir, relative_path, workspace_root};
 use crate::{
     application::registry::ToolRegistry,
     domain::{

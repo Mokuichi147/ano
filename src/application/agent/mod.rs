@@ -30,7 +30,10 @@ use crate::{
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
-        tool::{ToolContext, TOOL_SEARCH_NAME},
+        tool::{
+            ToolContext, TOOL_SEARCH_NAME, WORKSPACE_EDIT_NAME, WORKSPACE_EXEC_NAME,
+            WORKSPACE_READ_NAME, WORKSPACE_WRITE_NAME,
+        },
         usage::{ApiOperation, StopReason, UsageSummary},
     },
 };
@@ -39,7 +42,9 @@ use discovery::ActiveTools;
 use dispatch::RoundScope;
 use events::EventLog;
 use mcp_runtime::McpRuntime;
-use response::{extract_output_text, reasoning_summary_text, validate_response_status};
+use response::{
+    extract_output_text, output_items, reasoning_summary_text, validate_response_status,
+};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -494,6 +499,56 @@ impl Agent {
         }
     }
 
+    /// The instructions of a run: the agent's, with those of a sub-agent or
+    /// a reviewer appended.
+    fn role_instructions(&self, origin: &RunOrigin<'_>) -> String {
+        if origin.reviewer {
+            format!("{}\n\n{REVIEWER_INSTRUCTIONS}", self.settings.instructions)
+        } else if origin.depth > 0 {
+            format!("{}\n\n{SUBAGENT_INSTRUCTIONS}", self.settings.instructions)
+        } else {
+            self.settings.instructions.clone()
+        }
+    }
+
+    /// The body of one Responses request. The final round of a run offers
+    /// no tools.
+    fn response_payload(
+        &self,
+        target: Target<'_>,
+        instructions: &str,
+        input: Value,
+        tools: &[Value],
+        final_round: bool,
+        continuation: Continuation<'_>,
+    ) -> Value {
+        let mut payload = json!({
+            "model": target.model,
+            "instructions": instructions,
+            "input": input,
+            "tools": tools,
+            "tool_choice": if final_round { "none" } else { "auto" },
+            "parallel_tool_calls": self.settings.parallel_tool_calls,
+        });
+        if let Some(max_output_tokens) = self.settings.max_output_tokens {
+            payload["max_output_tokens"] = json!(max_output_tokens);
+        }
+        if let Some(reasoning) = self.settings.reasoning_with(target.reasoning_effort) {
+            payload["reasoning"] = reasoning;
+        }
+        match continuation {
+            Continuation::FullHistory => {
+                payload["store"] = json!(false);
+                payload["include"] = json!(["reasoning.encrypted_content"]);
+            }
+            Continuation::Previous(Some(previous_response_id)) => {
+                payload["previous_response_id"] = json!(previous_response_id);
+            }
+            Continuation::Previous(None) => {}
+        }
+        payload
+    }
+
     async fn run_loop(
         &self,
         request: RunRequest,
@@ -520,13 +575,7 @@ impl Agent {
                 .collect::<Vec<_>>()
                 .join("\n")
         });
-        let mut base_instructions = if origin.reviewer {
-            format!("{}\n\n{REVIEWER_INSTRUCTIONS}", self.settings.instructions)
-        } else if origin.depth > 0 {
-            format!("{}\n\n{SUBAGENT_INSTRUCTIONS}", self.settings.instructions)
-        } else {
-            self.settings.instructions.clone()
-        };
+        let mut base_instructions = self.role_instructions(&origin);
         let token_limit = origin.token_limit;
         // Usage of sub-agents started during the current round.
         let delegated_usage = Mutex::new(UsageSummary::default());
@@ -650,7 +699,7 @@ impl Agent {
             let final_round = round + 1 == self.settings.max_tool_rounds;
             let instructions = if final_round {
                 format!(
-                    "{base_instructions}\n\nThis is the final response within the execution budget. No tools are available. Summarize what has actually been completed, clearly state anything unfinished, and do not claim unperformed work succeeded."
+                    "{base_instructions}\n\nThis is the final response: the run has used its request budget (max_tool_rounds), so no tools are offered with this request, and a tool call written in your message would not run. Do not write tool calls. Summarize what has actually been completed, clearly state anything unfinished and the next steps, and do not claim unperformed work succeeded. Say that the run stopped at its request limit, not that tools failed or became unavailable."
                 )
             } else {
                 base_instructions.clone()
@@ -665,26 +714,26 @@ impl Agent {
                     request.context.allow_writes,
                 )?
             };
-            let mut payload = json!({
-                "model": target.model,
-                "instructions": instructions,
-                "input": match &session { Some(session) if replay => Value::Array(session.data().history.clone()), _ => local_history.as_ref().map(|history| Value::Array(history.clone())).unwrap_or_else(|| next_input.clone()) },
-                "tools": tools,
-                "tool_choice": if final_round { "none" } else { "auto" },
-                "parallel_tool_calls": self.settings.parallel_tool_calls,
-            });
-            if let Some(max_output_tokens) = self.settings.max_output_tokens {
-                payload["max_output_tokens"] = json!(max_output_tokens);
-            }
-            if let Some(reasoning) = self.settings.reasoning_with(target.reasoning_effort) {
-                payload["reasoning"] = reasoning;
-            }
-            if replay || local_history.is_some() {
-                payload["store"] = json!(false);
-                payload["include"] = json!(["reasoning.encrypted_content"]);
-            } else if let Some(previous_response_id) = &previous_response_id {
-                payload["previous_response_id"] = json!(previous_response_id);
-            }
+            let input = match &session {
+                Some(session) if replay => Value::Array(session.data().history.clone()),
+                _ => local_history
+                    .as_ref()
+                    .map(|history| Value::Array(history.clone()))
+                    .unwrap_or_else(|| next_input.clone()),
+            };
+            let continuation = if replay || local_history.is_some() {
+                Continuation::FullHistory
+            } else {
+                Continuation::Previous(previous_response_id.as_deref())
+            };
+            let payload = self.response_payload(
+                target,
+                &instructions,
+                input,
+                &tools,
+                final_round,
+                continuation,
+            );
 
             let response = match text_listener {
                 Some(listener) => {
@@ -716,23 +765,8 @@ impl Agent {
                 .to_string();
             previous_response_id = Some(response_id.clone());
 
-            let mut items = response["output"].as_array().cloned().unwrap_or_default();
-            if !items.iter().any(|item| item["type"] == "message") {
-                if let Some(text) = response["output_text"]
-                    .as_str()
-                    .filter(|text| !text.trim().is_empty())
-                {
-                    items.push(json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":text}]}));
-                }
-            }
-            if final_round
-                && items.iter().any(|item| {
-                    matches!(
-                        item["type"].as_str(),
-                        Some("function_call" | "mcp_approval_request")
-                    )
-                })
-            {
+            let items = output_items(&response);
+            if final_round && items.iter().any(requests_tool) {
                 bail!("Responses API requested a tool during the final response; no additional tool calls were executed");
             }
             let has_mcp_call = items
@@ -744,19 +778,7 @@ impl Agent {
                 .collect::<Vec<_>>();
             let only_commentary =
                 !messages.is_empty() && messages.iter().all(|item| item["phase"] == "commentary");
-            for text in items.iter().filter_map(reasoning_summary_text) {
-                events.push(AgentEvent::ReasoningSummary { round, text });
-            }
-            for message in messages.iter().filter(|item| item["phase"] == "commentary") {
-                let text = extract_output_text(&json!({"output":[message]}));
-                if !text.trim().is_empty() {
-                    events.push(AgentEvent::AssistantProgress {
-                        round,
-                        text,
-                        streamed,
-                    });
-                }
-            }
+            report_progress(&items, round, streamed, &events);
             if let Some(session) = session.as_deref_mut() {
                 session.record_response(&response_id, &items)?;
             }
@@ -810,7 +832,10 @@ impl Agent {
             }
             if let Some(count) = repetition.observe(&items) {
                 let name = repetition.name.as_str();
-                let (server, unloaded) = mcp_runtime.unloaded_siblings(name, &active);
+                let (server, mut unloaded) = mcp_runtime.unloaded_siblings(name, &active);
+                if server.is_none() {
+                    unloaded = self.unloaded_local_siblings(name, &active, &request.context);
+                }
                 let notice = json!([{"role":"user","content":[{"type":"input_text","text":repetition_notice(name, count, server, &unloaded)}]}]);
                 if let Some(session) = session.as_deref_mut() {
                     session.record_runtime_input(&notice)?;
@@ -919,6 +944,47 @@ impl Agent {
     }
 }
 
+/// How a request continues the conversation.
+#[derive(Clone, Copy)]
+enum Continuation<'a> {
+    /// The input is the whole history, which ano keeps: nothing is stored
+    /// by the endpoint, and the encrypted reasoning comes back for the next
+    /// request.
+    FullHistory,
+    /// The input is only what is new since the response with this id, which
+    /// the endpoint stored (`None` on the first request).
+    Previous(Option<&'a str>),
+}
+
+/// Whether an output item asks ano to run a tool or answer an approval.
+fn requests_tool(item: &Value) -> bool {
+    matches!(
+        item["type"].as_str(),
+        Some("function_call" | "mcp_approval_request")
+    )
+}
+
+/// Report the reasoning summaries and the commentary (progress messages) of
+/// one response as events.
+fn report_progress(items: &[Value], round: usize, streamed: bool, events: &EventLog<'_>) {
+    for text in items.iter().filter_map(reasoning_summary_text) {
+        events.push(AgentEvent::ReasoningSummary { round, text });
+    }
+    let commentary = items
+        .iter()
+        .filter(|item| item["type"] == "message" && item["phase"] == "commentary");
+    for message in commentary {
+        let text = extract_output_text(&json!({"output":[message]}));
+        if !text.trim().is_empty() {
+            events.push(AgentEvent::AssistantProgress {
+                round,
+                text,
+                streamed,
+            });
+        }
+    }
+}
+
 /// 原文履歴に渡す、変換前の入力と内部で追加した指示。モデルへの入力は変えない。
 async fn source_input(
     request: &RunRequest,
@@ -992,6 +1058,15 @@ fn continuation_notice(plan: &TaskPlan) -> String {
 /// change approach, and again after every further run of this length.
 const REPETITION_NOTICE_ROUNDS: usize = 3;
 
+/// Tools that act on what their arguments name: reading, changing, or
+/// running one thing after another is progress, not a loop.
+const TARGETED_TOOLS: &[&str] = &[
+    WORKSPACE_READ_NAME,
+    WORKSPACE_EDIT_NAME,
+    WORKSPACE_WRITE_NAME,
+    WORKSPACE_EXEC_NAME,
+];
+
 /// Consecutive rounds whose tool calls all went to one tool. A model can
 /// keep calling the one loaded tool while its own text says it will use
 /// another capability, e.g. a search tool while planning to crawl a page.
@@ -999,6 +1074,8 @@ const REPETITION_NOTICE_ROUNDS: usize = 3;
 struct Repetition {
     name: String,
     count: usize,
+    /// The arguments of the last round's calls of a `TARGETED_TOOLS` tool.
+    arguments: Vec<String>,
 }
 
 impl Repetition {
@@ -1006,7 +1083,10 @@ impl Repetition {
     /// when the model should be told to change approach. `task_plan` calls
     /// beside other tools are ignored, but a response that only calls
     /// `task_plan` counts: a model can keep resending its plan instead of
-    /// doing the work. A `tool_search` ends the streak.
+    /// doing the work. A `tool_search` ends the streak. Reading, editing,
+    /// or running one thing after another is progress, so a round of a
+    /// `TARGETED_TOOLS` tool continues the streak only when it repeats the
+    /// calls of the round before exactly.
     fn observe(&mut self, items: &[Value]) -> Option<usize> {
         let mut names = items
             .iter()
@@ -1020,8 +1100,19 @@ impl Repetition {
             .first()
             .copied()
             .filter(|name| names.len() == 1 && *name != TOOL_SEARCH_NAME);
+        let targeted = single.filter(|name| TARGETED_TOOLS.contains(name));
+        let mut arguments = items
+            .iter()
+            .filter(|item| {
+                item["type"] == "function_call" && targeted.is_some_and(|name| item["name"] == name)
+            })
+            .map(|item| item["arguments"].to_string())
+            .collect::<Vec<_>>();
+        arguments.sort();
+        let rereads = targeted.is_none() || arguments == self.arguments;
+        self.arguments = arguments;
         match single {
-            Some(name) if name == self.name => self.count += 1,
+            Some(name) if name == self.name && rereads => self.count += 1,
             Some(name) => {
                 self.name = name.to_string();
                 self.count = 1;
@@ -1037,8 +1128,9 @@ impl Repetition {
     }
 }
 
-/// Ask the model to stop repeating one tool. `unloaded` are tools on the
-/// same MCP server that the last `tool_search` did not load.
+/// Ask the model to stop repeating one tool. `unloaded` are tools like it
+/// that the last `tool_search` did not load: on the same MCP server
+/// `server`, or local tools with the same prefix when `server` is `None`.
 fn repetition_notice(
     name: &str,
     count: usize,
@@ -1053,11 +1145,16 @@ fn repetition_notice(
     let mut text = format!(
         "Runtime notice: you have called {name} in {count} consecutive steps. Calling the same tool again with small variations is not making progress. Only the tools sent with this request can be called; saying that you will use another capability (such as crawling or extracting a page) does not make it available. "
     );
-    if let (Some(server), false) = (server, unloaded.is_empty()) {
-        text.push_str(&format!(
+    match (server, unloaded.is_empty()) {
+        (_, true) => {}
+        (Some(server), false) => text.push_str(&format!(
             "Tools on server '{server}' that are not loaded now: {}. ",
             unloaded.join(", ")
-        ));
+        )),
+        (None, false) => text.push_str(&format!(
+            "Local tools like it that are not loaded now: {}; to use one, load it with {TOOL_SEARCH_NAME} first (search for its name). ",
+            unloaded.join(", ")
+        )),
     }
     text.push_str("Change approach: call tool_search to load a tool that fits, work from the results you already have, or, if no available tool can get the answer, tell the user what you found and what is still missing.");
     text

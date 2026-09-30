@@ -18,6 +18,21 @@ pub(super) fn parse_arguments(value: &Value) -> Result<Value> {
     Ok(arguments)
 }
 
+/// The output items of a response. An endpoint that returns only
+/// `output_text` gets a message item for it, so the text is kept in history.
+pub(super) fn output_items(response: &Value) -> Vec<Value> {
+    let mut items = response["output"].as_array().cloned().unwrap_or_default();
+    if !items.iter().any(|item| item["type"] == "message") {
+        if let Some(text) = response["output_text"]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+        {
+            items.push(json!({"type":"message", "role":"assistant", "content":[{"type":"output_text", "text":text}]}));
+        }
+    }
+    items
+}
+
 /// Serialize a tool output for the model. An output longer than `limit`
 /// bytes is replaced by its head and tail, so one large result (typically
 /// from an MCP server) cannot flood the context of every later request.

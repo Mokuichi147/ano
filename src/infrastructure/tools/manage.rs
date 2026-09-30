@@ -3,10 +3,9 @@
 //! link, and refuse the workspace root and anything inside `.git`.
 
 use super::{
+    args::optional_bool,
     non_strict_definition,
-    workspace::{
-        inside_git_dir, optional_bool, relative_path, workspace_root, writable_workspace_path,
-    },
+    paths::{inside_git_dir, relative_path, workspace_root, writable_workspace_path},
 };
 use crate::{application::registry::ToolRegistry, domain::tool::ToolContext};
 use anyhow::{bail, Context, Result};

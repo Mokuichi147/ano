@@ -5,7 +5,10 @@ use crate::{
         agent::{AgentEvent, AgentResult},
         ports::ResponseDelta,
     },
-    domain::plan::{CriterionStatus, RunOutcome, StepStatus, TaskGoal, TaskPlan},
+    domain::{
+        plan::{CriterionStatus, RunOutcome, StepStatus, TaskGoal, TaskPlan},
+        usage::StopReason,
+    },
 };
 use anyhow::Result;
 use std::{
@@ -154,13 +157,17 @@ pub(super) fn format_result(
             format.apply(&result.text)
         };
         // A goal is always reported, so that its verification can be seen.
-        if result.outcome == RunOutcome::Completed && result.plan.goal.is_none() {
-            Ok(text)
+        let mut text = if result.outcome == RunOutcome::Completed && result.plan.goal.is_none() {
+            text
         } else {
-            Ok(format!("{text}\n\n{}", format_plan(&result.plan))
+            format!("{text}\n\n{}", format_plan(&result.plan))
                 .trim_start()
-                .to_string())
+                .to_string()
+        };
+        if result.stop_reason == StopReason::RoundLimit {
+            text.push_str("\n\n(Stopped at the request limit, agent.max_tool_rounds. Continue the work in the same --session, or allow more with --max-tool-rounds.)");
         }
+        Ok(text)
     }
 }
 
@@ -786,6 +793,14 @@ mod tests {
             format_result(&result, false, TextFormat::Raw).unwrap(),
             result.text
         );
+        // A run stopped by the request limit says how to go on.
+        let limited = AgentResult {
+            stop_reason: StopReason::RoundLimit,
+            ..result
+        };
+        let text = format_result(&limited, false, TextFormat::Raw).unwrap();
+        assert!(text.contains("Stopped at the request limit"), "{text}");
+        assert!(text.contains("--max-tool-rounds"), "{text}");
     }
 
     #[test]

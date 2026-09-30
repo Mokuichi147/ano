@@ -2,7 +2,10 @@
 //! that do not list theirs, and enable or disable them in the config file,
 //! like the tools of MCP servers.
 
-use super::provider::{known_models, provider_heading, KnownModels};
+use super::{
+    prompt::{answered, require_terminal},
+    provider::{known_models, provider_heading, KnownModels},
+};
 use crate::{
     config::{update_provider, AppConfig, SettingValue},
     domain::provider::ModelFilter,
@@ -10,8 +13,8 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
-use inquire::{list_option::ListOption, InquireError, MultiSelect};
-use std::{io::IsTerminal, path::Path};
+use inquire::{list_option::ListOption, MultiSelect};
+use std::path::Path;
 
 #[derive(Debug, Args)]
 pub(super) struct ModelArgs {
@@ -108,9 +111,7 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: ModelArgs)
         ModelCommand::Edit { provider } => {
             let name = provider.as_deref().unwrap_or(config.default_provider());
             let settings = config.provider_settings(name)?;
-            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-                bail!("`ano model edit` needs a terminal; use `ano model enable` or `ano model disable` instead");
-            }
+            require_terminal("ano model edit", &["ano model enable", "ano model disable"])?;
             let models = known_models(&settings).await?.names;
             if models.is_empty() {
                 println!("Provider '{name}' has no models to choose from; register them with `ano model add MODEL --provider {name}`.");
@@ -361,9 +362,5 @@ fn choose_models<'a>(
             "↑↓ move, space toggle, → all, ← none, type to filter, enter save, esc cancel",
         )
         .prompt();
-    match answer {
-        Ok(selected) => Ok(Some(selected)),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    answered(answer)
 }

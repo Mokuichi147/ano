@@ -106,6 +106,7 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `--disable-tool NAME` | この実行だけ tool を無効化（複数指定可） |
 | `--session PATH` / `--recover-session` | 会話を保存・再開（[セッション](docs/agent-runtime.md#会話セッション)） |
 | `--compact-threshold-bytes N` / `--max-total-tokens N` | 履歴の圧縮とトークン上限（[圧縮と上限](docs/agent-runtime.md#履歴の圧縮)） |
+| `--max-tool-rounds N` | この実行で送る Responses 要求の回数の上限（`agent.max_tool_rounds` を上書き。最後の1回は tool を使わない報告に充てる）。多くのファイルを読み書きする作業や、1回に少しずつしか tool を呼ばないモデルでは増やす |
 | `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査し、迷うものだけ確認）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
 | `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |

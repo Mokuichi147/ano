@@ -1,6 +1,7 @@
 //! `ano mcp`: OAuth login and logout for directly connected MCP servers, and
 //! listing and enabling the tools of configured MCP servers.
 
+use super::prompt::{answered, require_terminal};
 use crate::{
     application::ports::McpGateway,
     config::{save_mcp_tool_filters, AppConfig},
@@ -15,7 +16,7 @@ use crate::{
 };
 use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
-use inquire::{list_option::ListOption, InquireError, MultiSelect};
+use inquire::{list_option::ListOption, MultiSelect};
 use std::{
     fmt,
     io::IsTerminal,
@@ -136,9 +137,7 @@ pub(super) async fn run(
         }
         McpCommand::Edit { label } => {
             let mut server = find_server(config, &label)?.clone();
-            if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-                bail!("`ano mcp edit` needs a terminal; use `ano mcp enable` or `ano mcp disable` instead");
-            }
+            require_terminal("ano mcp edit", &["ano mcp enable", "ano mcp disable"])?;
             let tools = list_server_tools(&server, &store).await?;
             if tools.is_empty() {
                 println!("MCP server '{label}' offers no tools.");
@@ -354,16 +353,12 @@ fn choose_tools<'a>(
             "↑↓ move, space toggle, → all, ← none, type to filter, enter save, esc cancel",
         )
         .prompt();
-    match answer {
-        Ok(selected) => Ok(Some(
-            selected
-                .into_iter()
-                .map(|choice| choice.tool.name.as_str())
-                .collect(),
-        )),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    Ok(answered(answer)?.map(|selected| {
+        selected
+            .into_iter()
+            .map(|choice| choice.tool.name.as_str())
+            .collect()
+    }))
 }
 
 /// One checklist row: the tool name and the start of its description.

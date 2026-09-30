@@ -14,6 +14,13 @@ pub const DELEGATE_TASK_NAME: &str = "delegate_task";
 
 /// Built-in tool that runs shell commands when `ToolContext::allow_exec` is set.
 pub const WORKSPACE_EXEC_NAME: &str = "workspace_exec";
+
+/// Built-in tool that reads a workspace file by offset or by lines.
+pub const WORKSPACE_READ_NAME: &str = "workspace_read";
+
+/// Built-in tools that change one workspace file.
+pub const WORKSPACE_EDIT_NAME: &str = "workspace_edit";
+pub const WORKSPACE_WRITE_NAME: &str = "workspace_write";
 /// Built-in tool that reads web pages when `ToolContext::allow_web` is set.
 pub const WEB_FETCH_NAME: &str = "web_fetch";
 /// Built-in tool that commits workspace files and pushes them; it changes

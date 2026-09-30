@@ -253,6 +253,32 @@ impl Agent {
         Some(text)
     }
 
+    /// Local tools named like `name` (the same prefix before `_`, such as
+    /// `workspace_`) that can run in `context` but are not loaded.
+    pub(super) fn unloaded_local_siblings(
+        &self,
+        name: &str,
+        active: &ActiveTools,
+        context: &ToolContext,
+    ) -> Vec<String> {
+        let Some((prefix, _)) = name.split_once('_') else {
+            return Vec::new();
+        };
+        let prefix = format!("{prefix}_");
+        self.registry
+            .definitions(&self.policy)
+            .into_iter()
+            .filter(|definition| {
+                definition.name != name
+                    && definition.name.starts_with(&prefix)
+                    && !definition.always_offered
+                    && context.can_run(&definition.name)
+                    && !active.local.contains(&definition.name)
+            })
+            .map(|definition| definition.name)
+            .collect()
+    }
+
     /// Tools that cannot run in `context` (see `ToolContext::can_run`) are
     /// left out of the results.
     pub(super) fn search_tools(

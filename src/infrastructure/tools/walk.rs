@@ -1,6 +1,6 @@
 //! Bounded, depth-first traversal of the workspace shared by search tools.
 
-use super::workspace::existing_workspace_path;
+use super::paths::existing_workspace_path;
 use crate::domain::tool::ToolContext;
 use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},

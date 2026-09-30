@@ -7,7 +7,7 @@
 //! page cannot reach the local network or cloud metadata endpoints, also not
 //! through a redirect or a changed DNS answer.
 
-use super::workspace::{optional_bool, optional_integer};
+use super::args::{optional_bool, optional_integer};
 use crate::{
     application::registry::ToolRegistry,
     domain::tool::{ToolContext, ToolDefinition, WEB_FETCH_NAME},

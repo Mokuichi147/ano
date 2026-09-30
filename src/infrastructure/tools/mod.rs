@@ -2,11 +2,13 @@
 //! management, configured validation checks, shell commands, git commits and
 //! pushes, and web pages.
 
+mod args;
 mod checks;
 mod exec;
 mod git;
 mod glob;
 mod manage;
+mod paths;
 mod process;
 mod walk;
 mod web;

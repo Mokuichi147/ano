@@ -2,7 +2,10 @@
 //! a model, and a reasoning effort) in the config file, and assign them to
 //! the main agent, sub-agents, and the approval reviewer.
 
-use super::provider::known_models;
+use super::{
+    prompt::{answered, require_terminal},
+    provider::known_models,
+};
 use crate::{
     application::settings::REASONING_EFFORTS,
     config::{
@@ -12,8 +15,8 @@ use crate::{
 };
 use anyhow::{bail, Result};
 use clap::{Args, Subcommand, ValueEnum};
-use inquire::{InquireError, Select, Text};
-use std::{io::IsTerminal, path::Path};
+use inquire::{Select, Text};
+use std::path::Path;
 
 #[derive(Debug, Args)]
 pub(super) struct PresetArgs {
@@ -232,15 +235,6 @@ pub(super) async fn run(config: &AppConfig, config_path: &Path, args: PresetArgs
     }
 }
 
-/// `Ok(None)` when the user cancels a prompt.
-fn answered<T>(answer: Result<T, InquireError>) -> Result<Option<T>> {
-    match answer {
-        Ok(value) => Ok(Some(value)),
-        Err(InquireError::OperationCanceled | InquireError::OperationInterrupted) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
 /// Ask for one of `values`, with `unset` (the label of leaving the field out)
 /// first and the cursor on `current`. `None` when the user cancels;
 /// `Some(None)` for `unset`.
@@ -266,9 +260,7 @@ fn choose(
 /// `ano preset edit`: choose the provider, the model among those the
 /// provider offers, the effort, and the description, then save what changed.
 async fn edit(config: &AppConfig, config_path: &Path, name: Option<String>) -> Result<()> {
-    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
-        bail!("`ano preset edit` needs a terminal; use `ano preset set` instead");
-    }
+    require_terminal("ano preset edit", &["ano preset set"])?;
     let cancelled = || {
         println!("Cancelled; the config file was not changed.");
         Ok(())
