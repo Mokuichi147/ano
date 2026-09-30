@@ -9,7 +9,7 @@ use crate::{
         plan::TASK_PLAN_NAME,
         tool::{
             DELEGATE_TASK_NAME, GIT_COMMIT_PUSH_NAME, REVIEW_CHANGES_NAME, WEB_FETCH_NAME,
-            WORKSPACE_EXEC_NAME,
+            WORKSPACE_CHECK_NAME, WORKSPACE_EXEC_NAME,
         },
     },
 };
@@ -61,6 +61,15 @@ pub(super) fn list_tools(
                 Some(environment) if environment.allow_web => "enabled by allow_web",
                 Some(_) => "unavailable: allow_web is not set",
                 None => "needs --allow-web",
+            });
+        }
+        if definition.name == WORKSPACE_CHECK_NAME {
+            notes.push(match environment {
+                Some(environment) if !environment.checks.is_empty() => {
+                    "runs the environment's checks"
+                }
+                Some(_) => "unavailable: the environment has no checks",
+                None => "needs an environment with checks",
             });
         }
         if definition.name == GIT_COMMIT_PUSH_NAME {

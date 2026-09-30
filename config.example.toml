@@ -16,6 +16,9 @@ max_retries = 2
 # Stream answers so they appear on the terminal while they are generated.
 # Endpoints that ignore the request and return JSON still work.
 stream = true
+# Tokens the models take in one request; the history is compacted before it
+# grows near this. LM Studio reports it by itself; providers take it too.
+# context_window = 400000
 
 # For a local or self-hosted server (LM Studio, Ollama, vLLM, llama.cpp),
 # point base_url at it, e.g. "http://127.0.0.1:1234/v1" (LM Studio) or
@@ -83,7 +86,8 @@ model = "gpt-6-astra"
 # and of a default provider without its own model.
 # provider = "lan"
 # Total Responses requests; the final request is reserved for a tool-free report.
-max_tool_rounds = 24
+# A guard against runaway runs, not a budget: use max_total_tokens for cost.
+max_tool_rounds = 100
 tool_discovery_limit = 12
 parallel_tool_calls = true
 # Tool calls from one response that may run at the same time.
@@ -93,8 +97,10 @@ max_parallel_tool_calls = 8
 tool_timeout_secs = 120
 # Tool outputs longer than this (JSON bytes) are cut to their head and tail.
 max_tool_output_bytes = 131072
-# Opt-in history compaction. Threshold is serialized history bytes, not tokens.
-# Sessions archive the old history.
+# The history is compacted when a request nears the model's context window
+# (context_window of [api] or the provider; LM Studio reports it), or when a
+# request is refused as too long. Optionally, also at this many bytes of
+# serialized history. Sessions archive the old history.
 # compact_threshold_bytes = 262144
 # "remote" uses /responses/compact (OpenAI); "summary" asks the model for a
 # summary and works with any endpoint; "auto" picks by base_url.

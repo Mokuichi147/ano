@@ -106,7 +106,7 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `--disable-tool NAME` | この実行だけ tool を無効化（複数指定可） |
 | `--session PATH` / `--recover-session` | 会話を保存・再開（[セッション](docs/agent-runtime.md#会話セッション)） |
 | `--compact-threshold-bytes N` / `--max-total-tokens N` | 履歴の圧縮とトークン上限（[圧縮と上限](docs/agent-runtime.md#履歴の圧縮)） |
-| `--max-tool-rounds N` | この実行で送る Responses 要求の回数の上限（`agent.max_tool_rounds` を上書き。最後の1回は tool を使わない報告に充てる）。多くのファイルを読み書きする作業や、1回に少しずつしか tool を呼ばないモデルでは増やす |
+| `--max-tool-rounds N` | この実行で送る Responses 要求の回数の上限（`agent.max_tool_rounds` を上書き。既定は 100。最後の1回は tool を使わない報告に充てる）。暴走を止める歯止めで、費用の予算には `--max-total-tokens` を使う |
 | `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査し、迷うものだけ確認）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
 | `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |
@@ -184,7 +184,7 @@ timeout_secs = 900
 | `outcome` | 作業計画から見た完了状態（`completed` / `blocked` / `incomplete`） |
 | `plan` | 作業計画（ゴールがあれば `plan.goal` に完了条件ごとの状態と根拠） |
 | `usage` | この実行のトークン使用量 |
-| `stop_reason` | 停止理由（`final_answer` / `round_limit` / `token_limit` / `usage_unavailable`） |
+| `stop_reason` | 停止理由（`final_answer` / `round_limit` / `token_limit` / `usage_unavailable` / `no_progress`） |
 
 ```sh
 ano run --environment default --json --quiet "実装の概要を説明して" | jq .outcome
@@ -249,7 +249,7 @@ model = "ロードしたモデル名"
 - `config.toml` はカレントディレクトリから読みます。別のディレクトリで実行する場合は `--config` で指定するか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
 - LM Studio で Remote MCP を使う場合は、Server Settings で MCP 利用を有効にします。
 - 回答はストリーミングで表示します（`stream: true` に対応していない server でも動きます）。
-- 長い会話の圧縮は、`/responses/compact` の代わりにモデル自身が書く要約で行います（`[agent] compaction = "auto"` の既定動作）。コンテキストの小さいモデルでは `compact_threshold_bytes` を設定してください（[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
+- 長い会話の圧縮は、`/responses/compact` の代わりにモデル自身が書く要約で行います（`[agent] compaction = "auto"` の既定動作）。LM Studio が返す読み込み中のコンテキスト長に近づいたところで圧縮します。ほかのサーバーでは `context_window` を指定してください（[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
 
 ロードしたモデル名は `agent.model` または `--model` で指定します。tool calling の品質はモデルの tool use 対応に依存します（native tool use 対応モデルを推奨）。URL 形式の MCP は `url` で登録できますが、Secure MCP Tunnel（`tunnel_id`）は OpenAI Responses API の機能で、LM Studio では使えません。
 
@@ -283,7 +283,7 @@ ano chat --environment review                    # 環境の provider（codex）
 ```
 
 - `[api]` を使っていない場合（既定の接続先でもなく、environment やフォールバック先からも参照されていない場合）、一覧には `api` を表示しません。`[api]` の接続設定を名前付きの接続先に移すには `ano provider rename api NAME` を使います（下記）。
-- 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`timeout_secs`・`max_retries`・`stream`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url` と `api_key_env` は引き継がず、省略時は OpenAI の既定値になります。
+- 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`timeout_secs`・`max_retries`・`stream`・`context_window`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url`・`api_key_env`・`context_window` は引き継がず、`base_url` と `api_key_env` の省略時は OpenAI の既定値になります。`context_window` はモデルが1回の要求で受け取れるトークン数で、履歴をその手前で圧縮します（LM Studio は自動で取得。[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
 - モデルは「環境の指定 → `--preset`/`--provider`/`--model` → 対話中の `/preset`/`/provider`/`/model`」の順に上書きします（[プリセット](#プリセットとロール)）。接続先だけを選んだ場合は、その接続先の `model` に切り替わります。接続先に `model` がなければ、それまでのモデルをそのまま使います。
 - `[agent].model` は `[api]` のモデルで、`model` のない既定の接続先でも使います。`[agent].approval_model` は `[api]` 用です。ほかの接続先では、その接続先の `approval_model`（省略時は使用中のモデル）で審査します。
 - `ano chat` では `/provider lan` や `/model qwen3:30b` で、会話を保ったまま切り替えられます。接続先を変えると、それまでの会話が新しい接続先へ送られます。元の接続先でしか読めない暗号化された推論は履歴から除きます。OpenAI の `/responses/compact` で圧縮済みの会話は、ほかの接続先では読めないため移せません（`/clear` か新しいセッションで始めてください）。

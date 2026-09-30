@@ -16,6 +16,9 @@ pub enum StopReason {
     RoundLimit,
     TokenLimit,
     UsageUnavailable,
+    /// The same calls kept repeating after the runtime asked for another
+    /// approach, so the run stopped with a report.
+    NoProgress,
 }
 
 /// Observed usage, not a bill estimate. Missing provider usage is counted

@@ -75,6 +75,7 @@ impl ExecutionProfile {
                 client,
                 model: self.settings.reviewer_model().to_string(),
                 reasoning_effort: None,
+                context_window: None,
             },
             ask_user,
         )

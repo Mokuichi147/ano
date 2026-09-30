@@ -106,6 +106,7 @@ impl RunModels {
             client: connections.get(config, &selection.choice.provider)?,
             model: selection.choice.model.clone(),
             reasoning_effort: selection.choice.reasoning_effort.clone(),
+            context_window: selection.api.context_window,
         };
         let mut role = |role: &str, preset: Option<&String>| -> Result<Option<ModelTarget>> {
             let Some(preset) = preset else {
@@ -123,6 +124,7 @@ impl RunModels {
                 })?,
                 model: chosen.choice.model,
                 reasoning_effort: chosen.choice.reasoning_effort,
+                context_window: chosen.api.context_window,
             }))
         };
         let roles = &config.agent.roles;
@@ -141,6 +143,7 @@ impl RunModels {
                     .clone()
                     .unwrap_or_else(|| selection.choice.model.clone()),
                 reasoning_effort: None,
+                context_window: None,
             },
         };
         Ok(Self {

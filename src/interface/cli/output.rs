@@ -164,8 +164,10 @@ pub(super) fn format_result(
                 .trim_start()
                 .to_string()
         };
-        if result.stop_reason == StopReason::RoundLimit {
-            text.push_str("\n\n(Stopped at the request limit, agent.max_tool_rounds. Continue the work in the same --session, or allow more with --max-tool-rounds.)");
+        match result.stop_reason {
+            StopReason::RoundLimit => text.push_str("\n\n(Stopped at the request limit, agent.max_tool_rounds. Continue the work in the same --session, or allow more with --max-tool-rounds.)"),
+            StopReason::NoProgress => text.push_str("\n\n(Stopped because the same tool calls kept repeating. Continue in the same --session with more specific directions.)"),
+            _ => {}
         }
         Ok(text)
     }

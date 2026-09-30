@@ -137,6 +137,9 @@ impl AppConfig {
         if self.api.timeout_secs == 0 {
             bail!("api.timeout_secs must be greater than zero");
         }
+        if self.api.context_window == Some(0) {
+            bail!("api.context_window must be greater than zero");
+        }
         for (name, provider) in &self.providers {
             validate_provider(name, provider)
                 .with_context(|| format!("invalid providers.{name}"))?;
@@ -338,6 +341,9 @@ fn validate_provider(name: &str, provider: &ProviderSettings) -> Result<()> {
     validate_name(name).context("invalid provider name")?;
     if provider.timeout_secs == Some(0) {
         bail!("timeout_secs must be greater than zero");
+    }
+    if provider.context_window == Some(0) {
+        bail!("context_window must be greater than zero");
     }
     for (field, value) in [
         ("model", &provider.model),

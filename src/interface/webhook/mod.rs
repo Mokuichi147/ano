@@ -526,6 +526,7 @@ async fn execute_job(
         profile.policy,
         approval,
     )
+    .with_context_window(models.main.context_window)
     .with_subagent_models(models.subagents)
     .with_event_listener(Arc::new(move |event| {
         progress

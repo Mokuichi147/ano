@@ -220,6 +220,7 @@ impl Agent {
                 return Ok((json!({"error":"tool_disabled","tool":name}), None));
             }
             let mut plan = plan.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            let goal_left_out = !arguments["goal"].is_null() && !plan.has_user_goal();
             return Ok(match plan.apply(&arguments) {
                 Ok(change) => {
                     if change == PlanChange::Updated {
@@ -228,7 +229,7 @@ impl Agent {
                             plan: plan.clone(),
                         });
                     }
-                    (plan_result(&plan, change), None)
+                    (plan_result(&plan, change, goal_left_out), None)
                 }
                 Err(error) => (
                     json!({"error":"invalid_plan","message":format!("{error:#}"),"plan":*plan}),
@@ -933,8 +934,9 @@ impl Agent {
 
 /// The `task_plan` result. It says in words that the call succeeded and what
 /// to do next: models have taken an "incomplete" plan status for a failed
-/// call and resent the same plan instead of doing the work.
-fn plan_result(plan: &TaskPlan, change: PlanChange) -> Value {
+/// call and resent the same plan instead of doing the work. `goal_left_out`
+/// says that the call sent a goal although the user set none.
+fn plan_result(plan: &TaskPlan, change: PlanChange, goal_left_out: bool) -> Value {
     let recorded = match change {
         PlanChange::Read => format!("This is the current plan (revision {}).", plan.revision),
         PlanChange::Unchanged => format!(
@@ -951,10 +953,15 @@ fn plan_result(plan: &TaskPlan, change: PlanChange) -> Value {
         RunOutcome::Blocked => "The remaining work is blocked; tell the user what was done and what is blocked.",
         RunOutcome::Completed => "All recorded work is finished.",
     };
+    let goal = if goal_left_out {
+        " The goal you sent was left out: only the user sets a goal, so send goal=null and keep your own targets as steps."
+    } else {
+        ""
+    };
     json!({
         "plan": plan,
         "changed": change == PlanChange::Updated,
-        "message": format!("{recorded} {next}"),
+        "message": format!("{recorded}{goal} {next}"),
     })
 }
 

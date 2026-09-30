@@ -135,6 +135,7 @@ const API_CONNECTION_KEYS: &[&str] = &[
     "allowed_models",
     "disabled_models",
     "fallback",
+    "context_window",
 ];
 
 pub(super) fn with_provider_renamed(text: &str, old: &str, new: &str) -> Result<String> {

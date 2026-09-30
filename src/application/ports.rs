@@ -71,6 +71,12 @@ pub trait ResponsesApi: Send + Sync {
     async fn list_models(&self) -> Result<Option<Vec<String>>> {
         Ok(None)
     }
+
+    /// The tokens `model` can take in one request, when the endpoint reports
+    /// it (LM Studio does for a loaded model).
+    async fn context_window(&self, _model: &str) -> Option<u64> {
+        None
+    }
 }
 
 /// Report the messages of a completed response to `on_delta`, one delta per

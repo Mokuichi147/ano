@@ -210,6 +210,10 @@ impl ResponsesApi for FallbackClient {
     async fn list_models(&self) -> Result<Option<Vec<String>>> {
         self.targets[0].client.list_models().await
     }
+
+    async fn context_window(&self, model: &str) -> Option<u64> {
+        self.targets[0].client.context_window(model).await
+    }
 }
 
 #[cfg(test)]

@@ -1310,6 +1310,7 @@ async fn sub_agents_run_on_the_model_of_their_role() {
             client: Arc::new(OpenAiClient::new("test", &quick.url)),
             model: "quick-model".into(),
             reasoning_effort: Some("low".into()),
+            context_window: None,
         }),
         review: None,
     });
@@ -1345,6 +1346,7 @@ fn each_kind_of_run_uses_the_model_of_its_role() {
         client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:9/v1")),
         model: "review-model".into(),
         reasoning_effort: None,
+        context_window: None,
     };
     let agent = agent(ToolRegistry::new(), Vec::new()).with_subagent_models(SubagentModels {
         delegate: None,
@@ -1638,6 +1640,116 @@ fn the_repetition_notice_names_unloaded_local_tools_like_the_repeated_one() {
     let notice = super::repetition_notice("workspace_search", 3, None, &unloaded);
     assert!(notice.contains("Local tools like it that are not loaded now: "));
     assert!(notice.contains("load it with tool_search first"));
+}
+
+#[test]
+fn the_context_is_full_when_the_next_request_may_not_fit() {
+    use super::context_full;
+    assert!(!context_full(None, Some(1_000_000)));
+    assert!(!context_full(Some(100_000), None));
+    // A fifth of the window, and at least 24k tokens, is left for the next
+    // request.
+    assert!(!context_full(Some(262_144), Some(200_000)));
+    assert!(context_full(Some(262_144), Some(210_000)));
+    assert!(!context_full(Some(100_000), Some(75_000)));
+    assert!(context_full(Some(100_000), Some(76_000)));
+    // A small window keeps a third of it.
+    assert!(!context_full(Some(32_768), Some(21_000)));
+    assert!(context_full(Some(32_768), Some(22_000)));
+}
+
+#[test]
+fn context_overflows_are_told_from_other_errors() {
+    use super::is_context_overflow;
+    for error in [
+        "Responses API request failed (400 Bad Request): context_length_exceeded",
+        "This model's maximum context length is 8192 tokens",
+        "Trying to keep the first 9000 tokens when context the overflows.",
+        "Your input exceeds the context window of this model.",
+    ] {
+        assert!(is_context_overflow(error), "{error}");
+    }
+    assert!(!is_context_overflow("rate limit reached"));
+    assert!(!is_context_overflow("invalid tool arguments"));
+}
+
+#[tokio::test]
+async fn the_history_is_compacted_before_it_fills_the_context_window() {
+    let server = mock_responses(vec![
+        with_usage(search_response("full", "record_action"), 90_000),
+        text_response("summary", "Loaded record_action"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let (registry, _) = counting_registry();
+    let mut agent = agent(registry, Vec::new()).with_context_window(Some(100_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1]["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You compact the history"));
+    assert!(requests[2]["input"]
+        .to_string()
+        .contains("Loaded record_action"));
+}
+
+#[tokio::test]
+async fn a_request_over_the_context_is_compacted_and_sent_again() {
+    let server = mock_responses(vec![
+        json!({"error": {"message": "This model's maximum context length is 8192 tokens"}}),
+        text_response("summary", "The user asked for the work"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let mut agent = agent(ToolRegistry::new(), Vec::new()).with_context_window(Some(1_000_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[1]["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You compact the history"));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::AssistantProgress { text, .. } if text.contains("exceeded the model's context")
+    )));
+}
+
+#[tokio::test]
+async fn repeating_after_the_notices_stops_the_run_with_a_report() {
+    let repeat =
+        |id: &str| json!({"id": id, "status": "completed", "output": calls(&["record_action"])});
+    let mut responses = vec![search_response("search", "record_action")];
+    responses.extend((1..=9).map(|index| repeat(&format!("r{index}"))));
+    responses.push(text_response("report", "Stuck on record_action"));
+    let server = mock_responses(responses).await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Stuck on record_action");
+    assert_eq!(result.stop_reason, StopReason::NoProgress);
+    assert_eq!(count.load(Ordering::SeqCst), 9);
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 11);
+    let last = &requests[10];
+    assert_eq!(last["tools"], json!([]));
+    assert!(last["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("kept repeating"));
 }
 
 #[test]

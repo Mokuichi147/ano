@@ -322,9 +322,11 @@ impl TaskPlan {
             // goal only: keep the steps.
             None => self.steps.clone(),
         };
+        // Only the user sets a goal. Models commonly send one with their
+        // first plan anyway; it is left out so that their steps are saved.
         let goal = match arguments.goal {
-            Some(goal) => Some(self.next_goal(goal)?),
-            None => self.goal.clone(),
+            Some(goal) if self.has_user_goal() => Some(self.next_goal(goal)?),
+            _ => self.goal.clone(),
         };
         if steps == self.steps && goal == self.goal {
             return Ok(PlanChange::Unchanged);
@@ -379,9 +381,14 @@ impl TaskPlan {
         Ok(PlanChange::Updated)
     }
 
-    /// The goal after an update from the agent. Only the user sets a goal,
-    /// so without one the update is rejected; with one, the agent defines
-    /// and records the criteria but cannot change the objective.
+    /// Whether the user set the goal of this plan.
+    pub fn has_user_goal(&self) -> bool {
+        self.goal.as_ref().is_some_and(|goal| goal.by_user)
+    }
+
+    /// The goal after an update from the agent, when the user set one: the
+    /// agent defines and records the criteria but cannot change the
+    /// objective.
     ///
     /// The objective is kept whatever the agent sends, so a model that
     /// cannot echo it exactly is not stuck on rejected updates.
@@ -511,20 +518,26 @@ mod tests {
 
     #[test]
     fn only_the_user_sets_a_goal() {
-        // Without a goal from the user, the agent cannot set one; its steps
-        // are kept unchanged too.
+        // Without a goal from the user, the goal the agent sends is left out.
         let mut plan = TaskPlan::default();
         plan.apply(&json!({"expected_revision":0,"steps":[step("fix","pending")]}))
             .unwrap();
         let saved = plan.clone();
-        let error = plan
+        let change = plan
             .apply(
                 &json!({"expected_revision":1,"explanation":null,"steps":null,
                 "goal":goal("Tests pass",vec![criterion("tests","pending",None)])}),
             )
-            .unwrap_err();
-        assert!(format!("{error:#}").contains("only the user sets a goal"));
+            .unwrap();
+        assert_eq!(change, PlanChange::Unchanged);
         assert_eq!(plan, saved);
+        // With steps, the steps are saved and the goal is left out.
+        plan.apply(&json!({"expected_revision":1,"explanation":null,
+            "steps":[step("fix","completed")],
+            "goal":goal("Tests pass",vec![criterion("tests","pending",None)])}))
+            .unwrap();
+        assert_eq!(plan.revision, 2);
+        assert!(plan.goal.is_none());
 
         // A goal the agent set in an older session is dropped.
         let mut old = saved.clone();

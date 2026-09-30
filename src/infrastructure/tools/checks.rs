@@ -3,7 +3,7 @@
 use super::process::run_bounded;
 use crate::{
     application::registry::ToolRegistry,
-    domain::tool::{ToolContext, ToolDefinition},
+    domain::tool::{ToolContext, ToolDefinition, WORKSPACE_CHECK_NAME},
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -12,7 +12,7 @@ use tokio::process::Command;
 
 pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
     registry.register_contextual(ToolDefinition::new(
-        "workspace_check",
+        WORKSPACE_CHECK_NAME,
         "Run a configured build, test, or validation check in the workspace. Use name=null to list available checks, then run an exact name. The program and arguments are fixed by the environment. Inspect success, exit_code, stdout and stderr; never claim validation passed when it failed.",
         json!({"type":"object","properties":{"name":{"type":["string","null"]}},"required":["name"],"additionalProperties":false}),
     ), |arguments, context| async move { run_check(arguments, &context).await })

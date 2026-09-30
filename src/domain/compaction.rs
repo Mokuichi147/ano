@@ -3,7 +3,9 @@
 //! - remote: the provider's `/responses/compact` returns an opaque window,
 //!   which is retained as a whole;
 //! - summary: for endpoints without that API, the model summarizes a text
-//!   transcript of the history, and the summary replaces it.
+//!   transcript of the earlier history, and the summary replaces it; the
+//!   most recent steps are kept as they are, so the work in progress, such
+//!   as a file just read, need not be read again.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -222,8 +224,41 @@ pub fn summary_transcript(history: &[Value], limit: usize) -> String {
 /// The result is one user message: the request's own parts followed by the
 /// summary, so that endpoints whose chat templates need alternating roles
 /// accept it.
+/// Where the recent part of `history` that a summary keeps as it is begins:
+/// at most `budget` bytes, starting where a response starts (not at a tool
+/// result, which must follow its call). `history.len()` when no such part
+/// fits; the first item is always summarized.
+pub fn summary_split(history: &[Value], budget: usize) -> usize {
+    let is_result = |item: &Value| {
+        matches!(
+            item["type"].as_str(),
+            Some("function_call_output" | "mcp_approval_response")
+        )
+    };
+    let mut split = history.len();
+    let mut kept = 0;
+    for index in (1..history.len()).rev() {
+        kept += serde_json::to_vec(&history[index]).map_or(0, |bytes| bytes.len());
+        if kept > budget {
+            break;
+        }
+        let before = &history[index - 1];
+        let item = &history[index];
+        if !is_result(item)
+            && item["role"] != "user"
+            && (is_result(before) || before["role"] == "user")
+        {
+            split = index;
+        }
+    }
+    split
+}
+
+/// Replace `previous[..split]` with `summary`, keeping `previous[split..]`
+/// (see `summary_split`) after it.
 pub fn summarized_history(
     previous: &[Value],
+    split: usize,
     summary: &str,
     id: String,
 ) -> Result<(Vec<Value>, CompactionRecord)> {
@@ -231,7 +266,9 @@ pub fn summarized_history(
     if summary.is_empty() {
         bail!("the model returned an empty summary; original history was preserved");
     }
-    let mut content = match last_user_request(previous) {
+    let split = split.min(previous.len());
+    // The request is repeated only when the summary replaces it.
+    let mut content = match last_user_request(previous).filter(|(index, _)| *index < split) {
         Some((_, parts)) if history_bytes(&parts)? <= MAX_RETAINED_REQUEST_BYTES => parts,
         Some((index, _)) => vec![json!({
             "type": "input_text",
@@ -239,11 +276,18 @@ pub fn summarized_history(
         })],
         None => Vec::new(),
     };
+    let kept = &previous[split..];
+    let recent = if kept.is_empty() {
+        ""
+    } else {
+        " The most recent steps follow it unchanged."
+    };
     content.push(json!({
         "type": "input_text",
-        "text": format!("{SUMMARY_NOTICE} Continue the work from it; reread files before relying on details they contain.\n\n{summary}"),
+        "text": format!("{SUMMARY_NOTICE}{recent} Continue the work from it; reread files before relying on details the summary gives.\n\n{summary}"),
     }));
-    let history = vec![json!({"role": "user", "content": content})];
+    let mut history = vec![json!({"role": "user", "content": content})];
+    history.extend_from_slice(kept);
     let record = CompactionRecord {
         id,
         before_bytes: history_bytes(previous)?,
@@ -378,8 +422,14 @@ mod tests {
         assert!(transcript.contains("characters omitted"));
         assert!(!transcript.contains("opaque"));
 
-        let (compacted, record) =
-            summarized_history(&history, "README の2節を修正済み", "local-1".into()).unwrap();
+        let everything = history.len();
+        let (compacted, record) = summarized_history(
+            &history,
+            everything,
+            "README の2節を修正済み",
+            "local-1".into(),
+        )
+        .unwrap();
         assert_eq!(compacted.len(), 1);
         let parts = compacted[0]["content"].as_array().unwrap();
         assert_eq!(parts[0]["text"], "README を直して");
@@ -387,7 +437,7 @@ mod tests {
         assert!(notice.starts_with(SUMMARY_NOTICE) && notice.ends_with("README の2節を修正済み"));
         assert_eq!((record.before_items, record.after_items), (7, 1));
         assert!(record.after_bytes < record.before_bytes);
-        assert!(summarized_history(&history, "  ", "local-2".into()).is_err());
+        assert!(summarized_history(&history, everything, "  ", "local-2".into()).is_err());
 
         // A second compaction carries the summary over as a summary, and the
         // request is not duplicated.
@@ -396,10 +446,55 @@ mod tests {
         let transcript = summary_transcript(&next, 100_000);
         assert!(transcript.contains("## Summary of earlier conversation\nContinue the work"));
         assert_eq!(transcript.matches("README を直して").count(), 1);
-        let (again, _) = summarized_history(&next, "新しい要約", "local-3".into()).unwrap();
+        let (again, _) =
+            summarized_history(&next, next.len(), "新しい要約", "local-3".into()).unwrap();
         let parts = again[0]["content"].as_array().unwrap();
         assert_eq!(parts.len(), 2);
         assert_eq!(parts[0]["text"], "README を直して");
+    }
+
+    #[test]
+    fn a_summary_keeps_the_most_recent_steps_as_they_are() {
+        let read = |id: &str, bytes: usize| {
+            [
+                json!({"type":"reasoning","encrypted_content":"opaque"}),
+                json!({"type":"function_call","call_id":id,"name":"workspace_read","arguments":"{}"}),
+                json!({"type":"function_call_output","call_id":id,"output":"z".repeat(bytes)}),
+            ]
+        };
+        let mut history = vec![user("README を直して")];
+        history.extend(read("c1", 5000));
+        history.extend(read("c2", 5000));
+        history.extend(read("c3", 500));
+        // The last response and its result fit; a result alone is never kept.
+        let split = summary_split(&history, 2000);
+        assert_eq!(split, 7);
+        assert_eq!(history[split]["type"], "reasoning");
+        assert_eq!(summary_split(&history, 100), history.len());
+        let split_before_last = summary_split(&history, 7000);
+        assert_eq!(split_before_last, 4);
+
+        let (compacted, record) =
+            summarized_history(&history, split, "c1 と c2 を読んだ", "local-4".into()).unwrap();
+        assert_eq!(compacted.len(), 4);
+        assert_eq!(&compacted[1..], &history[7..]);
+        let parts = compacted[0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "README を直して");
+        assert!(parts[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("The most recent steps follow it unchanged."));
+        assert_eq!((record.before_items, record.after_items), (10, 4));
+
+        // A request among the kept steps is not repeated in the summary.
+        let mut later = history.clone();
+        later.push(user("続けて CHANGELOG も"));
+        later.extend(read("c4", 100));
+        let split = summary_split(&later, 3000);
+        assert_eq!(split, 7);
+        let (compacted, _) = summarized_history(&later, split, "要約", "local-5".into()).unwrap();
+        let parts = compacted[0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 1);
     }
 
     #[test]

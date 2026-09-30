@@ -24,8 +24,8 @@ use crate::{
     },
     domain::{
         compaction::{
-            compacted_history, compaction_due, summarized_history, summary_transcript,
-            CompactionMethod, CompactionRecord,
+            compacted_history, compaction_due, summarized_history, summary_split,
+            summary_transcript, CompactionMethod, CompactionRecord,
         },
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
@@ -127,6 +127,9 @@ pub struct ModelTarget {
     pub model: String,
     /// `None` uses the model's default.
     pub reasoning_effort: Option<String>,
+    /// Tokens the model takes in one request, when configured; the history
+    /// is compacted before it grows near this.
+    pub context_window: Option<u64>,
 }
 
 /// The models sub-agents run on. `None` runs them on the agent's own client,
@@ -145,6 +148,7 @@ struct Target<'a> {
     client: &'a Arc<dyn ResponsesApi>,
     model: &'a str,
     reasoning_effort: Option<&'a str>,
+    context_window: Option<u64>,
 }
 
 impl<'a> From<&'a ModelTarget> for Target<'a> {
@@ -153,6 +157,7 @@ impl<'a> From<&'a ModelTarget> for Target<'a> {
             client: &target.client,
             model: &target.model,
             reasoning_effort: target.reasoning_effort.as_deref(),
+            context_window: target.context_window,
         }
     }
 }
@@ -194,6 +199,8 @@ pub struct Agent {
     /// only commits files still in that state.
     reviews: Mutex<HashMap<PathBuf, BTreeMap<String, Value>>>,
     subagent_models: SubagentModels,
+    /// The context window of the agent's own model, when configured.
+    context_window: Option<u64>,
 }
 
 impl Agent {
@@ -221,6 +228,7 @@ impl Agent {
             history: None,
             reviews: Mutex::default(),
             subagent_models: SubagentModels::default(),
+            context_window: None,
         }
     }
 
@@ -237,9 +245,17 @@ impl Agent {
         self.client = target.client;
         self.settings.model = target.model;
         self.settings.reasoning_effort = target.reasoning_effort;
+        self.context_window = target.context_window;
         self.settings.approval_model = approval_model;
         self.approval_handler = approval_handler;
         self.subagent_models = subagent_models;
+    }
+
+    /// The context window of the agent's own model: the history is compacted
+    /// before it grows near this.
+    pub fn with_context_window(mut self, context_window: Option<u64>) -> Self {
+        self.context_window = context_window;
+        self
     }
 
     /// Run sub-agents on their own models instead of the agent's.
@@ -254,6 +270,7 @@ impl Agent {
             client: &self.client,
             model: &self.settings.model,
             reasoning_effort: self.settings.reasoning_effort.as_deref(),
+            context_window: self.context_window,
         }
     }
 
@@ -409,18 +426,22 @@ impl Agent {
                 "context compaction failed; original history was preserved. Set agent.compaction = \"summary\" for endpoints without /responses/compact support",
             );
         }
-        // Half of the threshold leaves room for the instructions and the
-        // summary in a context that held the history.
-        let limit = self
-            .settings
-            .compact_threshold_bytes
-            .map(|threshold| threshold / 2)
-            .unwrap_or(DEFAULT_SUMMARY_TRANSCRIPT_BYTES)
-            .max(8 * 1024);
+        // Half of the threshold, or of the window at about three bytes a
+        // token, leaves room for the instructions and the summary in a
+        // context that held the history.
+        let limit = match (self.settings.compact_threshold_bytes, target.context_window) {
+            (Some(threshold), _) => threshold / 2,
+            (None, Some(window)) => {
+                usize::try_from(window.saturating_mul(3) / 2).unwrap_or(usize::MAX)
+            }
+            (None, None) => DEFAULT_SUMMARY_TRANSCRIPT_BYTES,
+        }
+        .max(8 * 1024);
+        let earlier = &history[..self.summary_split(target, history)];
         let payload = json!({
             "model": target.model,
             "instructions": SUMMARY_INSTRUCTIONS,
-            "input": [{"role": "user", "content": [{"type": "input_text", "text": summary_transcript(history, limit)}]}],
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": summary_transcript(earlier, limit)}]}],
             "store": false,
         });
         target
@@ -449,7 +470,27 @@ impl Agent {
             .filter(|id| !id.is_empty())
             .map(|id| format!("summary-{id}"))
             .unwrap_or_else(|| format!("summary-{}", uuid::Uuid::new_v4()));
-        summarized_history(previous, &extract_output_text(response), id)
+        summarized_history(
+            previous,
+            self.summary_split(target, previous),
+            &extract_output_text(response),
+            id,
+        )
+    }
+
+    /// Where the recent steps that a summary keeps as they are begin: up to
+    /// a quarter of the compaction threshold, or about an eighth of the
+    /// context window (at four bytes a token), so the history stays well
+    /// under them after compaction. Without either, as for `/compact` in
+    /// `ano chat` without a known window, the summary replaces everything.
+    fn summary_split(&self, target: Target<'_>, history: &[Value]) -> usize {
+        match (self.settings.compact_threshold_bytes, target.context_window) {
+            (Some(threshold), _) => summary_split(history, threshold / 4),
+            (None, Some(window)) => {
+                summary_split(history, usize::try_from(window / 2).unwrap_or(usize::MAX))
+            }
+            (None, None) => history.len(),
+        }
     }
 
     async fn run_inner(
@@ -602,8 +643,17 @@ impl Agent {
         if !unavailable.is_empty() {
             base_instructions.push_str(&unavailable_servers_notice(&unavailable));
         }
+        // The context window of the model: configured, or reported by the
+        // endpoint (LM Studio does for a loaded model; otherwise it is asked
+        // again once the model has answered). Knowing it, ano keeps the
+        // history so that it can compact it.
+        let mut context_window = match target.context_window {
+            Some(window) => Some(window),
+            None => target.client.context_window(target.model).await,
+        };
         let mut local_history = (!replay
             && (self.settings.compact_threshold_bytes.is_some()
+                || context_window.is_some()
                 || target.client.requires_full_history()))
         .then(|| user_input.as_array().cloned().unwrap_or_default());
         let mut previous_compact_size = session.as_ref().filter(|_| replay).and_then(|session| {
@@ -650,18 +700,41 @@ impl Agent {
         let text_listener = self.text_listener.as_ref().filter(|_| origin.depth == 0);
         let streamed = text_listener.is_some();
 
+        // The tokens the last request took.
+        let mut window_asked = context_window.is_some();
+        let mut context_tokens: Option<u64> = None;
+        // The endpoint refused a request as too long: compact and retry once.
+        let mut compact_now = false;
+        let mut overflow_retried = false;
+        // Notices about repeated calls went unheeded: the next response is
+        // the report.
+        let mut stuck = false;
+
         for round in 0..self.settings.max_tool_rounds {
+            if !window_asked && context_tokens.is_some() {
+                window_asked = true;
+                context_window = target.client.context_window(target.model).await;
+            }
+            let target = Target {
+                context_window,
+                ..target
+            };
             let history = session
                 .as_ref()
                 .filter(|_| replay)
                 .map(|session| &session.data().history)
                 .or(local_history.as_ref());
             if let Some(history) = history {
-                if compaction_due(
-                    history,
-                    self.settings.compact_threshold_bytes,
-                    previous_compact_size,
-                )? {
+                if compact_now
+                    || context_full(context_window, context_tokens)
+                    || compaction_due(
+                        history,
+                        self.settings.compact_threshold_bytes,
+                        previous_compact_size,
+                    )?
+                {
+                    compact_now = false;
+                    context_tokens = None;
                     let previous = history.clone();
                     let compacted = self.request_compaction(target, &previous).await?;
                     observe_usage(
@@ -696,8 +769,12 @@ impl Agent {
             }
             // Keep the request budget bounded while reserving one response to
             // explain completed work and any outstanding steps to the user.
-            let final_round = round + 1 == self.settings.max_tool_rounds;
-            let instructions = if final_round {
+            let final_round = round + 1 == self.settings.max_tool_rounds || stuck;
+            let instructions = if stuck {
+                format!(
+                    "{base_instructions}\n\nThis is the final response: the same tool calls kept repeating after runtime notices asked for another approach, so the run stops here and no tools are offered with this request; a tool call written in your message would not run. Do not write tool calls. Summarize what has actually been completed, what you were trying to do when the calls kept repeating, and what is still missing, and do not claim unperformed work succeeded."
+                )
+            } else if final_round {
                 format!(
                     "{base_instructions}\n\nThis is the final response: the run has used its request budget (max_tool_rounds), so no tools are offered with this request, and a tool call written in your message would not run. Do not write tool calls. Summarize what has actually been completed, clearly state anything unfinished and the next steps, and do not claim unperformed work succeeded. Say that the run stopped at its request limit, not that tools failed or became unavailable."
                 )
@@ -735,15 +812,43 @@ impl Agent {
                 continuation,
             );
 
-            let response = match text_listener {
+            let result = match text_listener {
                 Some(listener) => {
                     target
                         .client
                         .create_response_streaming(&payload, listener.as_ref())
-                        .await?
+                        .await
                 }
-                None => target.client.create_response(&payload).await?,
+                None => target.client.create_response(&payload).await,
             };
+            // Some endpoints report an overlong request in the body.
+            let result = result.and_then(|response| match response["error"]["message"].as_str() {
+                Some(message) if is_context_overflow(message) => {
+                    bail!("Responses API returned an error: {message}")
+                }
+                _ => Ok(response),
+            });
+            let response = match result {
+                Ok(response) => response,
+                // Only a history ano keeps can be compacted.
+                Err(error)
+                    if !overflow_retried
+                        && (replay || local_history.is_some())
+                        && is_context_overflow(&format!("{error:#}")) =>
+                {
+                    overflow_retried = true;
+                    compact_now = true;
+                    events.push(AgentEvent::AssistantProgress {
+                        round,
+                        text: "The request exceeded the model's context; compacting the history and sending it again.".into(),
+                        streamed: false,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            overflow_retried = false;
+            context_tokens = context_tokens_of(&response);
             observe_usage(
                 &response,
                 ApiOperation::Response,
@@ -831,6 +936,7 @@ impl Agent {
                 }
             }
             if let Some(count) = repetition.observe(&items) {
+                stuck = count >= REPETITION_STOP_ROUNDS;
                 let name = repetition.name.as_str();
                 let (server, mut unloaded) = mcp_runtime.unloaded_siblings(name, &active);
                 if server.is_none() {
@@ -917,7 +1023,9 @@ impl Agent {
                     outcome,
                     plan,
                     usage,
-                    stop_reason: if final_round {
+                    stop_reason: if stuck {
+                        StopReason::NoProgress
+                    } else if final_round {
                         StopReason::RoundLimit
                     } else {
                         StopReason::FinalAnswer
@@ -1057,6 +1165,44 @@ fn continuation_notice(plan: &TaskPlan) -> String {
 /// Rounds in a row that call the same tool before the model is told to
 /// change approach, and again after every further run of this length.
 const REPETITION_NOTICE_ROUNDS: usize = 3;
+
+/// Rounds in a row of the same calls after which the run stops with a
+/// report: three notices went unheeded.
+const REPETITION_STOP_ROUNDS: usize = 3 * REPETITION_NOTICE_ROUNDS;
+
+/// Whether a request that took `tokens` leaves too little of `window` for
+/// the next one, which adds tool results and an answer: a fifth of the
+/// window, and at least 24k tokens (a third of a small window).
+fn context_full(window: Option<u64>, tokens: Option<u64>) -> bool {
+    let (Some(window), Some(tokens)) = (window, tokens) else {
+        return false;
+    };
+    let margin = (window / 5).max(24_000.min(window / 3));
+    tokens >= window.saturating_sub(margin)
+}
+
+/// The tokens a request took: its input and output, when reported.
+fn context_tokens_of(response: &Value) -> Option<u64> {
+    let usage = &response["usage"];
+    Some(usage["input_tokens"].as_u64()? + usage["output_tokens"].as_u64().unwrap_or(0))
+}
+
+/// Whether an error says that a request exceeded the model's context, in
+/// the words of OpenAI, LM Studio, llama.cpp, and Ollama.
+fn is_context_overflow(error: &str) -> bool {
+    let text = error.to_lowercase();
+    [
+        "context_length_exceeded",
+        "context length",
+        "context window",
+        "context size",
+        "maximum context",
+        "context the overflows",
+        "exceeds the available context",
+    ]
+    .iter()
+    .any(|phrase| text.contains(phrase))
+}
 
 /// Tools that act on what their arguments name: reading, changing, or
 /// running one thing after another is progress, not a loop.

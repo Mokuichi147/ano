@@ -61,6 +61,10 @@ pub struct ApiSettings {
     /// Providers to try in order when this one cannot be reached or is
     /// overloaded.
     pub fallback: Vec<String>,
+    /// Tokens the models of this provider can take in one request. The
+    /// history is compacted before it grows near this; LM Studio reports it
+    /// by itself.
+    pub context_window: Option<u64>,
 }
 
 fn yes() -> bool {
@@ -82,6 +86,7 @@ impl Default for ApiSettings {
             allowed_models: None,
             disabled_models: Vec::new(),
             fallback: Vec::new(),
+            context_window: None,
         }
     }
 }
@@ -128,6 +133,7 @@ pub struct ProviderSettings {
     pub allowed_models: Option<Vec<String>>,
     pub disabled_models: Vec<String>,
     pub fallback: Vec<String>,
+    pub context_window: Option<u64>,
 }
 
 impl Default for ProviderSettings {
@@ -147,6 +153,7 @@ impl Default for ProviderSettings {
             allowed_models: None,
             disabled_models: Vec::new(),
             fallback: Vec::new(),
+            context_window: None,
         }
     }
 }
@@ -167,6 +174,7 @@ impl ProviderSettings {
             allowed_models: self.allowed_models.clone(),
             disabled_models: self.disabled_models.clone(),
             fallback: self.fallback.clone(),
+            context_window: self.context_window,
         }
     }
 }
@@ -295,6 +303,28 @@ impl OpenAiClient {
             return Ok(response);
         }
         read_event_stream(response, on_delta).await
+    }
+
+    /// The context length `model` is loaded with, from LM Studio's
+    /// `GET /api/v0/models/{model}` beside the `/v1` API. `None` for other
+    /// servers, or while the model is not loaded.
+    pub async fn loaded_context_length(&self, model: &str) -> Option<u64> {
+        if is_openai_endpoint(&self.base_url) {
+            return None;
+        }
+        let root = self.base_url.trim_end_matches('/').strip_suffix("/v1")?;
+        let mut request = self.http.get(format!("{root}/api/v0/models/{model}"));
+        if let Some(api_key) = &self.api_key {
+            request = request.bearer_auth(api_key);
+        }
+        let response = request.send().await.ok()?;
+        if !response.status().is_success() {
+            return None;
+        }
+        let body: Value = response.json().await.ok()?;
+        body["loaded_context_length"]
+            .as_u64()
+            .filter(|length| *length > 0)
     }
 
     /// `GET /models`: the models the endpoint offers, sorted by name, or
@@ -503,6 +533,10 @@ impl ResponsesApi for OpenAiClient {
 
     async fn list_models(&self) -> Result<Option<Vec<String>>> {
         OpenAiClient::list_models(self).await
+    }
+
+    async fn context_window(&self, model: &str) -> Option<u64> {
+        OpenAiClient::loaded_context_length(self, model).await
     }
 
     fn supports_remote_compaction(&self) -> bool {
@@ -773,6 +807,32 @@ mod tests {
             server.abort();
             assert!(format!("{error:#}").contains(expected), "{error:#}");
         }
+    }
+
+    #[tokio::test]
+    async fn reads_the_context_length_of_a_model_loaded_in_lm_studio() {
+        let app = Router::new().route(
+            "/api/v0/models/{model}",
+            axum::routing::get(
+                |axum::extract::Path(model): axum::extract::Path<String>| async move {
+                    Json(match model.as_str() {
+                        "loaded" => json!({"id":"loaded","state":"loaded","max_context_length":262144,"loaded_context_length":32768}),
+                        _ => json!({"id":model,"state":"not-loaded","max_context_length":262144}),
+                    })
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = OpenAiClient::new("", format!("http://{}/v1", listener.local_addr().unwrap()));
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(client.loaded_context_length("loaded").await, Some(32768));
+        // Not loaded yet: the length it will be loaded with is unknown.
+        assert_eq!(client.loaded_context_length("other").await, None);
+        // Other servers have no such API.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = OpenAiClient::new("", format!("http://{}/v1", listener.local_addr().unwrap()));
+        tokio::spawn(async move { axum::serve(listener, Router::new()).await.unwrap() });
+        assert_eq!(client.loaded_context_length("loaded").await, None);
     }
 
     #[tokio::test]

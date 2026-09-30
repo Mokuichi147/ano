@@ -18,6 +18,9 @@ pub const WORKSPACE_EXEC_NAME: &str = "workspace_exec";
 /// Built-in tool that reads a workspace file by offset or by lines.
 pub const WORKSPACE_READ_NAME: &str = "workspace_read";
 
+/// Built-in tool that runs a validation check configured for the environment.
+pub const WORKSPACE_CHECK_NAME: &str = "workspace_check";
+
 /// Built-in tools that change one workspace file.
 pub const WORKSPACE_EDIT_NAME: &str = "workspace_edit";
 pub const WORKSPACE_WRITE_NAME: &str = "workspace_write";
@@ -121,6 +124,9 @@ impl ToolContext {
     pub fn can_run(&self, tool_name: &str) -> bool {
         match tool_name {
             WORKSPACE_EXEC_NAME => self.allow_exec,
+            // Without configured checks there is nothing to run, and a model
+            // offered the tool calls it with commands as check names.
+            WORKSPACE_CHECK_NAME => !self.checks.is_empty(),
             WEB_FETCH_NAME => self.allow_web,
             GIT_COMMIT_PUSH_NAME => self.allow_writes,
             _ => true,
@@ -160,4 +166,27 @@ pub fn validate_tool_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ToolContext, WORKSPACE_CHECK_NAME};
+    use crate::domain::environment::CheckConfig;
+
+    #[test]
+    fn checks_are_offered_only_when_the_environment_has_some() {
+        let mut context = ToolContext::default();
+        assert!(!context.can_run(WORKSPACE_CHECK_NAME));
+        context.checks.insert(
+            "test".into(),
+            CheckConfig {
+                program: "cargo".into(),
+                args: vec!["test".into()],
+                description: String::new(),
+                timeout_secs: 90,
+            },
+        );
+        assert!(context.can_run(WORKSPACE_CHECK_NAME));
+        assert!(context.can_run("workspace_read"));
+    }
 }

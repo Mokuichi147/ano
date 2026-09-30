@@ -82,6 +82,10 @@ struct ProviderOptions {
     max_retries: Option<u32>,
     #[arg(long, value_name = "BOOL")]
     stream: Option<bool>,
+    /// Tokens the provider's models take in one request; the history is
+    /// compacted before it grows near this. LM Studio reports it by itself.
+    #[arg(long, value_name = "TOKENS")]
+    context_window: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -105,6 +109,7 @@ enum Field {
     Stream,
     AllowedModels,
     DisabledModels,
+    ContextWindow,
 }
 
 impl Field {
@@ -122,6 +127,7 @@ impl Field {
             Field::Stream => "stream",
             Field::AllowedModels => "allowed_models",
             Field::DisabledModels => "disabled_models",
+            Field::ContextWindow => "context_window",
         }
     }
 }
@@ -178,6 +184,11 @@ impl ProviderOptions {
                 .map(|value| SettingValue::Integer(value.into())),
         );
         push("stream", self.stream.map(SettingValue::Bool));
+        push(
+            "context_window",
+            self.context_window
+                .map(|value| SettingValue::Integer(value.try_into().unwrap_or(i64::MAX))),
+        );
         Ok(changes)
     }
 }

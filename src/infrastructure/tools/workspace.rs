@@ -352,7 +352,7 @@ impl LineMatcher {
             .case_insensitive(ignore_case)
             .size_limit(1 << 20)
             .build()
-            .context("workspace_search.query is not a valid regular expression")?;
+            .context("workspace_search.query is not a valid regular expression; escape ( ) [ ] { } . * + ? | ^ $ \\ with a backslash to match them literally, or search with regex=false for literal text")?;
         Ok(Self::Regex(regex))
     }
 

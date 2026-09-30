@@ -147,6 +147,7 @@ pub(super) fn prepare_agent(
         policy,
         approval_handler,
     )
+    .with_context_window(models.main.context_window)
     .with_subagent_models(models.subagents);
     if let Some(history) = history {
         agent = agent.with_history(history);
