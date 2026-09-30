@@ -9,7 +9,7 @@ use crate::{
         session::{ModelChoice, SessionData, SessionStatus},
         usage::UsageSummary,
     },
-    infrastructure::fs::atomic_write,
+    infrastructure::fs::{acquire_lock, atomic_write},
 };
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -42,8 +42,9 @@ impl<'a> RecordedConversation<'a> {
         let dir = root.join(id);
         private_dir(&dir)?;
         let lock = lock_file(&dir.join("journal.lock"))?;
-        lock.try_lock()
-            .context("同じ会話の原文履歴を別の実行が使用中です")?;
+        // 直前に解放したロックを、起動中の子プロセスが exec まで一瞬持ち続けることがあるため、
+        // 短く再試行してから別の実行による使用と判断する。
+        acquire_lock(&lock).context("同じ会話の原文履歴を別の実行が使用中です")?;
         let manifest = json!({"version":1,"conversation":id,"binding":inner.data().binding});
         let manifest_path = dir.join("manifest.json");
         if std::fs::symlink_metadata(&manifest_path)

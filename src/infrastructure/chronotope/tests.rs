@@ -375,3 +375,48 @@ fn switching_the_model_endpoint_keeps_the_raw_history_of_the_conversation() {
     let error = h.wrap(&mut other).err().unwrap().to_string();
     assert!(error.contains("別のユーザー・環境"), "{error}");
 }
+
+#[test]
+fn a_conversation_in_use_by_another_run_is_still_refused_after_the_retry() {
+    let root = tempfile::tempdir().unwrap();
+    let h = history(root.path(), "http://127.0.0.1:9");
+    let mut session =
+        Session::open(root.path().join("session.json"), binding("alice"), false).unwrap();
+    let copied = serde_json::to_vec(session.data()).unwrap();
+    let held = h.wrap(&mut session).unwrap();
+
+    // 同じ会話を別のセッションファイルから開く、実際に同時に動いている別の実行。
+    let path = root.path().join("other.json");
+    std::fs::write(&path, copied).unwrap();
+    let mut other = Session::open(&path, binding("alice"), false).unwrap();
+    let error = format!("{:#}", h.wrap(&mut other).err().unwrap());
+    assert!(error.contains("別の実行が使用中"), "{error}");
+
+    drop(held);
+    drop(h.wrap(&mut other).unwrap());
+}
+
+#[test]
+fn a_lock_released_during_the_retry_is_taken_over() {
+    let root = tempfile::tempdir().unwrap();
+    let h = history(root.path(), "http://127.0.0.1:9");
+    let mut session =
+        Session::open(root.path().join("session.json"), binding("alice"), false).unwrap();
+    drop(h.wrap(&mut session).unwrap());
+
+    // 起動中の子プロセスが、解放済みのロックの記述子を exec まで持ち続けている状態の代わり。
+    let lock = lock_file(
+        &h.owner_dir("alice")
+            .unwrap()
+            .join(&session.data().conversation_id)
+            .join("journal.lock"),
+    )
+    .unwrap();
+    lock.try_lock().unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        drop(lock);
+    });
+    drop(h.wrap(&mut session).unwrap());
+    release.join().unwrap();
+}

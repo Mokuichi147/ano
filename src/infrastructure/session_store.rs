@@ -9,7 +9,7 @@ use crate::{
         session::{ModelChoice, SessionBinding, SessionData, SessionStatus},
         usage::UsageSummary,
     },
-    infrastructure::fs::atomic_write,
+    infrastructure::fs::{acquire_lock, atomic_write},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -21,8 +21,6 @@ use std::{
 };
 
 const MAX_SESSION_BYTES: u64 = 32 * 1024 * 1024;
-const LOCK_RETRIES: u32 = 25;
-const LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
 
 pub struct Session {
     path: PathBuf,
@@ -208,22 +206,6 @@ impl ConversationStore for Session {
             return Err(error);
         }
         Ok(())
-    }
-}
-
-/// Take the sidecar lock, retrying briefly. A child process being spawned by
-/// this process can hold a copy of a just-released lock descriptor until it
-/// execs; a short retry avoids reporting that window as another user.
-fn acquire_lock(lock: &File) -> std::result::Result<(), std::fs::TryLockError> {
-    let mut attempts = 0;
-    loop {
-        match lock.try_lock() {
-            Err(std::fs::TryLockError::WouldBlock) if attempts < LOCK_RETRIES => {
-                attempts += 1;
-                std::thread::sleep(LOCK_RETRY_DELAY);
-            }
-            result => return result,
-        }
     }
 }
 
