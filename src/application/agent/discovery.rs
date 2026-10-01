@@ -78,22 +78,6 @@ impl ActiveTools {
 }
 
 impl Agent {
-    /// The registered local tools the policy allows, without those an
-    /// extension handles itself.
-    fn local_definitions(&self) -> Vec<ToolDefinition> {
-        let handled: BTreeSet<String> = self
-            .extensions
-            .iter()
-            .flat_map(|extension| extension.tools())
-            .map(|definition| definition.name)
-            .collect();
-        self.registry
-            .definitions(&self.policy)
-            .into_iter()
-            .filter(|definition| !handled.contains(&definition.name))
-            .collect()
-    }
-
     /// The tools of the next request. `depth` is the nesting of the run;
     /// only the top-level run may delegate to a sub-agent.
     pub(super) fn response_tools(
@@ -126,16 +110,19 @@ impl Agent {
                     .filter(|definition| {
                         !self.policy.is_disabled(&definition.name)
                             && extension.offers(&definition.name, &run)
+                            && definition.can_run(context)
                     })
                     .map(|definition| definition.as_response_tool()),
             );
         }
 
         tools.extend(
-            self.local_definitions()
+            self.registry
+                .definitions(&self.policy)
                 .into_iter()
                 .filter(|definition| {
-                    definition.always_offered || active.local.contains(&definition.name)
+                    (definition.always_offered || active.local.contains(&definition.name))
+                        && definition.can_run(context)
                 })
                 .map(|definition| definition.as_response_tool()),
         );
@@ -188,7 +175,8 @@ impl Agent {
             return None;
         }
         let mut local = self
-            .local_definitions()
+            .registry
+            .definitions(&self.policy)
             .into_iter()
             .filter(|definition| !definition.always_offered && definition.can_run(context))
             .map(|definition| definition.name)
@@ -285,7 +273,8 @@ impl Agent {
             return Vec::new();
         };
         let prefix = format!("{prefix}_");
-        self.local_definitions()
+        self.registry
+            .definitions(&self.policy)
             .into_iter()
             .filter(|definition| {
                 definition.name != name
@@ -318,7 +307,7 @@ impl Agent {
             .collect::<Vec<_>>();
 
         let mut candidates = Vec::new();
-        for definition in self.local_definitions() {
+        for definition in self.registry.definitions(&self.policy) {
             if !definition.can_run(context) {
                 continue;
             }

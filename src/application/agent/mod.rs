@@ -32,7 +32,7 @@ use crate::{
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
-        tool::{ToolContext, TOOL_SEARCH_NAME},
+        tool::{validate_tool_name, ToolContext, TOOL_SEARCH_NAME},
         usage::{ApiOperation, StopReason, UsageSummary},
     },
 };
@@ -278,6 +278,25 @@ impl Agent {
     pub fn with_extension(mut self, extension: Arc<dyn AgentExtension>) -> Self {
         self.extensions.push(extension);
         self
+    }
+
+    /// Extension tools must have names the API accepts that no runtime tool,
+    /// registered tool, or other extension tool has, so that none hides
+    /// another, such as a tool whose calls an extension checks.
+    fn validate_extensions(&self) -> Result<()> {
+        let mut names = std::collections::BTreeSet::new();
+        for definition in self
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.tools())
+        {
+            let name = &definition.name;
+            validate_tool_name(name).with_context(|| format!("invalid extension tool '{name}'"))?;
+            if self.registry.is_registered(name) || !names.insert(name.clone()) {
+                bail!("extension tool '{name}' is also registered as another tool");
+            }
+        }
+        Ok(())
     }
 
     /// The model of the caller's runs.
@@ -605,6 +624,7 @@ impl Agent {
         origin: RunOrigin<'_>,
     ) -> Result<AgentResult> {
         self.settings.validate()?;
+        self.validate_extensions()?;
         let target = self.target(&origin);
 
         let goal = request.goal.clone().filter(|_| origin.depth == 0);
@@ -939,8 +959,9 @@ impl Agent {
                 }
             }
             let targeted = |name: &str| {
-                self.registry
-                    .definition(name)
+                self.extension_for(name)
+                    .map(|(_, definition)| definition)
+                    .or_else(|| self.registry.definition(name))
                     .is_some_and(|definition| definition.targeted)
             };
             if let Some(count) = repetition.observe(&items, targeted) {

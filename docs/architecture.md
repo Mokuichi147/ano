@@ -69,6 +69,9 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 
 - **tool の定義。** 実行できる条件（`ToolDefinition::available_when`）、1回の呼び出しの期限（`with_deadline`）、引数が指す対象に作用するか（`targeted`。繰り返しの判定に使う）を、tool を登録する側が定義に持たせます。実行ループは tool の名前で分岐しません。
 - **拡張（`AgentExtension`）。** レジストリではなく拡張が処理するランタイム tool と、登録済みの tool の呼び出しの前に入る規則です。ランタイム tool は `ExtensionCall::run_subagent` でサブエージェントを起動できます。`review_changes` と `git_commit_push` のレビュー照合は、ハーネスの `ReviewGate` が拡張として加えます。
+  - 拡張の tool は `delegate_task` と同じランタイム tool で、ポリシーのうち `disabled_tools` だけに従います（allowlist への追加は不要）。定義の実行条件・承認・期限は登録済みの tool と同じく適用します。名前は予約名・登録済みの tool・他の拡張と重なってはならず、重なると実行の開始時にエラーになります。
+  - 拡張が起動するサブエージェントは、呼び出した実行と同じ利用者・環境・workspace で動き、親にない権限（書き込み・コマンド実行・Web・検証コマンド）は持てません。親が承認をすべて拒否する実行なら、子も拒否します。
+  - スキーマで追加の引数を禁じた tool（`additionalProperties: false`）では、宣言にない引数を実行前に捨てます。`git_commit_push` のレビュー済みのファイル（`reviewed`）のように実行時に加える引数は、モデルからは渡せず、拡張の `prepare_call` だけが加えられます。
 - **サブエージェントのロール。** `SubagentModels` はロール名（`delegate`、ハーネスの `review` など）ごとのモデルを持ちます。
 - **instructions と設定。** 実行ループの `AgentSettings` は、ループ自身の tool（`task_plan`・`tool_search`・`delegate_task`）だけを前提にした既定の instructions を持ちます。`[agent]` を受けるハーネスの `AgentConfig` は、instructions を書かなければ workspace・git・web の tool の使い方を含むハーネスの既定（`DEFAULT_INSTRUCTIONS`）を使います。AGENTS.md とスキルの一覧もハーネスが instructions に加えます。
 - **組み立て（`Harness`）。** 組み込み tool・原文履歴・スキルの登録と、実行ごとの `Agent` の組み立て（instructions の追記、ロールのモデル、承認モードに応じた承認ハンドラー、`ReviewGate`、原文履歴）を1か所で行います。CLI（`run`・`chat`）と Webhook は、実行設定（`ExecutionProfile`）とモデルを解決して `Harness` に渡し、進捗の表示や記録のリスナーだけを自分で付けます。

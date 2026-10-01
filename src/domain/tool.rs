@@ -122,6 +122,20 @@ impl ToolDefinition {
         self
     }
 
+    /// `arguments` without the properties the schema does not declare, when
+    /// it allows no others. Fields that the runtime adds to a call, such as
+    /// the reviewed files of `git_commit_push`, then cannot come from the
+    /// model.
+    pub fn declared_arguments(&self, mut arguments: Value) -> Value {
+        let declared = &self.parameters["properties"];
+        if self.parameters["additionalProperties"] == false && declared.is_object() {
+            if let Some(arguments) = arguments.as_object_mut() {
+                arguments.retain(|name, _| declared.get(name).is_some());
+            }
+        }
+        arguments
+    }
+
     /// Whether the tool can run in `context` at all.
     pub fn can_run(&self, context: &ToolContext) -> bool {
         self.runtime

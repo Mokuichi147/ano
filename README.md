@@ -518,7 +518,7 @@ registry.register(
 - `Agent::with_event_listener` で tool 呼び出しなどのイベントを、`Agent::with_text_listener` で生成中の回答の差分を受け取れます。
 - 実行環境（user・environment・workspace・書き込み許可）を受け取る tool は `register_contextual` で登録し、`ToolContext` から参照します。
 - tool 名は Responses API の関数名規則に合わせて ASCII 英数字・`_`・`-` の64文字以内です。`tool_search`・`task_plan`・`delegate_task` と `mcp__` で始まる名前は予約されています。
-- `register_builtin_tools` の `git_commit_push` は、レビューを受けた状態のファイルだけをコミットします。その照合と `review_changes` は拡張 `ReviewGate` が担うため、組み込みの tool を使う `Agent` には `.with_extension(Arc::new(ReviewGate::new()))` を付けてください（`Agent` ごとに1つ）。
+- `register_builtin_tools` の `git_commit_push` は、レビューを受けた状態のファイルだけをコミットします。その照合と `review_changes` は拡張 `ReviewGate` が担うため、組み込みの tool を使う `Agent` には `.with_extension(Arc::new(ReviewGate::new()))` を付けてください（`Agent` ごとに1つ）。付けない場合、コミットは常に `review_required` で拒否されます。
 - 影響の大きい tool は `ToolDefinition::new(...).with_approval()` で登録すると、呼び出しごとに `ApprovalHandler` へ確認します（`McpApprovalRequest::source` が `ApprovalSource::LocalTool` になります）。
 - 直接接続の MCP を使う場合は `McpPool` を1つ作り、`Arc` で各 `Agent` に渡すと接続を共有できます。終了時に `shutdown().await` を呼んでください。
 - `Agent` は外部依存をトレイト（`ResponsesApi`・`McpGateway`・`ConversationStore`・`ApprovalHandler`）で受け取るため、別の API クライアントや保存先に差し替えられます。構成は [docs/architecture.md](docs/architecture.md) を参照してください。

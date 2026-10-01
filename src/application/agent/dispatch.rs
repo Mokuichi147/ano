@@ -19,12 +19,15 @@ use crate::{
     domain::{
         mcp::McpTransport,
         plan::{PlanChange, RunOutcome, TaskPlan, TASK_PLAN_NAME},
-        tool::{ToolContext, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
+        tool::{ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
         usage::UsageSummary,
     },
 };
 use anyhow::{Context, Result};
-use futures::stream::{self, StreamExt};
+use futures::{
+    stream::{self, StreamExt},
+    FutureExt,
+};
 use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
@@ -240,12 +243,12 @@ impl Agent {
             return Ok((self.delegate_task(&arguments, scope).await, None));
         }
 
-        if let Some(extension) = self.extension_for(name) {
-            return Ok((
-                self.call_extension(extension.as_ref(), name, &arguments, scope)
-                    .await,
-                None,
-            ));
+        if let Some((extension, definition)) = self.extension_for(name) {
+            let arguments = definition.declared_arguments(arguments);
+            let output = self
+                .call_extension(extension.as_ref(), &definition, &arguments, scope)
+                .await?;
+            return Ok((output, None));
         }
 
         if name == TOOL_SEARCH_NAME {
@@ -333,6 +336,7 @@ impl Agent {
                 None,
             ));
         };
+        let arguments = definition.declared_arguments(arguments);
         if !definition.always_offered && !active.local.contains(name) {
             events.push(AgentEvent::LocalToolBlocked {
                 round,
@@ -502,33 +506,45 @@ impl Agent {
         }
     }
 
-    /// The extension that handles the runtime tool `name`, if one does.
-    fn extension_for(&self, name: &str) -> Option<&Arc<dyn AgentExtension>> {
-        self.extensions.iter().find(|extension| {
-            extension
+    /// The extension that handles the runtime tool `name`, with its
+    /// definition, if one does.
+    pub(super) fn extension_for(
+        &self,
+        name: &str,
+    ) -> Option<(&Arc<dyn AgentExtension>, ToolDefinition)> {
+        self.extensions.iter().find_map(|extension| {
+            let definition = extension
                 .tools()
-                .iter()
-                .any(|definition| definition.name == name)
+                .into_iter()
+                .find(|definition| definition.name == name)?;
+            Some((extension, definition))
         })
     }
 
-    /// Run a call of an extension's tool, unless the policy disables it or
-    /// the extension does not offer it to this run.
+    /// Run a call of an extension's tool as a runtime tool: like
+    /// `delegate_task`, only `disabled_tools` of the policy applies, not an
+    /// allowlist. The tool must be offered to this run and able to run in its
+    /// context; approval and the deadline apply as to local tools. Only an
+    /// approval handler failure is an error.
     async fn call_extension(
         &self,
         extension: &dyn AgentExtension,
-        name: &str,
+        definition: &ToolDefinition,
         arguments: &Value,
         scope: RoundScope<'_>,
-    ) -> Value {
+    ) -> Result<Value> {
+        let name = definition.name.as_str();
         let call = ExtensionCall { agent: self, scope };
         let disabled = self.policy.is_disabled(name);
-        if disabled || !extension.offers(name, &call.run()) {
+        if disabled
+            || !extension.offers(name, &call.run())
+            || !definition.can_run(scope.tool_context)
+        {
             scope.events.push(AgentEvent::LocalToolBlocked {
                 round: scope.round,
                 name: name.into(),
             });
-            return json!({
+            return Ok(json!({
                 "error": if disabled { "tool_disabled" } else { "tool_unavailable" },
                 "tool": name,
                 "message": if disabled {
@@ -538,9 +554,53 @@ impl Agent {
                 } else {
                     "This tool is not available in this run."
                 }
-            });
+            }));
         }
-        extension.call_tool(name, arguments, call).await
+        if definition.requires_approval {
+            let decision = self
+                .request_approval(
+                    scope.deny_approvals,
+                    McpApprovalRequest {
+                        approval_request_id: uuid::Uuid::new_v4().to_string(),
+                        source: ApprovalSource::LocalTool,
+                        tool_name: name.to_string(),
+                        arguments: arguments.clone(),
+                        tool_description: Some(definition.description.clone()),
+                        user_request: scope.user_request.to_string(),
+                        ..McpApprovalRequest::default()
+                    },
+                )
+                .await?;
+            scope.events.push(AgentEvent::LocalToolApproval {
+                round: scope.round,
+                name: name.to_string(),
+                approved: decision.approved,
+                reason: decision.reason.clone(),
+            });
+            if !decision.approved {
+                return Ok(json!({
+                    "error": "approval_denied",
+                    "tool": name,
+                    "message": denial_message(decision.reason.as_deref(), "call"),
+                }));
+            }
+        }
+        let output = extension.call_tool(name, arguments, call);
+        // Runtime tools such as a review run a whole sub-agent, so only a
+        // deadline the tool sets applies.
+        Ok(
+            match definition.deadline_secs(arguments, scope.tool_context) {
+                Some(secs) => match self.with_tool_timeout(output.map(Ok), secs).await {
+                    Ok(output) => output,
+                    Err(error) => json!({
+                        "error": "tool_execution_failed",
+                        "tool": name,
+                        "message": format!("{error:#}"),
+                    }),
+                },
+                None => output.await,
+            },
+        )
     }
 
     /// Why the sub-agent tool `name` cannot run here, if it cannot.
@@ -575,10 +635,27 @@ impl Agent {
         }
         let RoundScope { round, events, .. } = scope;
         let spent = Mutex::new(UsageSummary::default());
+        // A sub-agent works for the same user in the same workspace, with no
+        // permission its parent lacks.
+        let parent = scope.tool_context;
+        let context = ToolContext {
+            user_id: parent.user_id.clone(),
+            environment: parent.environment.clone(),
+            workspace: parent.workspace.clone(),
+            allow_writes: spec.context.allow_writes && parent.allow_writes,
+            allow_exec: spec.context.allow_exec && parent.allow_exec,
+            allow_web: spec.context.allow_web && parent.allow_web,
+            checks: parent
+                .checks
+                .iter()
+                .filter(|(name, _)| spec.context.checks.contains_key(*name))
+                .map(|(name, check)| (name.clone(), check.clone()))
+                .collect(),
+        };
         let request = RunRequest {
             input: vec![InputPart::Text(spec.task.clone())],
             raw_input: None,
-            context: spec.context,
+            context,
             goal: None,
         };
         let origin = RunOrigin {
@@ -587,7 +664,9 @@ impl Agent {
             depth: scope.depth + 1,
             role: Some(spec.role),
             instructions: Some(spec.instructions),
-            deny_approvals: spec.deny_approvals,
+            deny_approvals: spec
+                .deny_approvals
+                .or_else(|| scope.deny_approvals.map(str::to_string)),
             token_limit: scope.token_budget,
             user_request: Some(scope.user_request.to_string()),
             usage_sink: Some(&spent),
