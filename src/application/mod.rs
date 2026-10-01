@@ -8,6 +8,5 @@ pub mod approval;
 pub mod auto_approval;
 pub mod input;
 pub mod ports;
-pub mod profile;
 pub mod registry;
 pub mod settings;

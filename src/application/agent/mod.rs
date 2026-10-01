@@ -250,7 +250,6 @@ impl Agent {
     pub fn replace_model(
         &mut self,
         target: ModelTarget,
-        approval_model: Option<String>,
         approval_handler: Arc<dyn ApprovalHandler>,
         subagent_models: SubagentModels,
     ) {
@@ -258,7 +257,6 @@ impl Agent {
         self.settings.model = target.model;
         self.settings.reasoning_effort = target.reasoning_effort;
         self.context_window = target.context_window;
-        self.settings.approval_model = approval_model;
         self.approval_handler = approval_handler;
         self.subagent_models = subagent_models;
     }

@@ -1,11 +1,12 @@
 //! Resolution of a named environment into the settings of one run.
 
+use super::{instructions::append_project_instructions, settings::AgentConfig};
 use crate::{
     application::{
         agent::ModelTarget,
         approval::{AlwaysApprove, DenyApproval},
         auto_approval::AutoApproval,
-        ports::{ApprovalHandler, ResponsesApi},
+        ports::ApprovalHandler,
         settings::AgentSettings,
     },
     domain::{
@@ -20,6 +21,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct ExecutionProfile {
     pub settings: AgentSettings,
+    /// Files in the workspace root whose contents are appended to the
+    /// instructions (see `AgentConfig::project_instructions`).
+    pub project_instructions: Vec<String>,
     pub policy: UserPolicy,
     pub context: ToolContext,
     pub approval_mode: ApprovalMode,
@@ -29,13 +33,13 @@ impl ExecutionProfile {
     /// Layer a named environment over the base settings and the user's
     /// policy. The result never allows a tool that either forbids.
     pub fn for_environment(
-        base: &AgentSettings,
+        base: &AgentConfig,
         user_policy: &UserPolicy,
         user_id: &str,
         name: &str,
         environment: &EnvironmentConfig,
     ) -> Self {
-        let mut settings = base.clone();
+        let mut settings = base.settings.clone();
         if let Some(model) = &environment.model {
             settings.model.clone_from(model);
         }
@@ -44,6 +48,7 @@ impl ExecutionProfile {
         }
         Self {
             settings,
+            project_instructions: base.project_instructions.clone(),
             policy: user_policy.with_restrictions(
                 environment.allowed_tools.as_deref(),
                 &environment.disabled_tools,
@@ -61,24 +66,10 @@ impl ExecutionProfile {
         }
     }
 
-    /// Build the approval handler for this run. `ask` defers to `ask_user`,
-    /// which is a denial for runs nobody can answer; `auto` reviews with
-    /// `client` and passes uncertain calls to `ask_user`.
-    pub fn approval_handler(
-        &self,
-        client: Arc<dyn ResponsesApi>,
-        ask_user: Arc<dyn ApprovalHandler>,
-    ) -> Arc<dyn ApprovalHandler> {
-        approval_handler(
-            self.approval_mode,
-            ModelTarget {
-                client,
-                model: self.settings.reviewer_model().to_string(),
-                reasoning_effort: None,
-                context_window: None,
-            },
-            ask_user,
-        )
+    /// Append project instructions read from the workspace, as
+    /// `read_project_instructions` returns them.
+    pub fn append_project_instructions(&mut self, sources: &[(String, String)]) {
+        append_project_instructions(&mut self.settings.instructions, sources);
     }
 }
 

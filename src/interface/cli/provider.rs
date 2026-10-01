@@ -544,7 +544,7 @@ mod tests {
         let config = provider(&path, &["set", "api", "--model", "gpt-x"])
             .await
             .unwrap();
-        assert_eq!(config.agent.model, "gpt-x");
+        assert_eq!(config.agent.settings.model, "gpt-x");
 
         let config = provider(&path, &["remove", "lan"]).await.unwrap();
         assert!(config.providers.is_empty());

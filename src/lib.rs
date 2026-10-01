@@ -38,9 +38,8 @@ pub use application::{
         ApprovalHandler, ApprovalSource, ConversationStore, DirectMcpServer, DirectMcpTool,
         HistoryBackend, McpApprovalRequest, McpGateway, McpServerFailure, ResponsesApi,
     },
-    profile::ExecutionProfile,
     registry::{ContextualToolHandler, ToolHandler, ToolRegistry},
-    settings::{AgentSettings, ModelRoles},
+    settings::AgentSettings,
 };
 pub use config::{
     AppConfig, ModelRequest, ModelSelection, PresetSettings, API_PROVIDER, DEFAULT_PRESET,
@@ -56,8 +55,11 @@ pub use domain::{
     usage::{ApiOperation, StopReason, UsageSummary},
 };
 pub use harness::{
+    instructions::DEFAULT_INSTRUCTIONS,
     names::{REVIEW_CHANGES_NAME, WORKSPACE_EXEC_NAME},
+    profile::ExecutionProfile,
     review::{ReviewGate, REVIEW_ROLE},
+    settings::{AgentConfig, ModelRoles},
 };
 pub use infrastructure::{
     chronotope::{Chronotope, HistorySettings},

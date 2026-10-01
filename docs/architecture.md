@@ -14,7 +14,7 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
                ▼                                  ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │ application                                                      │
-│  agent（実行ループ）  ports（トレイト）  registry  profile  input │
+│  agent（実行ループ）  ports（トレイト）  registry  settings input │
 └──────────────────────────────┬───────────────────────────────────┘
                                ▼
 ┌──────────────────────────────────────────────────────────────────┐
@@ -43,6 +43,7 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 - **tool の定義。** 実行できる条件（`ToolDefinition::available_when`）、1回の呼び出しの期限（`with_deadline`）、引数が指す対象に作用するか（`targeted`。繰り返しの判定に使う）を、tool を登録する側が定義に持たせます。実行ループは tool の名前で分岐しません。
 - **拡張（`AgentExtension`）。** レジストリではなく拡張が処理するランタイム tool と、登録済みの tool の呼び出しの前に入る規則です。ランタイム tool は `ExtensionCall::run_subagent` でサブエージェントを起動できます。`review_changes` と `git_commit_push` のレビュー照合は、ハーネスの `ReviewGate` が拡張として加えます。
 - **サブエージェントのロール。** `SubagentModels` はロール名（`delegate`、ハーネスの `review` など）ごとのモデルを持ちます。
+- **instructions と設定。** 実行ループの `AgentSettings` は、ループ自身の tool（`task_plan`・`tool_search`・`delegate_task`）だけを前提にした既定の instructions を持ちます。`config.toml` の `[agent]` はハーネスの `AgentConfig` が受け、instructions を書かなければ workspace・git・web の tool の使い方を含むハーネスの既定（`DEFAULT_INSTRUCTIONS`）を使います。AGENTS.md とスキルの一覧もハーネスが instructions に加えます。
 
 | ポート | 役割 | 実装 |
 | --- | --- | --- |
@@ -88,12 +89,14 @@ src/
 │   │   ├── events.rs       AgentEvent と逐次通知
 │   │   └── response.rs     Responses API 出力の解析
 │   ├── registry.rs         ローカル tool の登録と実行
-│   ├── profile.rs          実行環境から1回の実行設定を解決
-│   ├── settings.rs         AgentSettings
+│   ├── settings.rs         実行ループの設定（AgentSettings）と、特定の tool を前提としない既定の instructions
 │   ├── approval.rs         非対話の承認ポリシー
 │   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── harness/
+│   ├── settings.rs         config.toml の [agent]（実行ループの設定と、AGENTS.md・承認・接続先・ロールの設定）
+│   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、AGENTS.md・スキル一覧の追記
+│   ├── profile.rs          実行環境から1回の実行設定を解決（ExecutionProfile）
 │   ├── names.rs            規則が参照する組み込み tool の名前
 │   └── review.rs           review_changes と git_commit_push のレビュー照合（ReviewGate）
 ├── infrastructure/

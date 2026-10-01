@@ -1,6 +1,6 @@
 //! Project instruction files such as `AGENTS.md` in the workspace root.
 
-use crate::application::settings::MAX_PROJECT_INSTRUCTIONS_BYTES;
+use crate::harness::instructions::MAX_PROJECT_INSTRUCTIONS_BYTES;
 use anyhow::{bail, Context, Result};
 use std::{io::ErrorKind, path::Path};
 

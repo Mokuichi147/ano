@@ -18,11 +18,9 @@ pub use edit::{
 pub use selection::{ModelRequest, ModelSelection, PresetSettings, DEFAULT_PRESET};
 
 use crate::{
-    application::{
-        profile::ExecutionProfile,
-        settings::{validate_reasoning_effort, AgentSettings},
-    },
+    application::settings::validate_reasoning_effort,
     domain::{environment::EnvironmentConfig, mcp::McpServerConfig, policy::UserPolicy},
+    harness::{profile::ExecutionProfile, settings::AgentConfig},
     infrastructure::{
         chronotope::HistorySettings,
         openai::{ApiSettings, ProviderSettings},
@@ -47,7 +45,7 @@ pub struct AppConfig {
     /// 接続先・モデル・推論の強さの名前付きの組。`--preset`・environment の
     /// `preset`・`ano chat` の `/preset`・`[agent.roles]` で選ぶ。
     pub presets: BTreeMap<String, PresetSettings>,
-    pub agent: AgentSettings,
+    pub agent: AgentConfig,
     pub mcp_servers: Vec<McpServerConfig>,
     pub users: HashMap<String, UserPolicy>,
     pub environments: HashMap<String, EnvironmentConfig>,
@@ -298,7 +296,7 @@ impl AppConfig {
     pub fn provider_model(&self, name: &str) -> Option<&str> {
         match self.providers.get(name) {
             Some(provider) => provider.model.as_deref(),
-            None => Some(&self.agent.model),
+            None => Some(&self.agent.settings.model),
         }
     }
 

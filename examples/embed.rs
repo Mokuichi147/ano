@@ -8,6 +8,7 @@
 use ano::{
     register_builtin_tools, Agent, AgentSettings, DenyApproval, InputPart, McpGateway, McpPool,
     OpenAiClient, ReviewGate, RunRequest, ToolContext, ToolDefinition, ToolRegistry, UserPolicy,
+    DEFAULT_INSTRUCTIONS,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -59,7 +60,11 @@ async fn main() -> Result<()> {
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
     let agent = Agent::new(
         OpenAiClient::from_env()?,
-        AgentSettings::default(),
+        // The instructions of the built-in tools, as `ano` uses by default.
+        AgentSettings {
+            instructions: DEFAULT_INSTRUCTIONS.to_string(),
+            ..AgentSettings::default()
+        },
         Arc::clone(&mcp),
         registry,
         UserPolicy::default(),

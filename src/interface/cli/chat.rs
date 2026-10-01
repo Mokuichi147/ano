@@ -469,7 +469,6 @@ fn switch_model(
     store.switch_model(&next.choice, models.main.client.base_url())?;
     agent.replace_model(
         models.main,
-        next.approval_model.clone(),
         approval.build(models.approval),
         models.subagents,
     );

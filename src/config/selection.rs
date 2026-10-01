@@ -103,7 +103,6 @@ impl ModelSelection {
         settings
             .reasoning_effort
             .clone_from(&self.choice.reasoning_effort);
-        settings.approval_model.clone_from(&self.approval_model);
     }
 
     /// `model on provider`, with the effort when one is set.
@@ -206,7 +205,7 @@ impl AppConfig {
                     .clone()
                     .unwrap_or_else(|| API_PROVIDER.into()),
             ),
-            reasoning_effort: self.agent.reasoning_effort.clone(),
+            reasoning_effort: self.agent.settings.reasoning_effort.clone(),
             ..ModelRequest::default()
         };
         let default = ModelRequest::preset(
@@ -217,7 +216,7 @@ impl AppConfig {
                 .unwrap_or(DEFAULT_PRESET),
         );
         let mut provider = API_PROVIDER.to_string();
-        let mut model = self.agent.model.clone();
+        let mut model = self.agent.settings.model.clone();
         let mut reasoning_effort = None;
         let mut approval_model = self.agent.approval_model.clone();
         for request in [&base, &default].into_iter().chain(requests) {

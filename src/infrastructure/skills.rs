@@ -7,12 +7,13 @@
 //! see each other's skills.
 
 use crate::{
-    application::{profile::ExecutionProfile, registry::ToolRegistry},
+    application::registry::ToolRegistry,
     domain::{
         approval::ApprovalMode,
         skill::{validate_skill_name, Skill, SKILL_READ_NAME, SKILL_SAVE_NAME},
         tool::ToolDefinition,
     },
+    harness::{instructions::append_skills, profile::ExecutionProfile},
     infrastructure::fs::atomic_write,
 };
 use anyhow::{bail, Context, Result};
@@ -187,7 +188,11 @@ impl SkillLibrary {
         }
         let can_save = available(SKILL_SAVE_NAME) && profile.approval_mode != ApprovalMode::Deny;
         let listing = self.list(&profile.context.user_id)?;
-        profile.settings.append_skills(&listing.skills, can_save);
+        append_skills(
+            &mut profile.settings.instructions,
+            &listing.skills,
+            can_save,
+        );
         Ok(listing.problems)
     }
 
@@ -455,6 +460,7 @@ mod tests {
         library.save("default", &skill("release-build")).unwrap();
         let profile = |policy: UserPolicy, approval_mode| ExecutionProfile {
             settings: Default::default(),
+            project_instructions: Vec::new(),
             policy,
             context: ToolContext {
                 user_id: "default".into(),

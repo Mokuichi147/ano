@@ -8,7 +8,6 @@ use crate::{
         approval::DenyApproval,
         input::InputPart,
         ports::{ApprovalHandler, McpGateway},
-        profile::{approval_handler, ExecutionProfile},
         registry::ToolRegistry,
     },
     config::{AppConfig, ModelRequest, ModelSelection},
@@ -18,7 +17,10 @@ use crate::{
         session::{ModelChoice, SessionBinding},
         tool::ToolContext,
     },
-    harness::review::ReviewGate,
+    harness::{
+        profile::{approval_handler, ExecutionProfile},
+        review::ReviewGate,
+    },
     infrastructure::{
         chronotope::Chronotope, mcp::McpPool, project::read_project_instructions,
         session_store::Session, skills::SkillLibrary,
@@ -318,7 +320,8 @@ fn resolve_run_context(
     let mut profile = match &args.environment {
         Some(name) => config.execution_profile(user_id, name, &args.disabled_tools)?,
         None => ExecutionProfile {
-            settings: config.agent.clone(),
+            settings: config.agent.settings.clone(),
+            project_instructions: config.agent.project_instructions.clone(),
             policy: config.policy_for(user_id, &args.disabled_tools),
             context: ToolContext {
                 user_id: user_id.to_string(),
@@ -403,8 +406,8 @@ fn resolve_run_context(
         })
         .transpose()?;
     if let Some(workspace) = &profile.context.workspace {
-        let sources = read_project_instructions(workspace, &profile.settings.project_instructions)?;
-        profile.settings.append_project_instructions(&sources);
+        let sources = read_project_instructions(workspace, &profile.project_instructions)?;
+        profile.append_project_instructions(&sources);
     }
     Ok(RunContext {
         profile,
@@ -453,6 +456,7 @@ mod tests {
             policy,
             context,
             approval_mode,
+            ..
         } = resolve_run_context(&config, "default", &args.agent)
             .unwrap()
             .profile;

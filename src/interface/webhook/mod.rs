@@ -15,12 +15,11 @@ use crate::{
         approval::DenyApproval,
         input::InputPart,
         ports::{McpGateway, ResponsesApi},
-        profile::approval_handler,
         registry::ToolRegistry,
     },
     config::AppConfig,
     domain::plan::{RunOutcome, TaskGoal},
-    harness::review::ReviewGate,
+    harness::{profile::approval_handler, review::ReviewGate},
     infrastructure::{
         chronotope::Chronotope, project::read_project_instructions, skills::SkillLibrary,
     },
@@ -497,12 +496,12 @@ async fn execute_job(
     let models = RunModels::resolve(&state.config, &base, &selection, &mut connections)?;
     let client = Arc::clone(&models.main.client);
     if let Some(workspace) = profile.context.workspace.clone() {
-        let names = profile.settings.project_instructions.clone();
+        let names = profile.project_instructions.clone();
         let sources =
             tokio::task::spawn_blocking(move || read_project_instructions(&workspace, &names))
                 .await
                 .context("project instructions task failed")??;
-        profile.settings.append_project_instructions(&sources);
+        profile.append_project_instructions(&sources);
     }
     if let Some(skills) = state.skills.clone() {
         profile = tokio::task::spawn_blocking(move || {

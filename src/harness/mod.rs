@@ -3,5 +3,8 @@
 //! rules refer to and adds the runtime tools and rules of that work to the
 //! agent through `AgentExtension`.
 
+pub mod instructions;
 pub mod names;
+pub mod profile;
 pub mod review;
+pub mod settings;

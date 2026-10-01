@@ -276,7 +276,7 @@ fn saving_mcp_tool_filters_needs_the_server_in_the_file() {
 fn default_config_is_valid() {
     let config = AppConfig::default();
     config.validate().unwrap();
-    assert_eq!(config.agent.max_tool_rounds, 100);
+    assert_eq!(config.agent.settings.max_tool_rounds, 100);
 }
 
 #[test]
