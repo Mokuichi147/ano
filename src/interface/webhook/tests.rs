@@ -12,6 +12,7 @@ use crate::{
         plan::{RunOutcome, TaskPlan},
         usage::{StopReason, UsageSummary},
     },
+    harness::Harness,
     infrastructure::{mcp::McpPool, openai::OpenAiClient},
 };
 use axum::{
@@ -52,12 +53,14 @@ fn state() -> WebhookState {
         .environments
         .insert("default".into(), Default::default());
     WebhookState {
-        skills: None,
-        history: None,
+        harness: Harness {
+            registry: ToolRegistry::new(),
+            history: None,
+            skills: None,
+        },
         config,
         client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:1234/v1")),
         connections: Default::default(),
-        registry: ToolRegistry::new(),
         mcp: Arc::new(McpPool::new(Vec::new())),
         jobs: RwLock::new(HashMap::new()),
         job_slots: Arc::new(Semaphore::new(1)),
@@ -350,6 +353,7 @@ async fn tool_panic_finishes_job_and_next_job_can_run() {
     let mut state = state();
     state.client = Arc::new(client);
     state
+        .harness
         .registry
         .register(
             crate::ToolDefinition::new(

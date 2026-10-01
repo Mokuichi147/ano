@@ -220,6 +220,9 @@ pub trait HistoryBackend: Send + Sync {
         store: &'a mut dyn ConversationStore,
     ) -> Result<Box<dyn ConversationStore + 'a>>;
     async fn sync(&self, user_id: &str) -> Result<Value>;
+    /// 実行やコマンドが記録した原文を送る。失敗しても記録はローカルに残る
+    /// ため、実行は止めず、利用者への通知は実装が行う。
+    async fn sync_recorded(&self, user_id: &str);
 }
 
 /// What an approval request is for.

@@ -1,20 +1,23 @@
 //! An autonomous agent backed by the OpenAI Responses API.
 //!
-//! The crate follows a layered (clean) architecture. Dependencies point
-//! inward only:
+//! The crate separates a general agent from the harness that puts it to
+//! work in a workspace, in a layered (clean) architecture. Dependencies
+//! point inward only:
 //!
 //! ```text
-//! interface ─┐
-//!            ├─> application ─> domain
-//! infrastructure ┘
+//! interface ─> harness ─┬─> config ─────────┐
+//!                       └─> infrastructure ─┴─> application ─> domain
 //! ```
 //!
 //! - [`domain`]: plans, token usage, tool policies, conversation state.
-//! - [`application`]: the agent run loop and its ports (traits).
+//! - [`application`]: the agent: its run loop, which knows no particular
+//!   tools, its extension points, and its ports (traits).
 //! - [`infrastructure`]: OpenAI HTTP client, MCP connections, session files,
 //!   built-in tools.
-//! - [`interface`]: the CLI (also the binary's composition root) and the
-//!   webhook server.
+//! - [`harness`]: the agent at work in a workspace: its settings and
+//!   instructions, the review gate, approval modes, and the assembly of
+//!   agents from the config file.
+//! - [`interface`]: the CLI and the webhook server.
 //! - [`config`]: the configuration file, combining every layer's settings.
 //!
 //! The most common types are re-exported at the crate root.
@@ -55,11 +58,13 @@ pub use domain::{
     usage::{ApiOperation, StopReason, UsageSummary},
 };
 pub use harness::{
+    approval::ApprovalFactory,
     instructions::DEFAULT_INSTRUCTIONS,
     names::{REVIEW_CHANGES_NAME, WORKSPACE_EXEC_NAME},
     profile::ExecutionProfile,
     review::{ReviewGate, REVIEW_ROLE},
     settings::{AgentConfig, ModelRoles},
+    Harness,
 };
 pub use infrastructure::{
     chronotope::{Chronotope, HistorySettings},

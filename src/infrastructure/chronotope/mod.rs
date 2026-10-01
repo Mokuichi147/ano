@@ -306,6 +306,12 @@ impl HistoryBackend for Chronotope {
         Ok(Box::new(journal::RecordedConversation::open(root, store)?))
     }
 
+    async fn sync_recorded(&self, user: &str) {
+        if let Err(error) = self.sync(user).await {
+            eprintln!("履歴の同期に失敗しました。原文はローカルに保持されています。ano history sync で再送できます: {error:#}");
+        }
+    }
+
     async fn sync(&self, user: &str) -> Result<Value> {
         let root = self.owner_dir(user)?;
         private_dir(&root)?;

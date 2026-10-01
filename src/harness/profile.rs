@@ -2,19 +2,12 @@
 
 use super::{instructions::append_project_instructions, settings::AgentConfig};
 use crate::{
-    application::{
-        agent::ModelTarget,
-        approval::{AlwaysApprove, DenyApproval},
-        auto_approval::AutoApproval,
-        ports::ApprovalHandler,
-        settings::AgentSettings,
-    },
+    application::settings::AgentSettings,
     domain::{
         approval::ApprovalMode, environment::EnvironmentConfig, policy::UserPolicy,
         tool::ToolContext,
     },
 };
-use std::sync::Arc;
 
 /// Everything a run takes from configuration: model settings, the effective
 /// tool policy, and the context passed to tools.
@@ -70,23 +63,5 @@ impl ExecutionProfile {
     /// `read_project_instructions` returns them.
     pub fn append_project_instructions(&mut self, sources: &[(String, String)]) {
         append_project_instructions(&mut self.settings.instructions, sources);
-    }
-}
-
-/// The approval handler for `mode`. `auto` reviews with `reviewer` and
-/// passes uncertain calls to `ask_user`.
-pub fn approval_handler(
-    mode: ApprovalMode,
-    reviewer: ModelTarget,
-    ask_user: Arc<dyn ApprovalHandler>,
-) -> Arc<dyn ApprovalHandler> {
-    match mode {
-        ApprovalMode::Allow => Arc::new(AlwaysApprove),
-        ApprovalMode::Deny => Arc::new(DenyApproval),
-        ApprovalMode::Ask => ask_user,
-        ApprovalMode::Auto => Arc::new(
-            AutoApproval::new(reviewer.client, reviewer.model, ask_user)
-                .with_reasoning_effort(reviewer.reasoning_effort),
-        ),
     }
 }

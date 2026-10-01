@@ -4,11 +4,10 @@
 use super::{output, AgentOptions, InteractiveApproval, RunArgs};
 use crate::{
     application::{
-        agent::{Agent, ModelTarget, RunRequest},
+        agent::{Agent, RunRequest},
         approval::DenyApproval,
         input::InputPart,
         ports::{ApprovalHandler, McpGateway},
-        registry::ToolRegistry,
     },
     config::{AppConfig, ModelRequest, ModelSelection},
     domain::{
@@ -18,14 +17,12 @@ use crate::{
         tool::ToolContext,
     },
     harness::{
-        profile::{approval_handler, ExecutionProfile},
-        review::ReviewGate,
+        approval::ApprovalFactory,
+        models::{Connections, RunModels},
+        profile::ExecutionProfile,
+        Harness,
     },
-    infrastructure::{
-        chronotope::Chronotope, mcp::McpPool, project::read_project_instructions,
-        session_store::Session, skills::SkillLibrary,
-    },
-    interface::{Connections, RunModels},
+    infrastructure::{mcp::McpPool, session_store::Session},
 };
 use anyhow::{bail, Context, Result};
 use std::{
@@ -54,19 +51,6 @@ pub(super) struct PreparedAgent {
     pub(super) approval: ApprovalFactory,
 }
 
-/// What an approval handler is built from, so it can be rebuilt for another
-/// client when `ano chat` switches models.
-pub(super) struct ApprovalFactory {
-    pub(super) mode: ApprovalMode,
-    pub(super) ask_user: Arc<dyn ApprovalHandler>,
-}
-
-impl ApprovalFactory {
-    pub(super) fn build(&self, reviewer: ModelTarget) -> Arc<dyn ApprovalHandler> {
-        approval_handler(self.mode, reviewer, Arc::clone(&self.ask_user))
-    }
-}
-
 /// The resolved settings of a run before its adapters are created.
 struct RunContext {
     profile: ExecutionProfile,
@@ -83,7 +67,7 @@ pub(super) fn prepare_agent(
     config: &AppConfig,
     user_id: &str,
     options: &AgentOptions,
-    registry: ToolRegistry,
+    harness: &Harness,
     ask_user: Arc<dyn ApprovalHandler>,
     stdin_is_terminal: bool,
     stream: Option<output::TextFormat>,
@@ -94,14 +78,12 @@ pub(super) fn prepare_agent(
         base,
         explicit,
     } = resolve_run_context(config, user_id, options)?;
-    if let Some(skills) = SkillLibrary::from_settings(&config.skills, &registry)? {
-        for problem in skills.add_to_instructions(&mut profile)? {
-            eprintln!("warning: skipped skill {problem}");
-        }
+    for problem in harness.add_instructions(&mut profile)? {
+        eprintln!("warning: skipped skill {problem}");
     }
     let mut connections = Connections::default();
     let models = RunModels::resolve(config, &base, &selection, &mut connections)?;
-    let client = Arc::clone(&models.main.client);
+    let endpoint = models.main.client.base_url().to_string();
     let ask_user: Arc<dyn ApprovalHandler> = if stdin_is_terminal {
         ask_user
     } else {
@@ -120,14 +102,7 @@ pub(super) fn prepare_agent(
         mode: profile.approval_mode,
         ask_user,
     };
-    let approval_handler = approval.build(models.approval);
-    let ExecutionProfile {
-        settings,
-        policy,
-        context,
-        ..
-    } = profile;
-    let binding = SessionBinding::new(&context, client.base_url())?;
+    let binding = SessionBinding::new(&profile.context, &endpoint)?;
     let session = options
         .session
         .as_ref()
@@ -141,21 +116,7 @@ pub(super) fn prepare_agent(
         })
         .transpose()?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
-    let history = Chronotope::from_settings(&config.history, &registry)?;
-    let mut agent = Agent::new(
-        client,
-        settings,
-        Arc::clone(&mcp),
-        registry,
-        policy,
-        approval_handler,
-    )
-    .with_context_window(models.main.context_window)
-    .with_subagent_models(models.subagents)
-    .with_extension(Arc::new(ReviewGate::new()));
-    if let Some(history) = history {
-        agent = agent.with_history(history);
-    }
+    let mut agent = harness.agent(&profile, models, Arc::clone(&mcp), &approval);
     let answer = stream.map(|format| Arc::new(output::AnswerStream::new(format, !options.quiet)));
     if !options.quiet {
         let verbose = options.verbose;
@@ -173,7 +134,7 @@ pub(super) fn prepare_agent(
     }
     Ok(PreparedAgent {
         agent,
-        context,
+        context: profile.context,
         binding,
         session,
         mcp,
@@ -226,7 +187,7 @@ pub(super) async fn run_agent(
     config: AppConfig,
     user_id: String,
     args: RunArgs,
-    registry: ToolRegistry,
+    harness: Harness,
 ) -> Result<()> {
     let stdin_is_terminal = std::io::stdin().is_terminal();
     // Validate options that need no network before reading a piped prompt.
@@ -262,7 +223,7 @@ pub(super) async fn run_agent(
         &config,
         &user_id,
         &args.agent,
-        registry,
+        &harness,
         Arc::new(InteractiveApproval),
         stdin_is_terminal,
         // Show the answer while it is generated, unless it goes to a pipe or
@@ -405,10 +366,6 @@ fn resolve_run_context(
             Ok(canonical)
         })
         .transpose()?;
-    if let Some(workspace) = &profile.context.workspace {
-        let sources = read_project_instructions(workspace, &profile.project_instructions)?;
-        profile.append_project_instructions(&sources);
-    }
     Ok(RunContext {
         profile,
         selection,

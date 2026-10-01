@@ -10,7 +10,7 @@
 use super::{
     output::{self, ProgressHold},
     provider::{endpoint, KnownModels},
-    run::{prepare_agent, ApprovalFactory, PreparedAgent},
+    run::{prepare_agent, PreparedAgent},
     AgentOptions,
 };
 use crate::{
@@ -18,7 +18,6 @@ use crate::{
         agent::{Agent, RunRequest},
         input::InputPart,
         ports::{ApprovalHandler, ConversationStore, McpApprovalRequest},
-        registry::ToolRegistry,
     },
     config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PRESET},
     domain::{
@@ -26,8 +25,12 @@ use crate::{
         session::SessionStatus,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
     },
+    harness::{
+        approval::ApprovalFactory,
+        models::{Connections, RunModels},
+        Harness,
+    },
     infrastructure::memory_store::MemoryConversation,
-    interface::{Connections, RunModels},
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -171,7 +174,7 @@ pub(super) async fn run(
     config: AppConfig,
     user_id: String,
     options: AgentOptions,
-    registry: ToolRegistry,
+    harness: Harness,
 ) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
     let lines = LineReader::spawn(interactive);
@@ -190,7 +193,7 @@ pub(super) async fn run(
         &config,
         &user_id,
         &options,
-        registry,
+        &harness,
         Arc::new(ChatApproval {
             lines: Arc::clone(&lines),
         }),
@@ -617,8 +620,8 @@ mod tests {
         },
         config::{AppConfig, ModelRequest},
         domain::{approval::ApprovalMode, policy::UserPolicy, session::SessionBinding},
+        harness::approval::ApprovalFactory,
         infrastructure::{mcp::McpPool, memory_store::MemoryConversation, openai::OpenAiClient},
-        interface::cli::run::ApprovalFactory,
     };
     use serde_json::json;
     use std::sync::Arc;

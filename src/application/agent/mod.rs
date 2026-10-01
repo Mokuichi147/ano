@@ -547,9 +547,7 @@ impl Agent {
 
     async fn sync_history(&self, user: &str) {
         if let Some(history) = &self.history {
-            if let Err(error) = history.sync(user).await {
-                eprintln!("履歴の同期に失敗しました。原文はローカルに保持されています。ano history sync で再送できます: {error:#}");
-            }
+            history.sync_recorded(user).await;
         }
     }
 

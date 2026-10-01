@@ -11,19 +11,18 @@ pub use settings::WebhookSettings;
 
 use crate::{
     application::{
-        agent::{Agent, AgentResult, RunRequest},
+        agent::{AgentResult, RunRequest},
         approval::DenyApproval,
         input::InputPart,
         ports::{McpGateway, ResponsesApi},
-        registry::ToolRegistry,
     },
     config::AppConfig,
     domain::plan::{RunOutcome, TaskGoal},
-    harness::{profile::approval_handler, review::ReviewGate},
-    infrastructure::{
-        chronotope::Chronotope, project::read_project_instructions, skills::SkillLibrary,
+    harness::{
+        approval::ApprovalFactory,
+        models::{Connections, RunModels},
+        Harness,
     },
-    interface::{Connections, RunModels},
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -95,14 +94,13 @@ fn default_environment() -> String {
 }
 
 struct WebhookState {
-    history: Option<Arc<Chronotope>>,
-    skills: Option<Arc<SkillLibrary>>,
+    /// The tools and stores every job's agent shares.
+    harness: Harness,
     config: AppConfig,
     /// The client of the default provider (`AppConfig::default_provider`).
     client: Arc<dyn ResponsesApi>,
     /// Clients of the other providers that environments and roles use.
     connections: Connections,
-    registry: ToolRegistry,
     /// MCP connections shared by every job.
     mcp: Arc<dyn McpGateway>,
     jobs: RwLock<HashMap<String, JobRecord>>,
@@ -126,7 +124,7 @@ pub async fn serve(
     config: AppConfig,
     client: impl ResponsesApi + 'static,
     mcp: Arc<dyn McpGateway>,
-    registry: ToolRegistry,
+    harness: Harness,
 ) -> Result<()> {
     config.validate()?;
     let webhook = config.webhook.clone();
@@ -171,17 +169,13 @@ pub async fn serve(
         RunModels::resolve(&config, &base, &selection, &mut connections)
             .with_context(|| format!("failed to connect the providers of environment '{name}'"))?;
     }
-    let history = Chronotope::from_settings(&config.history, &registry)?;
-    let skills = SkillLibrary::from_settings(&config.skills, &registry)?;
     let state = Arc::new(WebhookState {
-        history,
-        skills,
+        harness,
         job_slots: Arc::new(Semaphore::new(webhook.max_concurrent_jobs)),
         mcp,
         config,
         client,
         connections,
-        registry,
         jobs: RwLock::new(HashMap::new()),
         shutdown: watch::channel(false).0,
         tasks: Mutex::new(JoinSet::new()),
@@ -494,50 +488,28 @@ async fn execute_job(
     // The default provider's client, which `serve` was given.
     connections.insert(state.config.default_provider(), Arc::clone(&state.client));
     let models = RunModels::resolve(&state.config, &base, &selection, &mut connections)?;
-    let client = Arc::clone(&models.main.client);
-    if let Some(workspace) = profile.context.workspace.clone() {
-        let names = profile.project_instructions.clone();
-        let sources =
-            tokio::task::spawn_blocking(move || read_project_instructions(&workspace, &names))
-                .await
-                .context("project instructions task failed")??;
-        profile.append_project_instructions(&sources);
-    }
-    if let Some(skills) = state.skills.clone() {
-        profile = tokio::task::spawn_blocking(move || {
-            // Broken skill files are left out; they must not fail the job.
-            skills.add_to_instructions(&mut profile).map(|_| profile)
-        })
-        .await
-        .context("skills task failed")??;
-    }
+    let harness = state.harness.clone();
+    let profile = tokio::task::spawn_blocking(move || {
+        // Broken skill files are left out; they must not fail the job.
+        harness.add_instructions(&mut profile).map(|_| profile)
+    })
+    .await
+    .context("instructions task failed")??;
     // A webhook has nobody to ask: requests that would go to the user, and
     // those automatic review does not clearly allow, are denied.
-    let approval = approval_handler(
-        profile.approval_mode,
-        models.approval,
-        Arc::new(DenyApproval),
-    );
-    let mut agent = Agent::new(
-        client,
-        profile.settings,
-        Arc::clone(&state.mcp),
-        state.registry.clone(),
-        profile.policy,
-        approval,
-    )
-    .with_context_window(models.main.context_window)
-    .with_subagent_models(models.subagents)
-    .with_extension(Arc::new(ReviewGate::new()))
-    .with_event_listener(Arc::new(move |event| {
-        progress
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .record(event)
-    }));
-    if let Some(history) = &state.history {
-        agent = agent.with_history(history.clone());
-    }
+    let approval = ApprovalFactory {
+        mode: profile.approval_mode,
+        ask_user: Arc::new(DenyApproval),
+    };
+    let agent = state
+        .harness
+        .agent(&profile, models, Arc::clone(&state.mcp), &approval)
+        .with_event_listener(Arc::new(move |event| {
+            progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .record(event)
+        }));
     let mut input = vec![InputPart::Text(request.task)];
     input.extend(
         request

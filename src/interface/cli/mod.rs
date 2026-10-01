@@ -19,14 +19,12 @@ mod tools;
 pub use approval::InteractiveApproval;
 
 use crate::{
-    application::{ports::McpGateway, registry::ToolRegistry},
+    application::ports::McpGateway,
     config::AppConfig,
     domain::approval::ApprovalMode,
-    infrastructure::{
-        chronotope::Chronotope, mcp::McpPool, session_store::Session, skills::SkillLibrary,
-        tools::register_builtin_tools,
-    },
-    interface::{connect_provider, webhook},
+    harness::{models::connect_provider, Harness},
+    infrastructure::{mcp::McpPool, session_store::Session},
+    interface::webhook,
 };
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
@@ -297,14 +295,9 @@ pub async fn run() -> Result<()> {
             cli.user
         );
     }
-    let registry = ToolRegistry::new();
-    register_builtin_tools(&registry)?;
-    // `run`, `chat`, and `serve` register the history tools with the client
-    // they record through; other commands must work without its token.
-    if matches!(cli.command, Command::Tools(_)) {
-        Chronotope::from_settings(&config.history, &registry)?;
-        SkillLibrary::from_settings(&config.skills, &registry)?;
-    }
+    // Only the commands that run or list the agent's tools set up the raw
+    // history; the others must work without its token.
+    let harness = || Harness::new(&config);
 
     match cli.command {
         Command::Auth(args) => auth::run(&config.api, args).await,
@@ -330,10 +323,19 @@ pub async fn run() -> Result<()> {
             }
             Ok(())
         }
-        Command::Tools(args) => tools::list_tools(&config, &cli.user, &args, &registry),
-        Command::Run(args) => run::run_agent(config, cli.user, args, registry).await,
-        Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
-        Command::Serve(args) => serve(config, args, registry).await,
+        Command::Tools(args) => tools::list_tools(&config, &cli.user, &args, &harness()?.registry),
+        Command::Run(args) => {
+            let harness = harness()?;
+            run::run_agent(config, cli.user, args, harness).await
+        }
+        Command::Chat(args) => {
+            let harness = harness()?;
+            chat::run(config, cli.user, args.agent, harness).await
+        }
+        Command::Serve(args) => {
+            let harness = harness()?;
+            serve(config, args, harness).await
+        }
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
         Command::Provider(args) => provider::run(&config, &config_path, args).await,
         Command::Preset(args) => preset::run(&config, &config_path, args).await,
@@ -343,7 +345,7 @@ pub async fn run() -> Result<()> {
     }
 }
 
-async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -> Result<()> {
+async fn serve(mut config: AppConfig, args: ServeArgs, harness: Harness) -> Result<()> {
     if let Some(bind) = args.bind {
         config.webhook.bind = bind;
     }
@@ -355,7 +357,7 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
     }
     let client = connect_provider(&config, config.default_provider())?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
-    let served = webhook::serve(config, client, Arc::clone(&mcp), registry).await;
+    let served = webhook::serve(config, client, Arc::clone(&mcp), harness).await;
     // Close MCP connections after jobs have stopped, even on failure.
     mcp.shutdown().await;
     served
