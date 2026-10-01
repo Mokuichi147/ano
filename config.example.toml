@@ -243,6 +243,17 @@ allow_writes = false
 # name = "ask_question"
 # description = "Ask a question against the documentation corpus"
 
+# You can embed an environment variable into a URL: `${VAR}` or `$VAR` is
+# replaced with that variable's value when the config is loaded, so a single
+# file can point at different hosts per machine or profile. A literal `$$`
+# becomes one `$`, and a reference whose variable is missing (or empty) fails
+# loudly instead of silently pointing at an empty endpoint.
+#   export ANNICT_MCP_BASE="https://annict-mcp-server.example.com"
+# [[mcp_servers]]
+# label = "annict"
+# transport = "streamable_http"
+# url = "${ANNICT_MCP_BASE}/mcp"
+
 # For a private MCP server connected through Secure MCP Tunnel, use tunnel_id
 # instead of url.
 # [[mcp_servers]]

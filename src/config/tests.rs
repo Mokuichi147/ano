@@ -1,7 +1,7 @@
 use super::{
     edit::{with_mcp_tool_filters, with_provider_changes, with_provider_renamed},
-    expand_home, remove_provider, save_mcp_tool_filters, update_provider, AppConfig, ModelRequest,
-    SettingValue,
+    expand_environment_variables, expand_home, remove_provider, save_mcp_tool_filters,
+    update_provider, AppConfig, ModelRequest, SettingValue,
 };
 use std::path::Path;
 
@@ -318,6 +318,83 @@ fn oauth_requires_streamable_http_without_a_static_token() {
         "[[mcp_servers]]\nlabel = 'a'\nurl = 'https://x.test/mcp'\noauth = true".into(),
     ] {
         assert!(AppConfig::parse(&text).is_err(), "accepted {text}");
+    }
+}
+
+#[test]
+fn expands_environment_variables_in_url_text() {
+    use std::collections::HashMap;
+    let mut env = HashMap::new();
+    env.insert("HOST".to_string(), "example.test".to_string());
+    env.insert("PATH_VAR".to_string(), "/mcp".to_string());
+    let get_env = |name: &str| env.get(name).cloned();
+
+    assert_eq!(
+        expand_environment_variables("${HOST}${PATH_VAR}", &get_env).unwrap(),
+        "example.test/mcp"
+    );
+    assert_eq!(expand_environment_variables("$HOST$/a", &get_env).unwrap(), "example.test$/a");
+
+    let plain = "https://host/path?a=b&c=d";
+    assert_eq!(expand_environment_variables(plain, &get_env).unwrap(), plain);
+    assert_eq!(
+        expand_environment_variables("keep ${not id} and unclosed ${HOST", &get_env).unwrap(),
+        "keep ${not id} and unclosed ${HOST"
+    );
+    assert_eq!(expand_environment_variables("${HOST.NAME}", &get_env).unwrap(), "${HOST.NAME}");
+    assert_eq!(expand_environment_variables("$1", &get_env).unwrap(), "$1");
+    assert_eq!(expand_environment_variables("$$", &get_env).unwrap(), "$");
+    assert_eq!(expand_environment_variables("$${HOST}", &get_env).unwrap(), "${HOST}");
+    assert_eq!(expand_environment_variables("$", &get_env).unwrap(), "$");
+}
+
+#[test]
+fn missing_or_empty_variable_is_an_error() {
+    let mut env = std::collections::HashMap::<String, String>::new();
+    env.insert("EMPTY".to_string(), String::new());
+    let get_env = |name: &str| env.get(name).cloned();
+    assert!(expand_environment_variables("${MISSING}", &get_env).is_err());
+    assert!(expand_environment_variables("${EMPTY}", &get_env).is_err());
+}
+
+#[test]
+fn an_absent_variable_makes_the_config_url_an_error() {
+    let name = "ANO_ENV_EXPAND_MISSING_VAR";
+    let saved = std::env::var(name).ok();
+    std::env::remove_var(name);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!("[[mcp_servers]]\nlabel = 'annict'\ntransport = 'streamable_http'\nurl = \"${{{name}}}/mcp\"\n"),
+    )
+    .unwrap();
+    let error = AppConfig::load(&path).unwrap_err();
+    let details = format!("{error:#}");
+    assert!(details.contains("annict"), "{details}");
+    assert!(details.contains(name), "{details}");
+    if let Some(value) = saved {
+        std::env::set_var(name, value);
+    }
+}
+
+#[test]
+fn the_process_environment_expands_the_config_url() {
+    let name = "ANO_ENV_EXPAND_HOST";
+    let saved = std::env::var(name).ok();
+    std::env::set_var(name, "https://annict.test");
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        format!("[[mcp_servers]]\nlabel = 'annict'\ntransport = 'streamable_http'\nurl = \"${{{name}}}/mcp\"\n"),
+    )
+    .unwrap();
+    let config = AppConfig::load(&path).unwrap();
+    assert_eq!(config.mcp_servers[0].url.as_deref(), Some("https://annict.test/mcp"));
+    match saved {
+        Some(value) => std::env::set_var(name, value),
+        None => std::env::remove_var(name),
     }
 }
 

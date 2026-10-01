@@ -68,6 +68,16 @@ impl AppConfig {
         let directory = absolute_path
             .parent()
             .context("config file has no parent directory")?;
+        for server in &mut config.mcp_servers {
+            let label = &server.label;
+            if let Some(url) = &mut server.url {
+                *url = expand_environment_variables(
+                    url.as_str(),
+                    |name| std::env::var(name).ok(),
+                )
+                .with_context(|| format!("invalid url of MCP server '{}'", label))?;
+            }
+        }
         config.resolve_paths(directory, std::env::home_dir().as_deref())?;
         Ok(config)
     }
@@ -373,4 +383,95 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
     }
     let home = home.context("cannot expand '~': the home directory is unknown")?;
     Ok(Some(home.join(components.as_path())))
+}
+
+/// Replace environment-variable references in `text` with each variable's
+/// value, using `get_env` to look them up. `${VAR}` and `$VAR` are expanded
+/// when their name is a valid identifier; a literal `$$` becomes one `$`. A
+/// reference whose variable is unset or set to an empty string is an error, so
+/// an omitted setting never silently yields an empty endpoint. Anything that is
+/// not a clean `${IDENTIFIER}` (unclosed brace, dots, spaces) is left untouched.
+pub fn expand_environment_variables(
+    text: &str,
+    get_env: impl Fn(&str) -> Option<String>,
+) -> Result<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '$' => match chars.peek() {
+                None => out.push('$'),
+                Some(&'$') => {
+                    out.push('$');
+                    chars.next();
+                }
+                Some(&'{') => {
+                    chars.next();
+                    let mut name = String::new();
+                    let mut terminated = false;
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch == '}' {
+                            terminated = true;
+                            break;
+                        }
+                        name.push(ch);
+                    }
+                    if terminated && is_valid_var_name(&name) {
+                        out.push_str(&lookup_env_variable(&name, &get_env)?);
+                    } else {
+                        // Not a clean reference: keep the whole `${...}` (or an
+                        // unterminated `${`) as literal text.
+                        out.push_str("${");
+                        out.push_str(&name);
+                        if terminated {
+                            out.push('}');
+                        }
+                    }
+                }
+                Some(&first) if is_var_start(first) => {
+                    let mut name = String::new();
+                    while let Some(&ch) = chars.peek() {
+                        if is_var_part(ch) {
+                            chars.next();
+                            name.push(ch);
+                        } else {
+                            break;
+                        }
+                    }
+                    out.push_str(&lookup_env_variable(&name, &get_env)?);
+                }
+                _ => out.push('$'),
+            },
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
+fn lookup_env_variable<F>(name: &str, get_env: &F) -> Result<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match get_env(name) {
+        Some(value) if !value.is_empty() => Ok(value),
+        Some(_) => bail!("environment variable '{name}' is set but empty"),
+        None => bail!("environment variable '{name}' is not set; the URL was not expanded"),
+    }
+}
+
+fn is_var_start(c: char) -> bool {
+    c == '_' || c.is_ascii_alphabetic()
+}
+
+fn is_var_part(c: char) -> bool {
+    c == '_' || c.is_ascii_alphanumeric()
+}
+
+fn is_valid_var_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if is_var_start(c) => chars.all(is_var_part),
+        _ => false,
+    }
 }
