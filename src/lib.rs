@@ -22,13 +22,15 @@
 pub mod application;
 pub mod config;
 pub mod domain;
+pub mod harness;
 pub mod infrastructure;
 pub mod interface;
 
 pub use application::{
     agent::{
-        task_plan_definition, Agent, AgentEvent, AgentResult, EventListener, ModelTarget,
-        RunRequest, SubagentModels,
+        task_plan_definition, Agent, AgentEvent, AgentExtension, AgentResult, EventListener,
+        ExtensionCall, ModelTarget, RunInfo, RunRequest, SubagentModels, SubagentSpec,
+        DELEGATE_ROLE,
     },
     approval::{AlwaysApprove, DenyApproval},
     input::{build_user_input, InputPart},
@@ -50,11 +52,12 @@ pub use domain::{
     plan::{PlanStep, RunOutcome, StepStatus, TaskPlan, TASK_PLAN_NAME},
     policy::UserPolicy,
     session::{ModelChoice, SessionBinding, SessionData, SessionStatus},
-    tool::{
-        ToolContext, ToolDefinition, DELEGATE_TASK_NAME, REVIEW_CHANGES_NAME, TOOL_SEARCH_NAME,
-        WORKSPACE_EXEC_NAME,
-    },
+    tool::{ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
     usage::{ApiOperation, StopReason, UsageSummary},
+};
+pub use harness::{
+    names::{REVIEW_CHANGES_NAME, WORKSPACE_EXEC_NAME},
+    review::{ReviewGate, REVIEW_ROLE},
 };
 pub use infrastructure::{
     chronotope::{Chronotope, HistorySettings},

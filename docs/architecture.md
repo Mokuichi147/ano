@@ -36,6 +36,14 @@ ano はクリーンアーキテクチャに沿って4つの層に分かれてい
 
 `application` が外部と話す必要がある箇所は、すべて [`src/application/ports.rs`](../src/application/ports.rs) のトレイト経由です。
 
+## エージェントとハーネス
+
+実行ループ（`application::agent`）は、特定の tool を知らない汎用のエージェントです。モデルへの要求、tool 呼び出しの実行、履歴の圧縮、トークン上限、作業計画、`tool_search`、`delegate_task` を扱います。workspace で作業するための規則は、ハーネス（`harness`）が次の方法でエージェントに加えます。
+
+- **tool の定義。** 実行できる条件（`ToolDefinition::available_when`）、1回の呼び出しの期限（`with_deadline`）、引数が指す対象に作用するか（`targeted`。繰り返しの判定に使う）を、tool を登録する側が定義に持たせます。実行ループは tool の名前で分岐しません。
+- **拡張（`AgentExtension`）。** レジストリではなく拡張が処理するランタイム tool と、登録済みの tool の呼び出しの前に入る規則です。ランタイム tool は `ExtensionCall::run_subagent` でサブエージェントを起動できます。`review_changes` と `git_commit_push` のレビュー照合は、ハーネスの `ReviewGate` が拡張として加えます。
+- **サブエージェントのロール。** `SubagentModels` はロール名（`delegate`、ハーネスの `review` など）ごとのモデルを持ちます。
+
 | ポート | 役割 | 実装 |
 | --- | --- | --- |
 | `ResponsesApi` | `/responses`（ストリーミングを含む）と `/responses/compact` の呼び出し | `infrastructure::openai::OpenAiClient` |
@@ -73,7 +81,8 @@ src/
 │   ├── ports.rs            外部依存のトレイト
 │   ├── agent/
 │   │   ├── mod.rs          実行ループ（Agent::run / run_in_session）
-│   │   ├── dispatch.rs     function call・MCP 呼び出し・承認・サブエージェントとレビュー（review_changes）の実行
+│   │   ├── dispatch.rs     function call・MCP 呼び出し・承認・サブエージェント（delegate_task）と拡張の tool の実行
+│   │   ├── extension.rs    ハーネスが tool と規則を加える拡張点（AgentExtension）
 │   │   ├── discovery.rs    tool_search による遅延公開
 │   │   ├── mcp_runtime.rs  1回の実行で使う MCP 接続とポリシー適用
 │   │   ├── events.rs       AgentEvent と逐次通知
@@ -84,6 +93,9 @@ src/
 │   ├── approval.rs         非対話の承認ポリシー
 │   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
+├── harness/
+│   ├── names.rs            規則が参照する組み込み tool の名前
+│   └── review.rs           review_changes と git_commit_push のレビュー照合（ReviewGate）
 ├── infrastructure/
 │   ├── openai.rs           Responses API クライアント（リトライ・SSE ストリーミング）
 │   ├── mcp.rs              stdio / Streamable HTTP の MCP 接続プール

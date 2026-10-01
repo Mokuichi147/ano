@@ -10,7 +10,8 @@
 use super::args::{optional_bool, optional_integer};
 use crate::{
     application::registry::ToolRegistry,
-    domain::tool::{ToolContext, ToolDefinition, WEB_FETCH_NAME},
+    domain::tool::{ToolContext, ToolDefinition},
+    harness::names::WEB_FETCH_NAME,
 };
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;
@@ -44,7 +45,8 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
             "additionalProperties": false
         }),
     )
-    .with_approval();
+    .with_approval()
+    .available_when(|context| context.allow_web);
     definition.strict = false;
     registry.register_contextual(definition, |arguments, context| async move {
         web_fetch(arguments, &context).await

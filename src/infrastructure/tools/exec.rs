@@ -12,10 +12,8 @@ use super::{
 };
 use crate::{
     application::registry::ToolRegistry,
-    domain::tool::{
-        ToolContext, ToolDefinition, EXEC_DEFAULT_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS,
-        WORKSPACE_EXEC_NAME,
-    },
+    domain::tool::{ToolContext, ToolDefinition},
+    harness::names::{EXEC_DEFAULT_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS, WORKSPACE_EXEC_NAME},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -41,7 +39,20 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
             "additionalProperties": false
         }),
     )
-    .with_approval();
+    .with_approval()
+    .targeted()
+    .available_when(|context| context.allow_exec)
+    // The command has its own deadline and keeps its partial output when it
+    // fires; leave it time to report.
+    .with_deadline(|arguments, _| {
+        Some(
+            arguments["timeout_secs"]
+                .as_u64()
+                .unwrap_or(EXEC_DEFAULT_TIMEOUT_SECS)
+                .min(EXEC_MAX_TIMEOUT_SECS)
+                .saturating_add(5),
+        )
+    });
     // cwd and timeout_secs are optional.
     definition.strict = false;
     registry.register_contextual(definition, |arguments, context| async move {

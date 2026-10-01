@@ -4,42 +4,13 @@ use crate::domain::{environment::CheckConfig, plan::TASK_PLAN_NAME};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Arc};
 
 /// Reserved internal tool used to lazily discover registered tools.
 pub const TOOL_SEARCH_NAME: &str = "tool_search";
 
 /// Reserved runtime tool that hands a focused task to a sub-agent.
 pub const DELEGATE_TASK_NAME: &str = "delegate_task";
-
-/// Built-in tool that runs shell commands when `ToolContext::allow_exec` is set.
-pub const WORKSPACE_EXEC_NAME: &str = "workspace_exec";
-
-/// Built-in tool that reads a workspace file by offset or by lines.
-pub const WORKSPACE_READ_NAME: &str = "workspace_read";
-
-/// Built-in tool that runs a validation check configured for the environment.
-pub const WORKSPACE_CHECK_NAME: &str = "workspace_check";
-
-/// Built-in tools that change one workspace file.
-pub const WORKSPACE_EDIT_NAME: &str = "workspace_edit";
-pub const WORKSPACE_WRITE_NAME: &str = "workspace_write";
-/// Built-in tool that reads web pages when `ToolContext::allow_web` is set.
-pub const WEB_FETCH_NAME: &str = "web_fetch";
-/// Built-in tool that commits workspace files and pushes them; it changes
-/// the checkout, so it needs `ToolContext::allow_writes`.
-pub const GIT_COMMIT_PUSH_NAME: &str = "git_commit_push";
-/// Built-in tool that shows the uncommitted changes of the workspace, with a
-/// content hash per file that reviews are recorded against.
-pub const GIT_DIFF_NAME: &str = "git_diff";
-/// Reserved runtime tool that has a read-only sub-agent in a fresh
-/// conversation review the uncommitted changes. `git_commit_push` only
-/// commits files in the state a review last saw.
-pub const REVIEW_CHANGES_NAME: &str = "review_changes";
-
-/// Default and maximum `timeout_secs` of one `workspace_exec` command.
-pub const EXEC_DEFAULT_TIMEOUT_SECS: u64 = 120;
-pub const EXEC_MAX_TIMEOUT_SECS: u64 = 1800;
 
 /// Prefix reserved for aliases of directly connected MCP tools.
 pub const DIRECT_MCP_PREFIX: &str = "mcp__";
@@ -59,6 +30,38 @@ pub struct ToolDefinition {
     /// small tools that the instructions ask the model to use directly.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub always_offered: bool,
+    /// Each call acts on what its arguments name, such as a file to read or
+    /// a command to run, so calling it for one thing after another is
+    /// progress: only a round that repeats the calls of the round before
+    /// exactly counts toward a loop. Not sent to the model.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub targeted: bool,
+    /// When the tool can run, and how long a call may take. Not sent to the
+    /// model.
+    #[serde(skip)]
+    pub runtime: ToolRuntime,
+}
+
+/// Whether a tool can run in a context.
+pub type AvailabilityFn = dyn Fn(&ToolContext) -> bool + Send + Sync;
+/// The seconds one call may take, from its arguments and context.
+pub type DeadlineFn = dyn Fn(&Value, &ToolContext) -> Option<u64> + Send + Sync;
+
+/// The rules of a tool that depend on the context or arguments of a call.
+#[derive(Clone, Default)]
+pub struct ToolRuntime {
+    availability: Option<Arc<AvailabilityFn>>,
+    deadline: Option<Arc<DeadlineFn>>,
+}
+
+impl fmt::Debug for ToolRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ToolRuntime")
+            .field("availability", &self.availability.is_some())
+            .field("deadline", &self.deadline.is_some())
+            .finish()
+    }
 }
 
 fn default_strict() -> bool {
@@ -74,6 +77,8 @@ impl ToolDefinition {
             strict: true,
             requires_approval: false,
             always_offered: false,
+            targeted: false,
+            runtime: ToolRuntime::default(),
         }
     }
 
@@ -87,6 +92,50 @@ impl ToolDefinition {
     pub fn always_offered(mut self) -> Self {
         self.always_offered = true;
         self
+    }
+
+    /// Mark the tool as acting on what its arguments name; see `targeted`.
+    pub fn targeted(mut self) -> Self {
+        self.targeted = true;
+        self
+    }
+
+    /// Run the tool only in contexts where `available` holds. A tool that
+    /// cannot run is neither offered to the model nor sent for approval.
+    pub fn available_when(
+        mut self,
+        available: impl Fn(&ToolContext) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.runtime.availability = Some(Arc::new(available));
+        self
+    }
+
+    /// Let one call take the seconds `deadline` gives instead of the run's
+    /// `tool_timeout_secs`, for a tool that enforces its own deadline and
+    /// keeps partial output when it fires. Leave the tool a few seconds past
+    /// its own deadline to report.
+    pub fn with_deadline(
+        mut self,
+        deadline: impl Fn(&Value, &ToolContext) -> Option<u64> + Send + Sync + 'static,
+    ) -> Self {
+        self.runtime.deadline = Some(Arc::new(deadline));
+        self
+    }
+
+    /// Whether the tool can run in `context` at all.
+    pub fn can_run(&self, context: &ToolContext) -> bool {
+        self.runtime
+            .availability
+            .as_ref()
+            .is_none_or(|available| available(context))
+    }
+
+    /// The seconds a call with `arguments` may take, when the tool sets them.
+    pub fn deadline_secs(&self, arguments: &Value, context: &ToolContext) -> Option<u64> {
+        self.runtime
+            .deadline
+            .as_ref()
+            .and_then(|deadline| deadline(arguments, context))
     }
 
     pub fn as_response_tool(&self) -> Value {
@@ -118,22 +167,6 @@ pub struct ToolContext {
     pub checks: BTreeMap<String, CheckConfig>,
 }
 
-impl ToolContext {
-    /// Whether a registered tool can run in this context at all. Tools that
-    /// cannot are neither offered to the model nor sent for approval.
-    pub fn can_run(&self, tool_name: &str) -> bool {
-        match tool_name {
-            WORKSPACE_EXEC_NAME => self.allow_exec,
-            // Without configured checks there is nothing to run, and a model
-            // offered the tool calls it with commands as check names.
-            WORKSPACE_CHECK_NAME => !self.checks.is_empty(),
-            WEB_FETCH_NAME => self.allow_web,
-            GIT_COMMIT_PUSH_NAME => self.allow_writes,
-            _ => true,
-        }
-    }
-}
-
 /// Enforce the Responses API function name rules (`^[A-Za-z0-9_-]{1,64}$`).
 /// `:` is rejected so local names never collide with `server:tool` policy
 /// rules for MCP tools.
@@ -144,7 +177,7 @@ pub fn validate_tool_name(name: &str) -> Result<()> {
     if name == TOOL_SEARCH_NAME {
         bail!("tool name '{TOOL_SEARCH_NAME}' is reserved for lazy discovery");
     }
-    if name == DELEGATE_TASK_NAME || name == REVIEW_CHANGES_NAME {
+    if name == DELEGATE_TASK_NAME {
         bail!("tool name '{name}' is reserved for sub-agents");
     }
     if name.starts_with(DIRECT_MCP_PREFIX) {
@@ -166,27 +199,4 @@ pub fn validate_tool_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{ToolContext, WORKSPACE_CHECK_NAME};
-    use crate::domain::environment::CheckConfig;
-
-    #[test]
-    fn checks_are_offered_only_when_the_environment_has_some() {
-        let mut context = ToolContext::default();
-        assert!(!context.can_run(WORKSPACE_CHECK_NAME));
-        context.checks.insert(
-            "test".into(),
-            CheckConfig {
-                program: "cargo".into(),
-                args: vec!["test".into()],
-                description: String::new(),
-                timeout_secs: 90,
-            },
-        );
-        assert!(context.can_run(WORKSPACE_CHECK_NAME));
-        assert!(context.can_run("workspace_read"));
-    }
 }

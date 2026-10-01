@@ -15,8 +15,9 @@ use crate::{
     application::registry::ToolRegistry,
     domain::{
         github::RepoRef,
-        tool::{ToolContext, ToolDefinition, GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME},
+        tool::{ToolContext, ToolDefinition},
     },
+    harness::names::{GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -61,7 +62,8 @@ pub(super) fn register(registry: &ToolRegistry, mutations: Arc<Mutex<()>>) -> Re
             "additionalProperties": false
         }),
     )
-    .with_approval();
+    .with_approval()
+    .available_when(|context| context.allow_writes);
     // branch is optional.
     definition.strict = false;
     registry.register_contextual(definition, move |arguments, context| {

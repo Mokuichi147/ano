@@ -8,10 +8,11 @@ pub mod webhook;
 
 use crate::{
     application::{
-        agent::{ModelTarget, SubagentModels},
+        agent::{ModelTarget, SubagentModels, DELEGATE_ROLE},
         ports::ResponsesApi,
     },
     config::{AppConfig, ModelRequest, ModelSelection},
+    harness::review::REVIEW_ROLE,
     infrastructure::{
         fallback::{FallbackClient, FallbackTarget},
         openai::create_client,
@@ -128,10 +129,9 @@ impl RunModels {
             }))
         };
         let roles = &config.agent.roles;
-        let subagents = SubagentModels {
-            delegate: role("delegate", roles.delegate.as_ref())?,
-            review: role("review", roles.review.as_ref())?,
-        };
+        let mut subagents = SubagentModels::default();
+        subagents.set(DELEGATE_ROLE, role("delegate", roles.delegate.as_ref())?);
+        subagents.set(REVIEW_ROLE, role("review", roles.review.as_ref())?);
         // Without a preset, the reviewer is `approval_model` on the main
         // provider, with the model's default effort.
         let approval = match role("approval", roles.approval.as_ref())? {

@@ -1,15 +1,12 @@
 //! Lazy tool discovery: `tool_search` selects the few tools whose schemas
 //! are sent with the next request.
 
-use super::{mcp_runtime::McpRuntime, Agent};
+use super::{extension::RunInfo, mcp_runtime::McpRuntime, Agent};
 use crate::domain::{
     mcp::{McpServerConfig, McpTransport},
     plan::TASK_PLAN_NAME,
     policy::UserPolicy,
-    tool::{
-        ToolContext, ToolDefinition, DELEGATE_TASK_NAME, GIT_DIFF_NAME, REVIEW_CHANGES_NAME,
-        TOOL_SEARCH_NAME,
-    },
+    tool::{ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -81,6 +78,22 @@ impl ActiveTools {
 }
 
 impl Agent {
+    /// The registered local tools the policy allows, without those an
+    /// extension handles itself.
+    fn local_definitions(&self) -> Vec<ToolDefinition> {
+        let handled: BTreeSet<String> = self
+            .extensions
+            .iter()
+            .flat_map(|extension| extension.tools())
+            .map(|definition| definition.name)
+            .collect();
+        self.registry
+            .definitions(&self.policy)
+            .into_iter()
+            .filter(|definition| !handled.contains(&definition.name))
+            .collect()
+    }
+
     /// The tools of the next request. `depth` is the nesting of the run;
     /// only the top-level run may delegate to a sub-agent.
     pub(super) fn response_tools(
@@ -88,7 +101,7 @@ impl Agent {
         active: &ActiveTools,
         mcp_runtime: &McpRuntime,
         depth: usize,
-        allow_writes: bool,
+        context: &ToolContext,
     ) -> Result<Vec<Value>> {
         let mut tools = Vec::new();
         if !self.policy.is_disabled(TOOL_SEARCH_NAME) {
@@ -100,18 +113,26 @@ impl Agent {
         if depth == 0 && !self.policy.is_disabled(DELEGATE_TASK_NAME) {
             tools.push(delegate_task_definition().as_response_tool());
         }
-        // Only runs that can change files have changes to review.
-        if depth == 0
-            && allow_writes
-            && !self.policy.is_disabled(REVIEW_CHANGES_NAME)
-            && self.registry.is_registered(GIT_DIFF_NAME)
-        {
-            tools.push(review_changes_definition().as_response_tool());
+        let run = RunInfo {
+            depth,
+            context,
+            registry: &self.registry,
+        };
+        for extension in &self.extensions {
+            tools.extend(
+                extension
+                    .tools()
+                    .into_iter()
+                    .filter(|definition| {
+                        !self.policy.is_disabled(&definition.name)
+                            && extension.offers(&definition.name, &run)
+                    })
+                    .map(|definition| definition.as_response_tool()),
+            );
         }
 
         tools.extend(
-            self.registry
-                .definitions(&self.policy)
+            self.local_definitions()
                 .into_iter()
                 .filter(|definition| {
                     definition.always_offered || active.local.contains(&definition.name)
@@ -167,10 +188,9 @@ impl Agent {
             return None;
         }
         let mut local = self
-            .registry
-            .definitions(&self.policy)
+            .local_definitions()
             .into_iter()
-            .filter(|definition| !definition.always_offered && context.can_run(&definition.name))
+            .filter(|definition| !definition.always_offered && definition.can_run(context))
             .map(|definition| definition.name)
             .collect::<Vec<_>>();
         local.sort();
@@ -265,22 +285,21 @@ impl Agent {
             return Vec::new();
         };
         let prefix = format!("{prefix}_");
-        self.registry
-            .definitions(&self.policy)
+        self.local_definitions()
             .into_iter()
             .filter(|definition| {
                 definition.name != name
                     && definition.name.starts_with(&prefix)
                     && !definition.always_offered
-                    && context.can_run(&definition.name)
+                    && definition.can_run(context)
                     && !active.local.contains(&definition.name)
             })
             .map(|definition| definition.name)
             .collect()
     }
 
-    /// Tools that cannot run in `context` (see `ToolContext::can_run`) are
-    /// left out of the results.
+    /// Tools that cannot run in `context` (see `ToolDefinition::can_run`)
+    /// are left out of the results.
     pub(super) fn search_tools(
         &self,
         arguments: &Value,
@@ -299,8 +318,8 @@ impl Agent {
             .collect::<Vec<_>>();
 
         let mut candidates = Vec::new();
-        for definition in self.registry.definitions(&self.policy) {
-            if !context.can_run(&definition.name) {
+        for definition in self.local_definitions() {
+            if !definition.can_run(context) {
                 continue;
             }
             if let Some(score) = score_candidate(
@@ -505,21 +524,6 @@ pub fn delegate_task_definition() -> ToolDefinition {
                 "task": {"type": "string", "description": "Complete instructions for the sub-agent"}
             },
             "required": ["task"],
-            "additionalProperties": false
-        }),
-    )
-}
-
-pub fn review_changes_definition() -> ToolDefinition {
-    ToolDefinition::new(
-        REVIEW_CHANGES_NAME,
-        "Have the uncommitted changes of the workspace reviewed by a read-only reviewer in a fresh conversation, which sees only the diff, the code, and your description of the request, and get back its findings. Call it after making changes and before git_commit_push, which commits files only in the state the last review saw: after changing anything again, call it again. Judge each finding on its merits: fix the ones that are right, and keep the reasons for rejecting the others (for example for the pull request description).",
-        json!({
-            "type": "object",
-            "properties": {
-                "request": {"type": "string", "description": "What the changes are meant to do: the task or issue with its requirements and constraints, since the reviewer cannot see this conversation"}
-            },
-            "required": ["request"],
             "additionalProperties": false
         }),
     )

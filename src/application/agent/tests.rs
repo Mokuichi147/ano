@@ -4,7 +4,8 @@ use super::{
     events::{AgentEvent, EventLog},
     mcp_runtime::McpRuntime,
     response::extract_output_text,
-    Agent, ModelTarget, RunOrigin, RunRequest, SubagentModels,
+    Agent, AgentExtension, ExtensionCall, ModelTarget, RunInfo, RunOrigin, RunRequest,
+    SubagentModels, SubagentSpec, DELEGATE_ROLE,
 };
 use crate::{
     application::{
@@ -57,7 +58,7 @@ async fn with_scope<T>(active: &ActiveTools, body: impl AsyncFnOnce(RoundScope<'
         events: &events,
         plan: &plan,
         depth: 0,
-        read_only: false,
+        deny_approvals: None,
         token_budget: None,
         delegated_usage: &delegated_usage,
     })
@@ -227,7 +228,12 @@ fn initial_tool_payload_is_constant_size() {
     );
 
     let tools = agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0, false)
+        .response_tools(
+            &ActiveTools::default(),
+            &McpRuntime::default(),
+            0,
+            &ToolContext::default(),
+        )
         .unwrap();
     let names = tools
         .iter()
@@ -237,7 +243,12 @@ fn initial_tool_payload_is_constant_size() {
 
     // Sub-agents cannot delegate further.
     let tools = agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 1, false)
+        .response_tools(
+            &ActiveTools::default(),
+            &McpRuntime::default(),
+            1,
+            &ToolContext::default(),
+        )
         .unwrap();
     assert_eq!(tools.len(), 2);
 }
@@ -331,8 +342,14 @@ fn the_tool_catalog_names_every_tool_that_a_search_can_load() {
     let registry = registry_with(&[
         ("workspace_read", "Read a file"),
         ("send_email", "Send an email"),
-        ("workspace_exec", "Run a command"),
     ]);
+    registry
+        .register(
+            ToolDefinition::new("workspace_exec", "Run a command", json!({"type": "object"}))
+                .available_when(|context| context.allow_exec),
+            |_arguments| async move { Ok(json!({})) },
+        )
+        .unwrap();
     registry
         .register(
             ToolDefinition::new("skill_read", "Read a skill", json!({"type": "object"}))
@@ -622,7 +639,12 @@ async fn disabled_task_plan_cannot_be_called_or_exposed() {
     let mut agent = agent(ToolRegistry::new(), vec![]);
     agent.policy = UserPolicy::new(vec!["task_plan".into()], None);
     assert!(!agent
-        .response_tools(&ActiveTools::default(), &McpRuntime::default(), 0, false)
+        .response_tools(
+            &ActiveTools::default(),
+            &McpRuntime::default(),
+            0,
+            &ToolContext::default(),
+        )
         .unwrap()
         .iter()
         .any(|tool| tool["name"] == "task_plan"));
@@ -1297,6 +1319,178 @@ async fn delegated_tasks_run_in_a_fresh_sub_agent_and_return_its_report() {
     assert_eq!(report["outcome"], "completed");
 }
 
+/// An extension whose `consult` tool asks an adviser sub-agent, and which
+/// holds `record_action` until a consultation started and stamps the calls
+/// it lets through.
+#[derive(Default)]
+struct ConsultExtension {
+    consulted: Mutex<bool>,
+}
+
+#[async_trait]
+impl AgentExtension for ConsultExtension {
+    fn tools(&self) -> Vec<ToolDefinition> {
+        vec![ToolDefinition::new(
+            "consult",
+            "Ask an adviser",
+            json!({"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"], "additionalProperties": false}),
+        )]
+    }
+
+    fn offers(&self, _name: &str, run: &RunInfo<'_>) -> bool {
+        run.depth == 0
+    }
+
+    async fn call_tool(&self, _name: &str, arguments: &Value, call: ExtensionCall<'_>) -> Value {
+        *self.consulted.lock().unwrap() = true;
+        let spec = SubagentSpec {
+            task: arguments["question"].as_str().unwrap().into(),
+            context: call.run().context.clone(),
+            instructions: "You are an adviser.".into(),
+            role: "adviser".into(),
+            deny_approvals: Some("advisers only advise".into()),
+        };
+        match call.run_subagent(spec).await {
+            Ok(result) => json!({"advice": result.text}),
+            Err(error) => json!({"error": format!("{error:#}")}),
+        }
+    }
+
+    async fn check_call(
+        &self,
+        name: &str,
+        _arguments: &Value,
+        _run: &RunInfo<'_>,
+    ) -> Option<Value> {
+        (name == "record_action" && !*self.consulted.lock().unwrap())
+            .then(|| json!({"error": "consult_first"}))
+    }
+
+    fn prepare_call(&self, _name: &str, mut arguments: Value, _run: &RunInfo<'_>) -> Value {
+        arguments["stamp"] = json!(true);
+        arguments
+    }
+}
+
+fn function_call(id: &str, name: &str, arguments: Value) -> Value {
+    json!({
+        "id": id,
+        "status": "completed",
+        "output": [{"type": "function_call", "call_id": id, "name": name, "arguments": arguments.to_string()}]
+    })
+}
+
+/// The output the tool call `call_id` got, from the requests that followed.
+fn call_output(requests: &[Value], call_id: &str) -> Value {
+    requests
+        .iter()
+        .flat_map(|request| request["input"].as_array().cloned().unwrap_or_default())
+        .find(|item| item["type"] == "function_call_output" && item["call_id"] == call_id)
+        .and_then(|item| serde_json::from_str(item["output"].as_str()?).ok())
+        .unwrap_or_else(|| panic!("no output for {call_id}"))
+}
+
+#[tokio::test]
+async fn extensions_add_runtime_tools_and_rules_for_local_calls() {
+    let server = mock_responses(vec![
+        function_call("early", "record_action", json!({})),
+        function_call("ask", "consult", json!({"question": "Should I record it?"})),
+        function_call("adviser", "record_action", json!({})),
+        text_response("advice", "Go ahead"),
+        function_call("late", "record_action", json!({})),
+        text_response("done", "Done"),
+    ])
+    .await;
+    let registry = ToolRegistry::new();
+    let recorded = Arc::new(Mutex::new(Vec::new()));
+    let calls = Arc::clone(&recorded);
+    registry
+        .register(
+            ToolDefinition::new(
+                "record_action",
+                "Record an action",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            )
+            .with_approval()
+            .always_offered(),
+            move |arguments| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.lock().unwrap().push(arguments);
+                    Ok(json!({"saved": true}))
+                }
+            },
+        )
+        .unwrap();
+    let mut agent =
+        agent(registry, Vec::new()).with_extension(Arc::new(ConsultExtension::default()));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Done");
+    // Only the call after the consultation ran, with the extension's stamp.
+    assert_eq!(*recorded.lock().unwrap(), [json!({"stamp": true})]);
+    let requests = server.requests.lock().unwrap();
+    let tools = |index: usize| {
+        requests[index]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>()
+    };
+    assert!(tools(0).contains(&"consult".to_string()));
+    // The adviser is a sub-agent, which the extension does not offer it to.
+    assert!(!tools(2).contains(&"consult".to_string()));
+    assert!(requests[2]["instructions"]
+        .as_str()
+        .unwrap()
+        .ends_with("\n\nYou are an adviser."));
+    assert_eq!(call_output(&requests, "early")["error"], "consult_first");
+    let denied = call_output(&requests, "adviser");
+    assert_eq!(denied["error"], "approval_denied");
+    assert!(denied["message"]
+        .as_str()
+        .unwrap()
+        .contains("advisers only advise"));
+    assert_eq!(call_output(&requests, "ask")["advice"], "Go ahead");
+    assert_eq!(call_output(&requests, "late")["saved"], true);
+}
+
+#[tokio::test]
+async fn extension_tools_follow_the_policy_and_the_extensions_offer() {
+    let mut agent = agent(ToolRegistry::new(), Vec::new())
+        .with_extension(Arc::new(ConsultExtension::default()));
+    let active = ActiveTools::default();
+    let (output, _) = with_scope(&active, async |scope| {
+        agent
+            .handle_function_call(
+                "consult",
+                &json!({"question": "?"}),
+                RoundScope { depth: 1, ..scope },
+            )
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(output["error"], "tool_unavailable");
+
+    agent.policy = UserPolicy::new(vec!["consult".into()], None);
+    let tools = agent
+        .response_tools(&active, &McpRuntime::default(), 0, &ToolContext::default())
+        .unwrap();
+    assert!(tools.iter().all(|tool| tool["name"] != "consult"));
+    let (output, _) = with_scope(&active, async |scope| {
+        agent
+            .handle_function_call("consult", &json!({"question": "?"}), scope)
+            .await
+    })
+    .await
+    .unwrap();
+    assert_eq!(output["error"], "tool_disabled");
+}
+
 #[tokio::test]
 async fn sub_agents_run_on_the_model_of_their_role() {
     let parent = mock_responses(vec![
@@ -1305,15 +1499,17 @@ async fn sub_agents_run_on_the_model_of_their_role() {
     ])
     .await;
     let quick = mock_responses(vec![text_response("sub", "Found three files")]).await;
-    let mut agent = agent(ToolRegistry::new(), Vec::new()).with_subagent_models(SubagentModels {
-        delegate: Some(ModelTarget {
+    let mut models = SubagentModels::default();
+    models.set(
+        DELEGATE_ROLE,
+        Some(ModelTarget {
             client: Arc::new(OpenAiClient::new("test", &quick.url)),
             model: "quick-model".into(),
             reasoning_effort: Some("low".into()),
             context_window: None,
         }),
-        review: None,
-    });
+    );
+    let mut agent = agent(ToolRegistry::new(), Vec::new()).with_subagent_models(models);
     agent.client = Arc::new(OpenAiClient::new("test", &parent.url));
     agent.settings.model = "main-model".into();
     agent.settings.reasoning_effort = Some("high".into());
@@ -1348,24 +1544,23 @@ fn each_kind_of_run_uses_the_model_of_its_role() {
         reasoning_effort: None,
         context_window: None,
     };
-    let agent = agent(ToolRegistry::new(), Vec::new()).with_subagent_models(SubagentModels {
-        delegate: None,
-        review: Some(review),
-    });
-    let model = |depth, reviewer| {
+    let mut models = SubagentModels::default();
+    models.set("review", Some(review));
+    let agent = agent(ToolRegistry::new(), Vec::new()).with_subagent_models(models);
+    let model = |depth, role: Option<&str>| {
         agent
             .target(&RunOrigin {
                 depth,
-                reviewer,
+                role: role.map(str::to_string),
                 ..RunOrigin::default()
             })
             .model
             .to_string()
     };
-    assert_eq!(model(0, false), agent.settings.model);
+    assert_eq!(model(0, None), agent.settings.model);
     // Without a delegate model, sub-agents run on the agent's own.
-    assert_eq!(model(1, false), agent.settings.model);
-    assert_eq!(model(1, true), "review-model");
+    assert_eq!(model(1, Some(DELEGATE_ROLE)), agent.settings.model);
+    assert_eq!(model(1, Some("review")), "review-model");
 }
 
 #[tokio::test]
@@ -1406,7 +1601,7 @@ async fn sub_agents_cannot_delegate_further() {
         events: &events,
         plan: &plan,
         depth: 1,
-        read_only: false,
+        deny_approvals: None,
         token_budget: None,
         delegated_usage: &delegated_usage,
     };
@@ -1752,22 +1947,34 @@ async fn repeating_after_the_notices_stops_the_run_with_a_report() {
         .contains("kept repeating"));
 }
 
+/// Whether a built-in tool is marked as acting on what its arguments name.
+fn targeted(name: &str) -> bool {
+    let registry = ToolRegistry::new();
+    register_builtin_tools(&registry).unwrap();
+    registry
+        .definition(name)
+        .is_some_and(|definition| definition.targeted)
+}
+
 #[test]
 fn a_tool_search_or_another_tool_resets_the_repetition() {
     let round = |names: &[&str]| calls(names);
     let mut repetition = super::Repetition::default();
-    assert_eq!(repetition.observe(&round(&["a"])), None);
-    assert_eq!(repetition.observe(&round(&["a", "task_plan"])), None);
-    assert_eq!(repetition.observe(&round(&["tool_search"])), None);
-    assert_eq!(repetition.observe(&round(&["a"])), None);
-    assert_eq!(repetition.observe(&round(&["a"])), None);
-    assert_eq!(repetition.observe(&round(&["a", "b"])), None);
-    assert_eq!(repetition.observe(&round(&["a"])), None);
-    assert_eq!(repetition.observe(&round(&["a"])), None);
-    assert_eq!(repetition.observe(&round(&["a"])), Some(3));
-    assert_eq!(repetition.observe(&round(&["a"])), None);
-    assert_eq!(repetition.observe(&round(&["a"])), None);
-    assert_eq!(repetition.observe(&round(&["a"])), Some(6));
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), None);
+    assert_eq!(
+        repetition.observe(&round(&["a", "task_plan"]), targeted),
+        None
+    );
+    assert_eq!(repetition.observe(&round(&["tool_search"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a", "b"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), Some(3));
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["a"]), targeted), Some(6));
 }
 
 #[test]
@@ -1780,11 +1987,11 @@ fn reading_other_files_in_turn_is_not_a_repetition() {
     };
     let mut repetition = super::Repetition::default();
     for path in ["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"] {
-        assert_eq!(repetition.observe(&read(path)), None, "{path}");
+        assert_eq!(repetition.observe(&read(path), targeted), None, "{path}");
     }
     // Reading the same thing again does not make progress.
-    assert_eq!(repetition.observe(&read("f.rs")), None);
-    assert_eq!(repetition.observe(&read("f.rs")), Some(3));
+    assert_eq!(repetition.observe(&read("f.rs"), targeted), None);
+    assert_eq!(repetition.observe(&read("f.rs"), targeted), Some(3));
     // Editing or running one thing after another is progress too.
     let call = |name: &str, arguments: Value| {
         vec![
@@ -1795,35 +2002,38 @@ fn reading_other_files_in_turn_is_not_a_repetition() {
     let mut repetition = super::Repetition::default();
     for path in ["a.rs", "b.rs", "c.rs", "d.rs"] {
         let edit = call("workspace_edit", json!({"path": path}));
-        assert_eq!(repetition.observe(&edit), None, "{path}");
+        assert_eq!(repetition.observe(&edit, targeted), None, "{path}");
     }
     let test = call("workspace_exec", json!({"command": "cargo test"}));
-    assert_eq!(repetition.observe(&test), None);
-    assert_eq!(repetition.observe(&test), None);
-    assert_eq!(repetition.observe(&test), Some(3));
+    assert_eq!(repetition.observe(&test, targeted), None);
+    assert_eq!(repetition.observe(&test, targeted), None);
+    assert_eq!(repetition.observe(&test, targeted), Some(3));
     // Searches with other queries still count.
     let mut repetition = super::Repetition::default();
     for query in ["a", "b"] {
         let search = call("workspace_search", json!({"query": query}));
-        assert_eq!(repetition.observe(&search), None);
+        assert_eq!(repetition.observe(&search, targeted), None);
     }
     let search = call("workspace_search", json!({"query": "c"}));
-    assert_eq!(repetition.observe(&search), Some(3));
+    assert_eq!(repetition.observe(&search, targeted), Some(3));
 }
 
 #[test]
 fn calling_only_task_plan_repeatedly_gets_a_notice() {
     let round = |names: &[&str]| calls(names);
     let mut repetition = super::Repetition::default();
-    assert_eq!(repetition.observe(&round(&["task_plan"])), None);
-    assert_eq!(repetition.observe(&round(&["task_plan"])), None);
-    assert_eq!(repetition.observe(&round(&["task_plan"])), Some(3));
+    assert_eq!(repetition.observe(&round(&["task_plan"]), targeted), None);
+    assert_eq!(repetition.observe(&round(&["task_plan"]), targeted), None);
+    assert_eq!(
+        repetition.observe(&round(&["task_plan"]), targeted),
+        Some(3)
+    );
     // Work between plan updates ends the streak.
     assert_eq!(
-        repetition.observe(&round(&["web_fetch", "task_plan"])),
+        repetition.observe(&round(&["web_fetch", "task_plan"]), targeted),
         None
     );
-    assert_eq!(repetition.observe(&round(&["task_plan"])), None);
+    assert_eq!(repetition.observe(&round(&["task_plan"]), targeted), None);
     let notice = super::repetition_notice("task_plan", 3, None, &[]);
     assert!(notice.contains("called only task_plan in 3 consecutive steps"));
     assert!(notice.contains("were not errors"));

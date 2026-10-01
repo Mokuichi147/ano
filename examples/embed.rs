@@ -7,7 +7,7 @@
 
 use ano::{
     register_builtin_tools, Agent, AgentSettings, DenyApproval, InputPart, McpGateway, McpPool,
-    OpenAiClient, RunRequest, ToolContext, ToolDefinition, ToolRegistry, UserPolicy,
+    OpenAiClient, ReviewGate, RunRequest, ToolContext, ToolDefinition, ToolRegistry, UserPolicy,
 };
 use anyhow::Result;
 use serde_json::json;
@@ -65,6 +65,9 @@ async fn main() -> Result<()> {
         UserPolicy::default(),
         Arc::new(DenyApproval),
     )
+    // The built-in git_commit_push commits only reviewed files; the gate
+    // offers review_changes and checks commits against its reviews.
+    .with_extension(Arc::new(ReviewGate::new()))
     .with_event_listener(Arc::new(|event| eprintln!("{event:?}")));
 
     let request = RunRequest {

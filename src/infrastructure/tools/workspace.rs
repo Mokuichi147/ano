@@ -67,7 +67,8 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
                 "required": ["path"],
                 "additionalProperties": false
             }),
-        ),
+        )
+        .targeted(),
         |arguments, context| async move { workspace_read(arguments, &context).await },
     )?;
     registry.register_contextual(
@@ -124,7 +125,8 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
                     "dry_run":{"type":"boolean","description":"Preview edits without saving; defaults to false"}
                 }, "required":["path","edits"],"additionalProperties":false
             }),
-        ),
+        )
+        .targeted(),
         {
             let mutations = Arc::clone(&mutations);
             move |arguments, context| {
@@ -149,7 +151,8 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
                 "required": ["path", "content"],
                 "additionalProperties": false
             }),
-        ),
+        )
+        .targeted(),
         {
             let mutations = Arc::clone(&mutations);
             move |arguments, context| {

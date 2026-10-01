@@ -19,7 +19,9 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Register the built-in tools into `registry`.
+/// Register the built-in tools into `registry`. `git_commit_push` commits
+/// only files in the state of a review, which `harness::review::ReviewGate`
+/// records and hands to it: give every agent that uses these tools a gate.
 pub fn register_builtin_tools(registry: &ToolRegistry) -> Result<()> {
     checks::register(registry)?;
     exec::register(registry)?;

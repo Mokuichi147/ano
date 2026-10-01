@@ -20,6 +20,7 @@ use crate::{
     },
     config::AppConfig,
     domain::plan::{RunOutcome, TaskGoal},
+    harness::review::ReviewGate,
     infrastructure::{
         chronotope::Chronotope, project::read_project_instructions, skills::SkillLibrary,
     },
@@ -528,6 +529,7 @@ async fn execute_job(
     )
     .with_context_window(models.main.context_window)
     .with_subagent_models(models.subagents)
+    .with_extension(Arc::new(ReviewGate::new()))
     .with_event_listener(Arc::new(move |event| {
         progress
             .lock()

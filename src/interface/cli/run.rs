@@ -18,6 +18,7 @@ use crate::{
         session::{ModelChoice, SessionBinding},
         tool::ToolContext,
     },
+    harness::review::ReviewGate,
     infrastructure::{
         chronotope::Chronotope, mcp::McpPool, project::read_project_instructions,
         session_store::Session, skills::SkillLibrary,
@@ -148,7 +149,8 @@ pub(super) fn prepare_agent(
         approval_handler,
     )
     .with_context_window(models.main.context_window)
-    .with_subagent_models(models.subagents);
+    .with_subagent_models(models.subagents)
+    .with_extension(Arc::new(ReviewGate::new()));
     if let Some(history) = history {
         agent = agent.with_history(history);
     }

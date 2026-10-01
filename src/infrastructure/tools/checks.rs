@@ -3,7 +3,8 @@
 use super::process::run_bounded;
 use crate::{
     application::registry::ToolRegistry,
-    domain::tool::{ToolContext, ToolDefinition, WORKSPACE_CHECK_NAME},
+    domain::tool::{ToolContext, ToolDefinition},
+    harness::names::WORKSPACE_CHECK_NAME,
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -15,7 +16,16 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
         WORKSPACE_CHECK_NAME,
         "Run a configured build, test, or validation check in the workspace. Use name=null to list available checks, then run an exact name. The program and arguments are fixed by the environment. Inspect success, exit_code, stdout and stderr; never claim validation passed when it failed.",
         json!({"type":"object","properties":{"name":{"type":["string","null"]}},"required":["name"],"additionalProperties":false}),
-    ), |arguments, context| async move { run_check(arguments, &context).await })
+    )
+    // Without configured checks there is nothing to run, and a model offered
+    // the tool calls it with commands as check names.
+    .available_when(|context| !context.checks.is_empty())
+    // A check has its own deadline and keeps its partial output when it
+    // fires; leave it time to report.
+    .with_deadline(|arguments, context| {
+        let check = context.checks.get(arguments["name"].as_str()?)?;
+        Some(check.timeout_secs.saturating_add(5))
+    }), |arguments, context| async move { run_check(arguments, &context).await })
 }
 
 async fn run_check(arguments: Value, context: &ToolContext) -> Result<Value> {
@@ -70,6 +80,34 @@ async fn run_check(arguments: Value, context: &ToolContext) -> Result<Value> {
 mod tests {
     use super::*;
     use crate::domain::environment::CheckConfig;
+
+    #[test]
+    fn checks_are_offered_only_when_the_environment_has_some_with_their_deadline() {
+        let registry = ToolRegistry::new();
+        register(&registry).unwrap();
+        let definition = registry.definition(WORKSPACE_CHECK_NAME).unwrap();
+        let mut context = ToolContext::default();
+        assert!(!definition.can_run(&context));
+        context.checks.insert(
+            "test".into(),
+            CheckConfig {
+                program: "cargo".into(),
+                args: vec!["test".into()],
+                description: String::new(),
+                timeout_secs: 90,
+            },
+        );
+        assert!(definition.can_run(&context));
+        // The check's own deadline fires first and keeps its output.
+        assert_eq!(
+            definition.deadline_secs(&json!({"name": "test"}), &context),
+            Some(95)
+        );
+        assert_eq!(
+            definition.deadline_secs(&json!({"name": null}), &context),
+            None
+        );
+    }
 
     #[tokio::test]
     async fn only_explicitly_configured_checks_can_run() {
