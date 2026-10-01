@@ -522,6 +522,7 @@ registry.register(
 - 影響の大きい tool は `ToolDefinition::new(...).with_approval()` で登録すると、呼び出しごとに `ApprovalHandler` へ確認します（`McpApprovalRequest::source` が `ApprovalSource::LocalTool` になります）。
 - 直接接続の MCP を使う場合は `McpPool` を1つ作り、`Arc` で各 `Agent` に渡すと接続を共有できます。終了時に `shutdown().await` を呼んでください。
 - `Agent` は外部依存をトレイト（`ResponsesApi`・`McpGateway`・`ConversationStore`・`ApprovalHandler`）で受け取るため、別の API クライアントや保存先に差し替えられます。構成は [docs/architecture.md](docs/architecture.md) を参照してください。
+- `Agent` の実行ループは特定の tool を前提としません。複数の tool にまたがる規則や、サブエージェントを起動するランタイム tool を加える場合は `AgentExtension` を実装して `with_extension` で渡します（`ReviewGate` が実装例です）。`ano` と同じ構成（組み込み tool・既定の instructions・AGENTS.md・スキル・承認モード・ロール）で組み立てる場合は `Harness` を使います。
 
 ## ドキュメント
 
