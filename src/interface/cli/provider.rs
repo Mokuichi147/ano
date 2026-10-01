@@ -6,7 +6,7 @@ use crate::{
         remove_provider, rename_provider, update_provider, use_provider, AppConfig, SettingValue,
         API_PROVIDER,
     },
-    infrastructure::openai::{create_client, ApiAuth, ApiSettings},
+    infrastructure::openai::{create_client, ApiAuth, ApiSettings, WireApi},
 };
 use anyhow::{bail, Result};
 use clap::{Args, Subcommand, ValueEnum};
@@ -55,11 +55,16 @@ enum ProviderCommand {
 
 #[derive(Debug, Default, Args)]
 struct ProviderOptions {
-    /// Responses API endpoint, such as http://127.0.0.1:1234/v1.
+    /// API endpoint, such as http://127.0.0.1:1234/v1.
     #[arg(long, value_name = "URL")]
     base_url: Option<String>,
     #[arg(long, value_enum)]
     auth: Option<AuthArg>,
+    /// API the endpoint speaks: `responses` (POST /responses, the default)
+    /// or `chat-completions` (POST /chat/completions) for servers without
+    /// the Responses API.
+    #[arg(long, value_enum, value_name = "API")]
+    wire_api: Option<WireApiArg>,
     /// Environment variable that holds the API key.
     #[arg(long, value_name = "ENV")]
     api_key_env: Option<String>,
@@ -94,11 +99,18 @@ enum AuthArg {
     Chatgpt,
 }
 
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum WireApiArg {
+    Responses,
+    ChatCompletions,
+}
+
 /// A setting that `--unset` removes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum Field {
     BaseUrl,
     Auth,
+    WireApi,
     ApiKeyEnv,
     ChatgptAuthFile,
     Model,
@@ -117,6 +129,7 @@ impl Field {
         match self {
             Field::BaseUrl => "base_url",
             Field::Auth => "auth",
+            Field::WireApi => "wire_api",
             Field::ApiKeyEnv => "api_key_env",
             Field::ChatgptAuthFile => "chatgpt_auth_file",
             Field::Model => "model",
@@ -155,6 +168,18 @@ impl ProviderOptions {
             }),
         );
         push("base_url", text(&self.base_url));
+        push(
+            "wire_api",
+            self.wire_api.map(|api| {
+                SettingValue::Text(
+                    match api {
+                        WireApiArg::Responses => "responses",
+                        WireApiArg::ChatCompletions => "chat_completions",
+                    }
+                    .into(),
+                )
+            }),
+        );
         push("api_key_env", text(&self.api_key_env));
         push(
             "chatgpt_auth_file",
@@ -379,7 +404,12 @@ async fn report_models(config_path: &Path, name: &str) {
 pub(super) fn endpoint(settings: &ApiSettings) -> String {
     match settings.auth {
         ApiAuth::Chatgpt => "ChatGPT subscription".into(),
-        ApiAuth::ApiKey => settings.effective_base_url(),
+        ApiAuth::ApiKey => match settings.wire_api {
+            WireApi::Responses => settings.effective_base_url(),
+            WireApi::ChatCompletions => {
+                format!("{} (chat completions)", settings.effective_base_url())
+            }
+        },
     }
 }
 
@@ -427,7 +457,9 @@ fn format_providers(config: &AppConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::super::{model, provider, Cli, Command};
+    use super::format_providers;
     use crate::config::AppConfig;
+    use crate::infrastructure::openai::WireApi;
     use axum::{routing::get, Json, Router};
     use clap::Parser;
     use serde_json::json;
@@ -535,6 +567,21 @@ mod tests {
         .unwrap();
         assert_eq!(config.provider_settings("lan").unwrap().timeout_secs, 5);
         assert!(config.providers["lan"].fallback.is_empty());
+        let config = provider(&path, &["set", "lan", "--wire-api", "chat-completions"])
+            .await
+            .unwrap();
+        assert_eq!(
+            config.provider_settings("lan").unwrap().wire_api,
+            WireApi::ChatCompletions
+        );
+        assert!(format_providers(&config).contains("(chat completions)"));
+        let config = provider(&path, &["set", "lan", "--unset", "wire-api"])
+            .await
+            .unwrap();
+        assert_eq!(
+            config.provider_settings("lan").unwrap().wire_api,
+            WireApi::Responses
+        );
         assert!(provider(&path, &["set", "lan"]).await.is_err());
         assert!(
             provider(&path, &["set", "lan", "--model", "x", "--unset", "model"])

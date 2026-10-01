@@ -131,6 +131,7 @@ const API_CONNECTION_KEYS: &[&str] = &[
     "chatgpt_auth_file",
     "base_url",
     "api_key_env",
+    "wire_api",
     "models",
     "allowed_models",
     "disabled_models",

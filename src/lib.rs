@@ -68,7 +68,7 @@ pub use harness::{
 pub use infrastructure::{
     chronotope::{Chronotope, HistorySettings},
     mcp::McpPool,
-    openai::{create_client, ApiAuth, ApiSettings, OpenAiClient, ProviderSettings},
+    openai::{create_client, ApiAuth, ApiSettings, OpenAiClient, ProviderSettings, WireApi},
     session_store::Session,
     tools::{
         names::{REVIEW_CHANGES_NAME, WORKSPACE_EXEC_NAME},

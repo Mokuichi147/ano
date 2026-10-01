@@ -21,6 +21,18 @@ pub enum ApiAuth {
     Chatgpt,
 }
 
+/// 接続先が受け付ける API の形式。
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WireApi {
+    /// `POST /responses`
+    #[default]
+    Responses,
+    /// `POST /chat/completions`。Responses API を持たないサーバー向けに、
+    /// 要求と応答を Responses 形式との間で変換する。
+    ChatCompletions,
+}
+
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_CHARS: usize = 2000;
@@ -41,6 +53,8 @@ pub struct ApiSettings {
     pub chatgpt_auth_file: Option<PathBuf>,
     pub base_url: String,
     pub api_key_env: String,
+    /// `/responses` と `/chat/completions` のどちらで話すか。
+    pub wire_api: WireApi,
     /// Total timeout for one Responses API request.
     pub timeout_secs: u64,
     /// Retries for connection failures and 429 / 5xx responses.
@@ -78,6 +92,7 @@ impl Default for ApiSettings {
             chatgpt_auth_file: None,
             base_url: default_base_url(),
             api_key_env: default_api_key_env(),
+            wire_api: WireApi::Responses,
             timeout_secs: 600,
             max_retries: 2,
             stream: true,
@@ -122,6 +137,8 @@ pub struct ProviderSettings {
     pub base_url: Option<String>,
     /// 省略時は `OPENAI_API_KEY`。
     pub api_key_env: Option<String>,
+    /// 省略時は `responses`。接続先ごとの設定で、`[api]` からは引き継がない。
+    pub wire_api: WireApi,
     pub timeout_secs: Option<u64>,
     pub max_retries: Option<u32>,
     pub stream: Option<bool>,
@@ -144,6 +161,7 @@ impl Default for ProviderSettings {
             chatgpt_auth_file: None,
             base_url: None,
             api_key_env: None,
+            wire_api: WireApi::Responses,
             timeout_secs: None,
             max_retries: None,
             stream: None,
@@ -166,6 +184,7 @@ impl ProviderSettings {
             chatgpt_auth_file: self.chatgpt_auth_file.clone(),
             base_url: self.base_url.clone().unwrap_or_else(default_base_url),
             api_key_env: self.api_key_env.clone().unwrap_or_else(default_api_key_env),
+            wire_api: self.wire_api,
             timeout_secs: self.timeout_secs.unwrap_or(base.timeout_secs),
             max_retries: self.max_retries.unwrap_or(base.max_retries),
             stream: self.stream.unwrap_or(base.stream),
@@ -205,11 +224,21 @@ pub(super) fn is_unavailable_status(status: StatusCode) -> bool {
 
 /// 認証方式に対応する通信アダプターを生成する。
 pub fn create_client(settings: &ApiSettings) -> Result<Arc<dyn ResponsesApi>> {
-    match settings.auth {
-        ApiAuth::ApiKey => Ok(Arc::new(OpenAiClient::from_api_settings(settings)?)),
-        ApiAuth::Chatgpt => Ok(Arc::new(super::chatgpt::ChatGptClient::from_settings(
-            settings,
-        )?)),
+    match (settings.auth, settings.wire_api) {
+        (ApiAuth::ApiKey, WireApi::Responses) => {
+            Ok(Arc::new(OpenAiClient::from_api_settings(settings)?))
+        }
+        (ApiAuth::ApiKey, WireApi::ChatCompletions) => Ok(Arc::new(
+            super::chat_completions::ChatCompletionsClient::new(OpenAiClient::from_api_settings(
+                settings,
+            )?),
+        )),
+        (ApiAuth::Chatgpt, WireApi::Responses) => Ok(Arc::new(
+            super::chatgpt::ChatGptClient::from_settings(settings)?,
+        )),
+        (ApiAuth::Chatgpt, WireApi::ChatCompletions) => {
+            bail!("auth = \"chatgpt\" は wire_api = \"chat_completions\" に対応していません")
+        }
     }
 }
 
@@ -272,6 +301,11 @@ impl OpenAiClient {
         &self.base_url
     }
 
+    /// Whether answers are requested as server-sent events.
+    pub(super) fn streams(&self) -> bool {
+        self.stream
+    }
+
     pub async fn compact_response(&self, payload: &Value) -> Result<Value> {
         self.post_json("responses/compact", payload).await
     }
@@ -305,15 +339,39 @@ impl OpenAiClient {
         read_event_stream(response, on_delta).await
     }
 
-    /// The context length `model` is loaded with, from LM Studio's
-    /// `GET /api/v0/models/{model}` beside the `/v1` API. `None` for other
-    /// servers, or while the model is not loaded.
+    /// The context length `model` is loaded with: from LM Studio's
+    /// `GET /api/v0/models/{model}` beside the `/v1` API, or from
+    /// `meta.n_ctx` of the model in `GET /models` (llama.cpp's server).
+    /// `None` for other servers, or while the model is not loaded.
     pub async fn loaded_context_length(&self, model: &str) -> Option<u64> {
         if is_openai_endpoint(&self.base_url) {
             return None;
         }
+        if let Some(length) = self.lm_studio_context_length(model).await {
+            return Some(length);
+        }
+        let body = self.get_json(format!("{}/models", self.base_url)).await?;
+        body["data"]
+            .as_array()?
+            .iter()
+            .find(|entry| entry["id"] == model)?["meta"]["n_ctx"]
+            .as_u64()
+            .filter(|length| *length > 0)
+    }
+
+    async fn lm_studio_context_length(&self, model: &str) -> Option<u64> {
         let root = self.base_url.trim_end_matches('/').strip_suffix("/v1")?;
-        let mut request = self.http.get(format!("{root}/api/v0/models/{model}"));
+        let body = self
+            .get_json(format!("{root}/api/v0/models/{model}"))
+            .await?;
+        body["loaded_context_length"]
+            .as_u64()
+            .filter(|length| *length > 0)
+    }
+
+    /// `GET url` for optional information: `None` on any failure.
+    async fn get_json(&self, url: String) -> Option<Value> {
+        let mut request = self.http.get(url);
         if let Some(api_key) = &self.api_key {
             request = request.bearer_auth(api_key);
         }
@@ -321,10 +379,7 @@ impl OpenAiClient {
         if !response.status().is_success() {
             return None;
         }
-        let body: Value = response.json().await.ok()?;
-        body["loaded_context_length"]
-            .as_u64()
-            .filter(|length| *length > 0)
+        response.json().await.ok()
     }
 
     /// `GET /models`: the models the endpoint offers, sorted by name, or
@@ -371,7 +426,7 @@ impl OpenAiClient {
 
     /// Send a request, retrying connection failures and retryable statuses.
     /// Returns a successful response; an error status becomes an error.
-    async fn send(&self, endpoint: &str, payload: &Value) -> Result<Response> {
+    pub(super) async fn send(&self, endpoint: &str, payload: &Value) -> Result<Response> {
         let url = format!("{}/{}", self.base_url, endpoint);
         let mut attempt = 0;
         loop {
@@ -427,7 +482,7 @@ impl OpenAiClient {
     }
 }
 
-async fn read_json(response: Response, endpoint: &str) -> Result<Value> {
+pub(super) async fn read_json(response: Response, endpoint: &str) -> Result<Value> {
     let body = response
         .text()
         .await
@@ -569,7 +624,7 @@ fn resolve_api_key(base_url: &str, key_env: &str, value: Option<String>) -> Resu
     }
 }
 
-fn is_openai_endpoint(base_url: &str) -> bool {
+pub(super) fn is_openai_endpoint(base_url: &str) -> bool {
     Url::parse(base_url)
         .ok()
         .and_then(|url| {
@@ -587,7 +642,7 @@ fn error_text(value: &Value) -> String {
         .unwrap_or_else(|| "unknown error".to_string())
 }
 
-fn truncate(text: &str) -> String {
+pub(super) fn truncate(text: &str) -> String {
     let mut result = text.chars().take(MAX_ERROR_BODY_CHARS).collect::<String>();
     if text.chars().count() > MAX_ERROR_BODY_CHARS {
         result.push('…');
@@ -810,7 +865,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reads_the_context_length_of_a_model_loaded_in_lm_studio() {
+    async fn reads_the_context_length_of_a_loaded_model() {
         let app = Router::new().route(
             "/api/v0/models/{model}",
             axum::routing::get(
@@ -828,6 +883,21 @@ mod tests {
         assert_eq!(client.loaded_context_length("loaded").await, Some(32768));
         // Not loaded yet: the length it will be loaded with is unknown.
         assert_eq!(client.loaded_context_length("other").await, None);
+        // llama.cpp's server reports it in the model list.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = OpenAiClient::new("", format!("http://{}/v1", listener.local_addr().unwrap()));
+        let app = Router::new().route(
+            "/v1/models",
+            axum::routing::get(|| async {
+                Json(json!({"data":[
+                    {"id":"other","meta":{"n_ctx":4096}},
+                    {"id":"loaded","status":{"value":"loaded"},"meta":{"n_ctx":131072,"n_ctx_train":262144}},
+                ]}))
+            }),
+        );
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        assert_eq!(client.loaded_context_length("loaded").await, Some(131072));
+        assert_eq!(client.loaded_context_length("missing").await, None);
         // Other servers have no such API.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = OpenAiClient::new("", format!("http://{}/v1", listener.local_addr().unwrap()));

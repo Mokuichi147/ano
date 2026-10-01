@@ -1,6 +1,7 @@
 //! Infrastructure layer: adapters for the OpenAI HTTP API, MCP connections,
 //! session files, and the built-in workspace tools.
 
+pub mod chat_completions;
 pub mod chatgpt;
 pub mod chronotope;
 pub mod fallback;

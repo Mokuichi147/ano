@@ -41,7 +41,7 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - テキスト・画像・音声入力（音声は文字起こしせず native `input_audio` として送信）
 - GitHub MCP と組み合わせた、Issue の解決から Pull Request 作成・レビューまでの対話的な作業（別の新しい会話でのレビュー `review_changes` を push 前に必須とし、指定ファイルだけをコミットして push する `git_commit_push`）
 - 名前付き実行環境を選べる署名付き Webhook と、実行中の進捗確認・中止・タイムアウトに対応した非同期ジョブ API
-- LM Studio などの OpenAI 互換 `/v1/responses` endpoint
+- LM Studio などの OpenAI 互換 `/v1/responses` endpoint と、`/v1/chat/completions` だけを提供するサーバー（`wire_api = "chat_completions"`）
 - 名前付きの複数の接続先（`[providers]`）と、実行ごと・環境ごと・対話の途中（`/provider`・`/model`）での接続先とモデルの切り替え
 - 接続先・モデル・推論の強さをまとめて切り替えるプリセット（`[presets]`）と、サブエージェント・レビュー担当・承認の判定用モデルごとのプリセット指定
 - ChatGPT サブスクリプションの OAuth 認証による Codex 接続（実験的）
@@ -249,7 +249,20 @@ model = "ロードしたモデル名"
 - `config.toml` はカレントディレクトリから読みます。別のディレクトリで実行する場合は `--config` で指定するか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
 - LM Studio で Remote MCP を使う場合は、Server Settings で MCP 利用を有効にします。
 - 回答はストリーミングで表示します（`stream: true` に対応していない server でも動きます）。
-- 長い会話の圧縮は、`/responses/compact` の代わりにモデル自身が書く要約で行います（`[agent] compaction = "auto"` の既定動作）。LM Studio が返す読み込み中のコンテキスト長に近づいたところで圧縮します。ほかのサーバーでは `context_window` を指定してください（[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
+- 長い会話の圧縮は、`/responses/compact` の代わりにモデル自身が書く要約で行います（`[agent] compaction = "auto"` の既定動作）。LM Studio が返す読み込み中のコンテキスト長に近づいたところで圧縮します。llama.cpp の server も `/v1/models` の `meta.n_ctx` から取得します。ほかのサーバーでは `context_window` を指定してください（[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
+
+`/v1/responses` がなく `/v1/chat/completions` だけを提供するサーバー（llama.cpp・vLLM の一部の構成や、Chat Completions 互換のプロキシなど）には、`wire_api = "chat_completions"` を指定します（`ano provider add NAME --base-url URL --wire-api chat-completions` でも設定できます）。
+
+```toml
+[providers.chat]
+base_url = "http://192.168.1.10:8080/v1"
+wire_api = "chat_completions"
+model = "ロードしたモデル名"
+```
+
+- 要求と応答を Responses API の形式との間で変換するため、tool の実行・ストリーミング表示・セッション・要約による圧縮はそのまま使えます。サーバーは応答を保存しないので、毎回履歴全体を送ります。
+- 推論（`reasoning_content` または `reasoning`）は進捗として表示し、次の要求で assistant メッセージの `reasoning_content` として返します。推論の強さは `reasoning_effort` として送ります。
+- 使えるのは function tool（ano の tool と、stdio / Streamable HTTP で直接接続した MCP）だけです。Responses API 管理方式の MCP（既定の `transport`）は使えません。
 
 ロードしたモデル名は `agent.model` または `--model` で指定します。tool calling の品質はモデルの tool use 対応に依存します（native tool use 対応モデルを推奨）。URL 形式の MCP は `url` で登録できますが、Secure MCP Tunnel（`tunnel_id`）は OpenAI Responses API の機能で、LM Studio では使えません。
 
@@ -283,7 +296,7 @@ ano chat --environment review                    # 環境の provider（codex）
 ```
 
 - `[api]` を使っていない場合（既定の接続先でもなく、environment やフォールバック先からも参照されていない場合）、一覧には `api` を表示しません。`[api]` の接続設定を名前付きの接続先に移すには `ano provider rename api NAME` を使います（下記）。
-- 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`timeout_secs`・`max_retries`・`stream`・`context_window`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url`・`api_key_env`・`context_window` は引き継がず、`base_url` と `api_key_env` の省略時は OpenAI の既定値になります。`context_window` はモデルが1回の要求で受け取れるトークン数で、履歴をその手前で圧縮します（LM Studio は自動で取得。[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
+- 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`wire_api`・`timeout_secs`・`max_retries`・`stream`・`context_window`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url`・`api_key_env`・`wire_api`・`context_window` は引き継がず、`base_url` と `api_key_env` の省略時は OpenAI の既定値になります。`context_window` はモデルが1回の要求で受け取れるトークン数で、履歴をその手前で圧縮します（LM Studio は自動で取得。[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
 - モデルは「環境の指定 → `--preset`/`--provider`/`--model` → 対話中の `/preset`/`/provider`/`/model`」の順に上書きします（[プリセット](#プリセットとロール)）。接続先だけを選んだ場合は、その接続先の `model` に切り替わります。接続先に `model` がなければ、それまでのモデルをそのまま使います。
 - `[agent].model` は `[api]` のモデルで、`model` のない既定の接続先でも使います。`[agent].approval_model` は `[api]` 用です。ほかの接続先では、その接続先の `approval_model`（省略時は使用中のモデル）で審査します。
 - `ano chat` では `/provider lan` や `/model qwen3:30b` で、会話を保ったまま切り替えられます。接続先を変えると、それまでの会話が新しい接続先へ送られます。元の接続先でしか読めない暗号化された推論は履歴から除きます。OpenAI の `/responses/compact` で圧縮済みの会話は、ほかの接続先では読めないため移せません（`/clear` か新しいセッションで始めてください）。

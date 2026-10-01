@@ -10,6 +10,11 @@
 # OpenAI Responses API endpoint.
 base_url = "https://api.openai.com/v1"
 api_key_env = "OPENAI_API_KEY"
+# The API the endpoint speaks: "responses" (POST /responses, the default) or
+# "chat_completions" (POST /chat/completions) for a server without the
+# Responses API. Chat completions carry function tools only: MCP servers must
+# be connected by ano (transport = "stdio" or "streamable_http").
+# wire_api = "responses"
 # Per-request timeout, and retries for connection failures and 429 / 5xx.
 timeout_secs = 600
 max_retries = 2
@@ -31,7 +36,7 @@ stream = true
 # choose another with --provider NAME,
 # `provider = "NAME"` in an environment, or /provider NAME in `ano chat`.
 # timeout_secs, max_retries, and stream default to the [api] values;
-# base_url and api_key_env do not (they default to OpenAI's).
+# base_url, api_key_env, and wire_api do not (they default to OpenAI's).
 # OPENAI_BASE_URL only overrides [api], never a named provider.
 # [providers.lan]
 # base_url = "http://192.168.1.10:1234/v1"
@@ -57,6 +62,11 @@ stream = true
 # [providers.codex]
 # auth = "chatgpt"
 # model = "gpt-5-codex"
+#
+# A server that offers only /v1/chat/completions.
+# [providers.chat]
+# base_url = "http://192.168.1.10:8080/v1"
+# wire_api = "chat_completions"
 
 # Presets: a provider, a model, and a reasoning effort switched together
 # (`ano preset add/set/remove` edits them). Choose one with --preset NAME,

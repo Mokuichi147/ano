@@ -123,6 +123,7 @@ src/
 │   └── review.rs           review_changes と git_commit_push のレビュー照合（ReviewGate）
 ├── infrastructure/
 │   ├── openai.rs           Responses API クライアント（リトライ・SSE ストリーミング）
+│   ├── chat_completions/   /chat/completions だけのサーバーへ、Responses 形式と変換して接続
 │   ├── mcp.rs              stdio / Streamable HTTP の MCP 接続プール
 │   ├── session_store.rs    セッションファイルとロック
 │   ├── memory_store.rs     プロセス内だけで保持する会話（ano chat）
@@ -158,7 +159,7 @@ src/
 
 ## 設計上の判断
 
-- **会話履歴は Responses API の item 形式のまま扱う。** 独自の中間表現へ変換せず、`domain::session` や `domain::compaction` も同じ JSON を扱います。暗号化された reasoning や圧縮 item をそのまま再送する必要があるためです。
+- **会話履歴は Responses API の item 形式のまま扱う。** 独自の中間表現へ変換せず、`domain::session` や `domain::compaction` も同じ JSON を扱います。暗号化された reasoning や圧縮 item をそのまま再送する必要があるためです。Chat Completions の接続先も、アダプター（`infrastructure::chat_completions`）が要求と応答をこの形式との間で変換するため、エージェント側は形式の違いを知りません。
 - **セッションの状態遷移と保存を分ける。** 状態遷移（`domain::session::SessionData`）はメモリ上だけで完結し、保存・ロック・アーカイブは `Session` が担当します。別の保存先を使う場合も同じ遷移規則を再利用できます。
 - **組み立てはハーネスが担う。** `Harness` が組み込み tool・原文履歴・スキル・`ReviewGate` を含む `Agent` を組み立て、CLI と Webhook は実行設定とモデルを解決して渡します。プロセスごとに作る具象アダプター（`OpenAiClient`・`McpPool`）と `Session` は、バイナリのエントリポイント（CLI）が作ります。Webhook サーバーはクライアントと MCP ゲートウェイを受け取るだけで、自分では作りません。
 - **実行ループは tool の名前を知らない。** tool ごとの条件・期限・繰り返しの扱いは定義に、tool をまたぐ規則（レビューを受けた変更だけをコミットする、など）は拡張に置きます。別の用途のハーネスは、実行ループに手を入れずに自分の tool と規則を加えられます。
