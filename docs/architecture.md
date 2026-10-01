@@ -47,6 +47,8 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 | `harness` | `config`・`infrastructure`・`application`・`domain` | 端末入出力・HTTP サーバーの都合 |
 | `interface` | すべての層 | 業務ルール、`Agent` の組み立ての詳細 |
 
+エージェント（`domain`・`application`）の本体のコードが外側の層を参照していないことは、[`tests/layering.rs`](../tests/layering.rs) で確かめています（テストはアダプターを使ってかまいません）。
+
 `application` が外部と話す必要がある箇所は、すべて [`src/application/ports.rs`](../src/application/ports.rs) のトレイト経由です。
 
 | ポート | 役割 | 実装 |
@@ -157,3 +159,4 @@ src/
 - **セッションの状態遷移と保存を分ける。** 状態遷移（`domain::session::SessionData`）はメモリ上だけで完結し、保存・ロック・アーカイブは `Session` が担当します。別の保存先を使う場合も同じ遷移規則を再利用できます。
 - **組み立てはハーネスが担う。** `Harness` が組み込み tool・原文履歴・スキル・`ReviewGate` を含む `Agent` を組み立て、CLI と Webhook は実行設定とモデルを解決して渡します。プロセスごとに作る具象アダプター（`OpenAiClient`・`McpPool`）と `Session` は、バイナリのエントリポイント（CLI）が作ります。Webhook サーバーはクライアントと MCP ゲートウェイを受け取るだけで、自分では作りません。
 - **実行ループは tool の名前を知らない。** tool ごとの条件・期限・繰り返しの扱いは定義に、tool をまたぐ規則（レビューを受けた変更だけをコミットする、など）は拡張に置きます。別の用途のハーネスは、実行ループに手を入れずに自分の tool と規則を加えられます。
+- **crate は分けない。** エージェントとハーネスは同じ crate のモジュールとして分け、依存の向きはテストで守らせています。crate に分けるには、実行ループのテストが使っている OpenAI・MCP・セッションのアダプターをエージェント側へ含めるかテストダブルに置き換え、`ToolContext` が持つ検証コマンドの設定（`domain::environment::CheckConfig`）をエージェント側の型にする必要があります。エージェントだけを使う利用者が現れたときに見直します。
