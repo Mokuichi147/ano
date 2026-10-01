@@ -1688,9 +1688,29 @@ async fn undeclared_arguments_never_reach_a_local_tool() {
             },
         )
         .unwrap();
+    registry
+        .register(
+            ToolDefinition::new(
+                "closed",
+                "Closed",
+                json!({"type": "object", "additionalProperties": false}),
+            )
+            .always_offered(),
+            {
+                let calls = Arc::clone(&seen);
+                move |arguments| {
+                    let calls = Arc::clone(&calls);
+                    async move {
+                        calls.lock().unwrap().push(arguments);
+                        Ok(json!({}))
+                    }
+                }
+            },
+        )
+        .unwrap();
     let agent = agent(registry, Vec::new());
     let active = ActiveTools::default();
-    for name in ["commit", "open"] {
+    for name in ["commit", "open", "closed"] {
         with_scope(&active, async |scope| {
             agent
                 .handle_function_call(
@@ -1708,7 +1728,9 @@ async fn undeclared_arguments_never_reach_a_local_tool() {
         *seen.lock().unwrap(),
         [
             json!({"files": ["a"]}),
-            json!({"files": ["a"], "reviewed": {"a": "forged"}})
+            json!({"files": ["a"], "reviewed": {"a": "forged"}}),
+            // A schema that declares no properties allows none.
+            json!({})
         ]
     );
 }

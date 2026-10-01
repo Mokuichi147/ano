@@ -122,13 +122,13 @@ impl ToolDefinition {
         self
     }
 
-    /// `arguments` without the properties the schema does not declare, when
-    /// it allows no others. Fields that the runtime adds to a call, such as
-    /// the reviewed files of `git_commit_push`, then cannot come from the
-    /// model.
+    /// `arguments` without the top-level properties the schema does not
+    /// declare, when it allows no others (a schema without `properties`
+    /// declares none). Fields that the runtime adds to a call, such as the
+    /// reviewed files of `git_commit_push`, then cannot come from the model.
     pub fn declared_arguments(&self, mut arguments: Value) -> Value {
-        let declared = &self.parameters["properties"];
-        if self.parameters["additionalProperties"] == false && declared.is_object() {
+        if self.parameters["additionalProperties"] == false {
+            let declared = &self.parameters["properties"];
             if let Some(arguments) = arguments.as_object_mut() {
                 arguments.retain(|name, _| declared.get(name).is_some());
             }
