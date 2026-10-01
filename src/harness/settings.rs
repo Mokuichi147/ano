@@ -263,6 +263,67 @@ mod tests {
     }
 
     #[test]
+    fn every_key_reaches_its_setting() {
+        let config = parse(
+            "model = 'm'\ninstructions = 'i'\nmax_tool_rounds = 2\ntool_discovery_limit = 3\nmax_output_tokens = 4\nparallel_tool_calls = false\nmax_parallel_tool_calls = 5\ntool_timeout_secs = 6\nmax_tool_output_bytes = 7000\ncompact_threshold_bytes = 8000\ncompaction = 'summary'\nmax_total_tokens = 9\nreasoning_effort = 'low'\nreasoning_summary = 'concise'\nproject_instructions = []\napproval_mode = 'deny'\napproval_model = 'a'\nprovider = 'p'\n[roles]\ndefault = 'r1'\ndelegate = 'r2'\nreview = 'r3'\napproval = 'r4'\n",
+        )
+        .unwrap();
+        let AgentSettings {
+            model,
+            instructions,
+            max_tool_rounds,
+            tool_discovery_limit,
+            max_output_tokens,
+            parallel_tool_calls,
+            max_parallel_tool_calls,
+            tool_timeout_secs,
+            max_tool_output_bytes,
+            compact_threshold_bytes,
+            compaction,
+            max_total_tokens,
+            reasoning_effort,
+            reasoning_summary,
+        } = config.settings;
+        assert_eq!(
+            (
+                model.as_str(),
+                instructions.as_str(),
+                max_tool_rounds,
+                tool_discovery_limit
+            ),
+            ("m", "i", 2, 3)
+        );
+        assert_eq!(max_output_tokens, Some(4));
+        assert!(!parallel_tool_calls);
+        assert_eq!(
+            (
+                max_parallel_tool_calls,
+                tool_timeout_secs,
+                max_tool_output_bytes
+            ),
+            (5, 6, 7000)
+        );
+        assert_eq!(compact_threshold_bytes, Some(8000));
+        assert_eq!(compaction, CompactionMethod::Summary);
+        assert_eq!(max_total_tokens, Some(9));
+        assert_eq!(reasoning_effort.as_deref(), Some("low"));
+        assert_eq!(reasoning_summary.as_deref(), Some("concise"));
+        assert!(config.project_instructions.is_empty());
+        assert_eq!(config.approval_mode, ApprovalMode::Deny);
+        assert_eq!(config.approval_model.as_deref(), Some("a"));
+        assert_eq!(config.provider.as_deref(), Some("p"));
+        assert_eq!(
+            config.roles,
+            ModelRoles {
+                default: Some("r1".into()),
+                delegate: Some("r2".into()),
+                review: Some("r3".into()),
+                approval: Some("r4".into()),
+            }
+        );
+    }
+
+    #[test]
     fn unknown_or_mistyped_keys_are_rejected() {
         let unknown = parse("max_tool_round = 7").unwrap_err().to_string();
         assert!(unknown.contains("max_tool_round"), "{unknown}");

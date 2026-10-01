@@ -8,6 +8,7 @@ mod exec;
 mod git;
 mod glob;
 mod manage;
+pub mod names;
 mod paths;
 mod process;
 mod walk;

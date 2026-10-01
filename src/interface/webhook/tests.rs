@@ -665,3 +665,24 @@ async fn environments_run_on_their_own_provider_and_model() {
     assert_eq!(*seen.lock().unwrap(), vec![json!("qwen")]);
     server.abort();
 }
+
+#[tokio::test]
+async fn a_broken_skill_file_does_not_fail_the_job() {
+    let skills = tempfile::tempdir().unwrap();
+    let broken = skills.path().join("default").join("broken");
+    std::fs::create_dir_all(&broken).unwrap();
+    std::fs::write(broken.join("SKILL.md"), "no frontmatter").unwrap();
+    let (client, _, server) = api_fixture().await;
+    let mut state = state();
+    state.client = Arc::new(client);
+    let library = Arc::new(crate::infrastructure::skills::SkillLibrary::new(
+        skills.path(),
+    ));
+    library.register_tools(&state.harness.registry).unwrap();
+    state.harness.skills = Some(library);
+    let state = Arc::new(state);
+    let job = enqueue(&state, "fast").await;
+    wait_for_job(&state, &job, JobState::Completed).await;
+    shutdown_jobs(&state).await;
+    server.abort();
+}

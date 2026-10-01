@@ -18,6 +18,7 @@ use crate::{
         agent::{Agent, RunRequest},
         input::InputPart,
         ports::{ApprovalHandler, ConversationStore, McpApprovalRequest},
+        registry::ToolRegistry,
     },
     config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PRESET},
     domain::{
@@ -28,7 +29,6 @@ use crate::{
     harness::{
         approval::ApprovalFactory,
         models::{Connections, RunModels},
-        Harness,
     },
     infrastructure::memory_store::MemoryConversation,
 };
@@ -174,7 +174,7 @@ pub(super) async fn run(
     config: AppConfig,
     user_id: String,
     options: AgentOptions,
-    harness: Harness,
+    registry: ToolRegistry,
 ) -> Result<()> {
     let interactive = std::io::stdin().is_terminal();
     let lines = LineReader::spawn(interactive);
@@ -193,7 +193,7 @@ pub(super) async fn run(
         &config,
         &user_id,
         &options,
-        &harness,
+        registry,
         Arc::new(ChatApproval {
             lines: Arc::clone(&lines),
         }),

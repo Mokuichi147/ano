@@ -17,7 +17,7 @@ use crate::{
         github::RepoRef,
         tool::{ToolContext, ToolDefinition},
     },
-    harness::names::{GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME},
+    infrastructure::tools::names::{GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME},
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};

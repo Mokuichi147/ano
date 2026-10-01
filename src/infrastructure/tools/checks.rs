@@ -4,7 +4,7 @@ use super::process::run_bounded;
 use crate::{
     application::registry::ToolRegistry,
     domain::tool::{ToolContext, ToolDefinition},
-    harness::names::WORKSPACE_CHECK_NAME,
+    infrastructure::tools::names::WORKSPACE_CHECK_NAME,
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Value};

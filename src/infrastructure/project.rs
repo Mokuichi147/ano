@@ -1,8 +1,10 @@
 //! Project instruction files such as `AGENTS.md` in the workspace root.
 
-use crate::harness::instructions::MAX_PROJECT_INSTRUCTIONS_BYTES;
 use anyhow::{bail, Context, Result};
 use std::{io::ErrorKind, path::Path};
+
+/// Upper bound on the project instructions appended to one run.
+pub const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 
 /// Read the configured instruction files that exist in `workspace`, in order.
 ///

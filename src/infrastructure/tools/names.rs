@@ -1,4 +1,4 @@
-//! Names of the harness's built-in tools that its rules refer to.
+//! Names of the built-in tools that the harness's rules refer to.
 
 /// Built-in tool that runs shell commands when `ToolContext::allow_exec` is set.
 pub const WORKSPACE_EXEC_NAME: &str = "workspace_exec";

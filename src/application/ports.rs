@@ -221,8 +221,11 @@ pub trait HistoryBackend: Send + Sync {
     ) -> Result<Box<dyn ConversationStore + 'a>>;
     async fn sync(&self, user_id: &str) -> Result<Value>;
     /// 実行やコマンドが記録した原文を送る。失敗しても記録はローカルに残る
-    /// ため、実行は止めず、利用者への通知は実装が行う。
-    async fn sync_recorded(&self, user_id: &str);
+    /// ため実行は止めない。既定では失敗を無視し、利用者に知らせる実装は
+    /// これを上書きする。
+    async fn sync_recorded(&self, user_id: &str) {
+        let _ = self.sync(user_id).await;
+    }
 }
 
 /// What an approval request is for.

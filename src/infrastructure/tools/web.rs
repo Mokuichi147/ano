@@ -11,7 +11,7 @@ use super::args::{optional_bool, optional_integer};
 use crate::{
     application::registry::ToolRegistry,
     domain::tool::{ToolContext, ToolDefinition},
-    harness::names::WEB_FETCH_NAME,
+    infrastructure::tools::names::WEB_FETCH_NAME,
 };
 use anyhow::{bail, Context, Result};
 use futures::StreamExt;

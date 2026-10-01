@@ -11,7 +11,6 @@ pub mod approval;
 pub mod auto_approval;
 pub mod instructions;
 pub mod models;
-pub mod names;
 pub mod profile;
 pub mod review;
 pub mod settings;

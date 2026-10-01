@@ -15,6 +15,7 @@ use crate::{
         approval::DenyApproval,
         input::InputPart,
         ports::{McpGateway, ResponsesApi},
+        registry::ToolRegistry,
     },
     config::AppConfig,
     domain::plan::{RunOutcome, TaskGoal},
@@ -124,7 +125,7 @@ pub async fn serve(
     config: AppConfig,
     client: impl ResponsesApi + 'static,
     mcp: Arc<dyn McpGateway>,
-    harness: Harness,
+    registry: ToolRegistry,
 ) -> Result<()> {
     config.validate()?;
     let webhook = config.webhook.clone();
@@ -169,6 +170,7 @@ pub async fn serve(
         RunModels::resolve(&config, &base, &selection, &mut connections)
             .with_context(|| format!("failed to connect the providers of environment '{name}'"))?;
     }
+    let harness = Harness::with_registry(registry, &config)?;
     let state = Arc::new(WebhookState {
         harness,
         job_slots: Arc::new(Semaphore::new(webhook.max_concurrent_jobs)),

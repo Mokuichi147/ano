@@ -13,7 +13,9 @@ use super::{
 use crate::{
     application::registry::ToolRegistry,
     domain::tool::{ToolContext, ToolDefinition},
-    harness::names::{EXEC_DEFAULT_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS, WORKSPACE_EXEC_NAME},
+    infrastructure::tools::names::{
+        EXEC_DEFAULT_TIMEOUT_SECS, EXEC_MAX_TIMEOUT_SECS, WORKSPACE_EXEC_NAME,
+    },
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};

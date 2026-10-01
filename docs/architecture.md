@@ -35,7 +35,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-`config`（`src/config/`）は各層が持つ設定型を `config.toml` の1ファイルに束ねるモジュールです。束ねた設定から1回の実行の接続先・モデル・推論の強さを決める処理（`selection`）と、コメントや書式を保ったまま設定ファイルを書き換える処理（`edit`）もここに置きます。`[agent]` はハーネスの `AgentConfig` が受けます。
+`config`（`src/config/`）は各層が持つ設定型（ハーネスの `AgentConfig`、Webhook の `WebhookSettings` を含む）を `config.toml` の1ファイルに束ねるモジュールです。束ねた設定から1回の実行の接続先・モデル・推論の強さを決める処理（`selection`）と、コメントや書式を保ったまま設定ファイルを書き換える処理（`edit`）もここに置きます。`[agent]` はハーネスの `AgentConfig` が受けます。
 
 ## 依存のルール
 
@@ -43,11 +43,11 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 | --- | --- | --- |
 | `domain` | 標準ライブラリ、serde、anyhow | ネットワーク・プロセス・非同期 I/O |
 | `application` | `domain` | HTTP、MCP SDK、ファイル保存形式、端末入出力、特定の tool の名前 |
-| `infrastructure` | `application`、`domain`（組み込み tool はハーネスの tool 名） | CLI・Webhook の都合 |
+| `infrastructure` | `application`、`domain` | CLI・Webhook・ハーネスの都合 |
 | `harness` | `config`・`infrastructure`・`application`・`domain` | 端末入出力・HTTP サーバーの都合 |
 | `interface` | すべての層 | 業務ルール、`Agent` の組み立ての詳細 |
 
-エージェント（`domain`・`application`）の本体のコードが外側の層を参照していないことは、[`tests/layering.rs`](../tests/layering.rs) で確かめています（テストはアダプターを使ってかまいません）。
+エージェント（`domain`・`application`）の本体のコードが外側の層を参照していないこと（`domain` は `application` も参照しないこと）は、[`tests/layering.rs`](../tests/layering.rs) で確かめています。クレートのルートに再公開した型を経由する参照も違反として扱います。テストはアダプターを使ってかまいません。
 
 `application` が外部と話す必要がある箇所は、すべて [`src/application/ports.rs`](../src/application/ports.rs) のトレイト経由です。
 
@@ -120,7 +120,6 @@ src/
 │   ├── models.rs           接続先のクライアントと、メインのエージェント・ロールのモデルの解決
 │   ├── approval.rs         承認モードから承認ハンドラーを作る（ApprovalFactory）
 │   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
-│   ├── names.rs            規則が参照する組み込み tool の名前
 │   └── review.rs           review_changes と git_commit_push のレビュー照合（ReviewGate）
 ├── infrastructure/
 │   ├── openai.rs           Responses API クライアント（リトライ・SSE ストリーミング）
@@ -132,6 +131,7 @@ src/
 │   ├── fs.rs               原子的なファイル置き換え
 │   └── tools/
 │       ├── mod.rs          組み込み tool の登録（echo・unix_time）
+│       ├── names.rs        ハーネスの規則が参照する組み込み tool の名前
 │       ├── workspace.rs    list・read・search・find・edit・write
 │       ├── paths.rs        workspace 内に限ったパスの解決と、シンボリックリンクをたどらない書き込み
 │       ├── args.rs         tool 引数の読み取り

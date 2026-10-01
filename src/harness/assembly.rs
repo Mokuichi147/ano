@@ -33,6 +33,14 @@ impl Harness {
     pub fn new(config: &AppConfig) -> Result<Self> {
         let registry = ToolRegistry::new();
         register_builtin_tools(&registry)?;
+        Self::with_registry(registry, config)
+    }
+
+    /// Set up the raw history and skills that `config` enables, adding their
+    /// tools to `registry`, which holds the other tools. The raw history
+    /// needs its token, so callers set it up only once the rest of a command
+    /// has been checked.
+    pub fn with_registry(registry: ToolRegistry, config: &AppConfig) -> Result<Self> {
         let history = Chronotope::from_settings(&config.history, &registry)?;
         let skills = SkillLibrary::from_settings(&config.skills, &registry)?;
         Ok(Self {
@@ -52,7 +60,7 @@ impl Harness {
             profile.append_project_instructions(&sources);
         }
         match &self.skills {
-            Some(skills) => skills.add_to_instructions(profile),
+            Some(skills) => profile.append_skills(skills),
             None => Ok(Vec::new()),
         }
     }

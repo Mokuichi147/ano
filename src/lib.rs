@@ -60,7 +60,6 @@ pub use domain::{
 pub use harness::{
     approval::ApprovalFactory,
     instructions::DEFAULT_INSTRUCTIONS,
-    names::{REVIEW_CHANGES_NAME, WORKSPACE_EXEC_NAME},
     profile::ExecutionProfile,
     review::{ReviewGate, REVIEW_ROLE},
     settings::{AgentConfig, ModelRoles},
@@ -71,7 +70,10 @@ pub use infrastructure::{
     mcp::McpPool,
     openai::{create_client, ApiAuth, ApiSettings, OpenAiClient, ProviderSettings},
     session_store::Session,
-    tools::register_builtin_tools,
+    tools::{
+        names::{REVIEW_CHANGES_NAME, WORKSPACE_EXEC_NAME},
+        register_builtin_tools,
+    },
 };
 pub use interface::{
     cli::InteractiveApproval,

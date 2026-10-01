@@ -3,8 +3,6 @@
 
 use crate::domain::skill::{Skill, SKILL_READ_NAME, SKILL_SAVE_NAME};
 
-/// Upper bound on the project instructions appended to one run.
-pub const MAX_PROJECT_INSTRUCTIONS_BYTES: usize = 64 * 1024;
 /// Upper bound on the list of skills appended to one run. Skills beyond it
 /// are left out of the list but can still be read by name.
 pub const MAX_SKILL_INDEX_BYTES: usize = 16 * 1024;

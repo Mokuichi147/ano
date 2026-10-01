@@ -5,7 +5,7 @@ use crate::{
     application::registry::ToolRegistry,
     config::AppConfig,
     domain::{mcp::McpTransport, plan::TASK_PLAN_NAME, tool::DELEGATE_TASK_NAME},
-    harness::names::{
+    infrastructure::tools::names::{
         GIT_COMMIT_PUSH_NAME, REVIEW_CHANGES_NAME, WEB_FETCH_NAME, WORKSPACE_CHECK_NAME,
         WORKSPACE_EXEC_NAME,
     },

@@ -8,6 +8,7 @@ use crate::{
         approval::DenyApproval,
         input::InputPart,
         ports::{ApprovalHandler, McpGateway},
+        registry::ToolRegistry,
     },
     config::{AppConfig, ModelRequest, ModelSelection},
     domain::{
@@ -67,7 +68,7 @@ pub(super) fn prepare_agent(
     config: &AppConfig,
     user_id: &str,
     options: &AgentOptions,
-    harness: &Harness,
+    registry: ToolRegistry,
     ask_user: Arc<dyn ApprovalHandler>,
     stdin_is_terminal: bool,
     stream: Option<output::TextFormat>,
@@ -78,6 +79,7 @@ pub(super) fn prepare_agent(
         base,
         explicit,
     } = resolve_run_context(config, user_id, options)?;
+    let harness = Harness::with_registry(registry, config)?;
     for problem in harness.add_instructions(&mut profile)? {
         eprintln!("warning: skipped skill {problem}");
     }
@@ -187,7 +189,7 @@ pub(super) async fn run_agent(
     config: AppConfig,
     user_id: String,
     args: RunArgs,
-    harness: Harness,
+    registry: ToolRegistry,
 ) -> Result<()> {
     let stdin_is_terminal = std::io::stdin().is_terminal();
     // Validate options that need no network before reading a piped prompt.
@@ -223,7 +225,7 @@ pub(super) async fn run_agent(
         &config,
         &user_id,
         &args.agent,
-        &harness,
+        registry,
         Arc::new(InteractiveApproval),
         stdin_is_terminal,
         // Show the answer while it is generated, unless it goes to a pipe or

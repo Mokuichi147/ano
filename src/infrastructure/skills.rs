@@ -9,11 +9,9 @@
 use crate::{
     application::registry::ToolRegistry,
     domain::{
-        approval::ApprovalMode,
         skill::{validate_skill_name, Skill, SKILL_READ_NAME, SKILL_SAVE_NAME},
         tool::ToolDefinition,
     },
-    harness::{instructions::append_skills, profile::ExecutionProfile},
     infrastructure::fs::atomic_write,
 };
 use anyhow::{bail, Context, Result};
@@ -177,25 +175,6 @@ impl SkillLibrary {
         Ok(SavedSkill { path, created })
     }
 
-    /// Tell the run in `profile` about its user's skills, when the run may
-    /// read them. Saving is mentioned only when `skill_save` is allowed and
-    /// can be approved. Returns the problems of skills that were left out.
-    pub fn add_to_instructions(&self, profile: &mut ExecutionProfile) -> Result<Vec<String>> {
-        let available =
-            |name: &str| profile.policy.is_allowed(name) && !profile.policy.is_disabled(name);
-        if !available(SKILL_READ_NAME) {
-            return Ok(Vec::new());
-        }
-        let can_save = available(SKILL_SAVE_NAME) && profile.approval_mode != ApprovalMode::Deny;
-        let listing = self.list(&profile.context.user_id)?;
-        append_skills(
-            &mut profile.settings.instructions,
-            &listing.skills,
-            can_save,
-        );
-        Ok(listing.problems)
-    }
-
     pub fn register_tools(self: &Arc<Self>, registry: &ToolRegistry) -> Result<()> {
         if !registry.is_registered(SKILL_READ_NAME) {
             let library = Arc::clone(self);
@@ -357,7 +336,6 @@ pub fn display_path(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{policy::UserPolicy, tool::ToolContext};
 
     fn skill(name: &str) -> Skill {
         Skill::new(
@@ -451,44 +429,5 @@ mod tests {
             assert!(library.user_dir(user).is_err(), "{user:?}");
         }
         assert!(library.read("default", "../secret").is_err());
-    }
-
-    #[test]
-    fn instructions_list_skills_and_mention_saving_only_when_it_can_succeed() {
-        let root = tempfile::tempdir().unwrap();
-        let library = SkillLibrary::new(root.path());
-        library.save("default", &skill("release-build")).unwrap();
-        let profile = |policy: UserPolicy, approval_mode| ExecutionProfile {
-            settings: Default::default(),
-            project_instructions: Vec::new(),
-            policy,
-            context: ToolContext {
-                user_id: "default".into(),
-                ..ToolContext::default()
-            },
-            approval_mode,
-        };
-
-        let mut run = profile(UserPolicy::default(), ApprovalMode::Ask);
-        let base = run.settings.instructions.clone();
-        library.add_to_instructions(&mut run).unwrap();
-        let added = &run.settings.instructions[base.len()..];
-        assert!(
-            added.contains("- release-build: Use for release-build: it says so."),
-            "{added}"
-        );
-        assert!(added.contains(SKILL_SAVE_NAME), "{added}");
-
-        let mut denied = profile(UserPolicy::default(), ApprovalMode::Deny);
-        library.add_to_instructions(&mut denied).unwrap();
-        assert!(denied.settings.instructions.contains(SKILL_READ_NAME));
-        assert!(!denied.settings.instructions.contains(SKILL_SAVE_NAME));
-
-        let mut restricted = profile(
-            UserPolicy::new(Vec::new(), Some(vec!["workspace_*".into()])),
-            ApprovalMode::Ask,
-        );
-        library.add_to_instructions(&mut restricted).unwrap();
-        assert_eq!(restricted.settings.instructions, base);
     }
 }

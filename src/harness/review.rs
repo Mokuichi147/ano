@@ -2,7 +2,9 @@
 //! committed only in the state a read-only reviewer in a fresh conversation
 //! last saw.
 
-use super::names::{GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME, REVIEW_CHANGES_NAME};
+use crate::infrastructure::tools::names::{
+    GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME, REVIEW_CHANGES_NAME,
+};
 use crate::{
     application::agent::{AgentExtension, ExtensionCall, RunInfo, SubagentSpec},
     domain::tool::{ToolContext, ToolDefinition},
