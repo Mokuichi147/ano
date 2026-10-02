@@ -183,13 +183,6 @@ struct AgentOptions {
 
     #[arg(
         long,
-        conflicts_with = "environment",
-        help = "Allow web_fetch to read public web pages (each fetch needs approval)"
-    )]
-    allow_web: bool,
-
-    #[arg(
-        long,
         value_name = "NAME",
         help = "Use a configured environment and its tool restrictions"
     )]

@@ -55,7 +55,6 @@ pub(super) struct NewSession {
     pub(super) preset: Option<String>,
     pub(super) allow_writes: bool,
     pub(super) allow_exec: bool,
-    pub(super) allow_web: bool,
     /// Defaults to `[agent].approval_mode` (`auto` unless set).
     pub(super) approval_mode: Option<ApprovalMode>,
 }
@@ -71,7 +70,6 @@ pub(super) struct SessionInfo {
     pub(super) endpoint: String,
     pub(super) allow_writes: bool,
     pub(super) allow_exec: bool,
-    pub(super) allow_web: bool,
     pub(super) approval_mode: ApprovalMode,
     pub(super) created_at_unix: u64,
 }
@@ -175,7 +173,6 @@ impl WebSession {
             endpoint,
             allow_writes: context.allow_writes,
             allow_exec: context.allow_exec,
-            allow_web: context.allow_web,
             approval_mode: profile.approval_mode,
             created_at_unix: unix_now(),
         };
@@ -328,11 +325,7 @@ fn resolve_profile(
         .transpose()?;
     let (mut profile, base) = match &request.environment {
         Some(name) => {
-            if request.allow_writes
-                || request.allow_exec
-                || request.allow_web
-                || request.approval_mode.is_some()
-            {
+            if request.allow_writes || request.allow_exec || request.approval_mode.is_some() {
                 bail!("environment '{name}' sets the permissions and the approval mode");
             }
             let mut profile = config.execution_profile(bench.user, name, &[])?;
@@ -359,7 +352,6 @@ fn resolve_profile(
                     ),
                     allow_writes: request.allow_writes,
                     allow_exec: request.allow_exec,
-                    allow_web: request.allow_web,
                     checks: Default::default(),
                 },
                 approval_mode: request.approval_mode.unwrap_or(config.agent.approval_mode),
@@ -458,7 +450,7 @@ mod tests {
             Some(std::fs::canonicalize(chosen.path()).unwrap())
         );
         assert_eq!(context.environment, WEB_ENVIRONMENT);
-        assert!(context.allow_writes && !context.allow_exec && !context.allow_web);
+        assert!(context.allow_writes && !context.allow_exec);
         assert_eq!(profile.approval_mode, ApprovalMode::Auto);
         assert_eq!(selection.choice.provider, "local");
         assert_eq!(profile.settings.model, "qwen");

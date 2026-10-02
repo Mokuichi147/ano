@@ -13,12 +13,7 @@ use naui::{
 use serde_json::{json, Map, Value};
 use std::{cell::Cell, rc::Rc};
 
-const APPROVAL_MODES: [(&str, &str); 4] = [
-    ("ask", "ask — ブラウザで確認する"),
-    ("auto", "auto — 判定モデルが決め、迷うものだけ確認する"),
-    ("allow", "allow — すべて許可する"),
-    ("deny", "deny — すべて拒否する"),
-];
+use crate::timeline::APPROVAL_MODES;
 
 const WORKSPACE_NOTE: &str =
     "~ はホームディレクトリ。エージェントのファイル操作とコマンドはこのフォルダの中で行われます";
@@ -33,7 +28,6 @@ struct Form {
     preset: ComboBox,
     writes: Checkbox,
     exec: Checkbox,
-    web: Checkbox,
     approval: ComboBox,
     error: Label,
 }
@@ -61,7 +55,7 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
     card.append(&note);
 
     let environment = ui.combo_box()?;
-    let mut environments = vec!["なし（ここで権限を選ぶ）".to_string()];
+    let mut environments = vec!["なし".to_string()];
     environments.extend(names(options, "environments").map(str::to_string));
     environment.set_items(&environments.iter().map(String::as_str).collect::<Vec<_>>());
     environment.set_selected(0);
@@ -99,11 +93,9 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
 
     card.append(&caption(app, "権限")?);
     let writes = ui.checkbox("ファイルの書き込み・編集")?;
-    let exec = ui.checkbox("コマンドの実行（実行ごとに承認）")?;
-    let web = ui.checkbox("Web ページの取得（取得ごとに承認）")?;
+    let exec = ui.checkbox("コマンドの実行")?;
     card.append(&writes);
     card.append(&exec);
-    card.append(&web);
 
     card.append(&caption(app, "承認モード")?);
     let approval = ui.combo_box()?;
@@ -126,7 +118,6 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
         preset,
         writes,
         exec,
-        web,
         approval,
         error,
     });
@@ -200,7 +191,7 @@ impl Form {
     fn follow_environment(&self) {
         let environment = self.environment();
         let fixed = environment.is_some();
-        for checkbox in [&self.writes, &self.exec, &self.web] {
+        for checkbox in [&self.writes, &self.exec] {
             checkbox.set_enabled(!fixed);
         }
         self.approval.set_enabled(!fixed);
@@ -211,7 +202,6 @@ impl Form {
             Some(environment) => {
                 self.writes.set_checked(environment["allow_writes"] == true);
                 self.exec.set_checked(environment["allow_exec"] == true);
-                self.web.set_checked(environment["allow_web"] == true);
                 self.select_approval(environment["approval_mode"].as_str().unwrap_or("ask"));
                 match environment["workspace"].as_str() {
                     Some(workspace) => {
@@ -227,7 +217,7 @@ impl Form {
                 }
             }
             None => {
-                for checkbox in [&self.writes, &self.exec, &self.web] {
+                for checkbox in [&self.writes, &self.exec] {
                     checkbox.set_checked(false);
                 }
                 self.select_approval(
@@ -262,7 +252,6 @@ impl Form {
             None => {
                 body.insert("allow_writes".into(), json!(self.writes.is_checked()));
                 body.insert("allow_exec".into(), json!(self.exec.is_checked()));
-                body.insert("allow_web".into(), json!(self.web.is_checked()));
                 let mode = self
                     .approval
                     .selected()

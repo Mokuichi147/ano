@@ -372,7 +372,6 @@ async fn options(State(state): State<Arc<WebState>>) -> Response {
                 "workspace": environment.workspace,
                 "allow_writes": environment.allow_writes,
                 "allow_exec": environment.allow_exec,
-                "allow_web": environment.allow_web,
                 "approval_mode": environment.effective_approval_mode(),
             })
         })

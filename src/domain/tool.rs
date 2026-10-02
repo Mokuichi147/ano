@@ -176,8 +176,6 @@ pub struct ToolContext {
     pub allow_writes: bool,
     /// Whether `workspace_exec` may run commands in the workspace.
     pub allow_exec: bool,
-    /// Whether `web_fetch` may read public web pages.
-    pub allow_web: bool,
     pub checks: BTreeMap<String, CheckConfig>,
 }
 

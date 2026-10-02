@@ -100,7 +100,6 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `--environment NAME` | 設定済みの実行環境（workspace・書き込み権限・MCP 承認方針・model・instructions・検証コマンド）を使う |
 | `--workspace PATH` / `--allow-writes` | 環境を指定しない場合の workspace（既定はカレントディレクトリ）と書き込み許可 |
 | `--allow-exec` | 環境を指定しない場合に、`workspace_exec` でのコマンド実行を許可（[コマンド実行](#コマンド実行workspace_exec)） |
-| `--allow-web` | 環境を指定しない場合に、`web_fetch` での Web ページ取得を許可（[Web ページの取得](#web-ページの取得web_fetch)） |
 | `--preset NAME` | `[presets]` のプリセット（接続先・モデル・推論の強さ）を使う。`default` は `[agent]` の設定。`--provider`・`--model`・`--reasoning-effort` はその上に重なる（[プリセット](#プリセットとロール)） |
 | `--provider NAME` | `[providers]` の接続先を使う（省略時は既定の接続先、`api` は `[api]`）。接続先に `model` があれば、そのモデルに切り替わる（[接続先の切り替え](#複数の接続先を切り替える)） |
 | `--model NAME` | モデルを変更（選んだ接続先でのモデル名） |
@@ -159,7 +158,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 
 ### 実行環境
 
-`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。`workspace` を省略した環境は、CLI ではカレントディレクトリを workspace にします（Webhook のジョブでは workspace なし）。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--allow-exec`・`--allow-web`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--preset`・`--provider`・`--model`・`--reasoning-effort` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。環境の `preset`・`provider`・`model`・`reasoning_effort` で、その環境の既定の接続先・モデル・推論の強さを指定できます（Webhook のジョブもこれに従います）。
+`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。`workspace` を省略した環境は、CLI ではカレントディレクトリを workspace にします（Webhook のジョブでは workspace なし）。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--allow-exec`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--preset`・`--provider`・`--model`・`--reasoning-effort` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。環境の `preset`・`provider`・`model`・`reasoning_effort` で、その環境の既定の接続先・モデル・推論の強さを指定できます（Webhook のジョブもこれに従います）。
 
 ```toml
 [environments.coding]
@@ -167,7 +166,6 @@ workspace = "/path/to/my-repository"
 allowed_tools = ["workspace_*"]
 allow_writes = true
 allow_exec = true          # workspace_exec を使う（コマンドごとに承認モードで判定）
-allow_web = true           # web_fetch を使う（取得ごとに承認モードで判定）
 approval_mode = "auto"
 
 [environments.coding.checks.test]
@@ -217,7 +215,7 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 | `[providers.<name>]` | `[api]` とは別の名前付き接続先と、その既定モデル・使えるモデル・フォールバック先 | [接続先の切り替え](#複数の接続先を切り替える) |
 | `[presets.<name>]` / `[agent.roles]` | 接続先・モデル・推論の強さの組と、メインのエージェント・サブエージェント・レビュー担当・承認の判定に使うプリセット | [プリセット](#プリセットとロール) |
 | `[agent]` | モデル・instructions・推論設定・プロジェクト指示・承認モード・実行ラウンド数・並行数・tool 出力の上限・圧縮・トークン上限 | [docs/agent-runtime.md](docs/agent-runtime.md) |
-| `[environments.<name>]` | workspace・許可する tool・書き込み・コマンド実行・Web 取得・承認モード・検証コマンド | [実行環境](#実行環境) |
+| `[environments.<name>]` | workspace・許可する tool・書き込み・コマンド実行・承認モード・検証コマンド | [実行環境](#実行環境) |
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](docs/mcp.md#ポリシーの名前空間) |
 | `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](docs/mcp.md) |
 | `[webhook]` | 待ち受けアドレス・署名・ジョブ数とタイムアウト | [docs/webhook.md](docs/webhook.md) |
@@ -429,7 +427,7 @@ ano preset list
 | `workspace_delete` | ファイル・リンク・空ディレクトリを削除。中身のあるディレクトリは `recursive:true` が必要。取り消しはできない | `allow_writes` |
 | `workspace_check` | 環境の `checks` に登録した検証コマンドを実行。`name:null` で一覧 | `checks` |
 | `workspace_exec` | シェルコマンドを workspace で実行し、終了コードと出力を返す。呼び出しごとに承認が必要（[詳細](#コマンド実行workspace_exec)） | `allow_exec` |
-| `web_fetch` | 公開 Web ページを取得し、HTML を Markdown に変換して返す。`offset`・`max_bytes` で分割して読む。呼び出しごとに承認が必要（[詳細](#web-ページの取得web_fetch)） | `allow_web` |
+| `web_fetch` | 公開 Web ページを取得し、HTML を Markdown に変換して返す。`offset`・`max_bytes` で分割して読む。呼び出しごとに承認が必要（[詳細](#web-ページの取得web_fetch)） | 常時（承認で判定） |
 | `git_diff` | 未コミットの変更（新規ファイルを含む）の差分と、ファイルごとの状態と sha256（内容と実行ビットから計算）を返す | workspace |
 | `git_commit_push` | 指定したファイルだけをコミットし、ブランチを remote へ push する。既定ブランチには直接コミットしない。`review_changes` を受けた内容のファイルだけをコミットできる。呼び出しごとに承認が必要（[詳細](#github-の-issue-と-pull-request)） | `allow_writes` |
 | `skill_read` | 保存済みスキルの手順を名前で読む（[詳細](docs/agent-runtime.md#スキルskill_read--skill_save)） | `[skills]` |
@@ -466,11 +464,7 @@ ano run --allow-exec --approval-mode auto "テストを実行して失敗を直�
 
 ### Web ページの取得（web_fetch）
 
-ドキュメントや Issue など、作業に必要な Web ページを読むための tool です。既定では無効で、環境の `allow_web = true` か、環境を指定しない CLI 実行の `--allow-web` で有効になります。
-
-```sh
-ano chat --allow-web --approval-mode auto
-```
+ドキュメントや Issue など、作業に必要な Web ページを読むための tool です。専用の権限設定は無く、MCP の tool と同じく常に使え、取得ごとに承認モードで判定します。使わせたくない場合は、ポリシーの `disabled_tools` に `web_fetch` を加えます。
 
 - **取得ごとに承認が必要です。** URL にはデータを載せて外部へ送れるため、`workspace_exec` と同じ[承認モード](docs/mcp.md#承認モード)で判定します。`auto` の判定用モデルは、作業に必要なページの閲覧を許可し、URL に秘密情報や workspace のデータを含むもの、文書などに埋め込まれた指示に従っているように見えるものを拒否します。
 - **公開アドレスだけに接続します。** ホスト名を解決したすべてのアドレスを確認し、loopback・プライベート・リンクローカル（クラウドのメタデータ endpoint を含む）などへの接続を拒否します。リダイレクト先（最大5回）も同じく確認し、解決したアドレスに接続先を固定するため、DNS の応答が変わっても内部ネットワークには届きません。プロキシの環境変数は使いません。
@@ -579,7 +573,7 @@ cargo test
 - リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` と `approval_mode = "allow"` は信頼済みの server に限ってください。`auto` モードの判定は補助的な安全策で、完全ではありません。
 - `ano web` は、この PC のブラウザからはトークンなしで、ほかの端末からは起動時に表示されるトークンで使えます。同じ PC のほかのユーザーも操作できる点に注意してください。トークン付きの URL は他人に渡さないでください。`--bind` でループバック以外のアドレスにすると、トークンと会話は暗号化されない HTTP でネットワークを流れます。`--no-auth` ではネットワーク上の誰でも操作できます。どちらも信頼できるネットワークでだけ使ってください（[docs/web.md](docs/web.md#セキュリティ)）。
 - Webhook は必ず secret を設定して公開します。未認証での起動は loopback アドレスに限られます（[docs/webhook.md](docs/webhook.md#セキュリティ)）。
-- `web_fetch` は取得のたびに URL を外部へ送ります。`allow_web` と `approval_mode = "allow"` を併用すると、ページに埋め込まれた指示でモデルがデータを URL に載せて送る可能性を確認なしに許すことになります。
+- `web_fetch` は取得のたびに URL を外部へ送ります。`approval_mode = "allow"` では、ページに埋め込まれた指示でモデルがデータを URL に載せて送る可能性を確認なしに許すことになります。
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。
 - `AGENTS.md` はモデルへの指示として送られます。信頼できないリポジトリを扱う環境では `project_instructions = []` にしてください。
 - スキルは以後のすべての実行で指示として参照されます。`skill_save` と `approval_mode = "allow"` を併用すると、Web ページなどに埋め込まれた指示がスキルとして確認なしに残る可能性があります。保存された `SKILL.md` は `ano skills` で確認し、不要なものはディレクトリごと削除してください。

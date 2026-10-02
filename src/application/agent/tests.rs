@@ -1522,7 +1522,6 @@ impl AgentExtension for ProbeExtension {
                 user_id: "someone-else".into(),
                 allow_writes: true,
                 allow_exec: true,
-                allow_web: true,
                 ..call.run().context.clone()
             },
             instructions: "You are a probe.".into(),

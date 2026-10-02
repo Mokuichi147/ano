@@ -40,6 +40,22 @@ pub fn one_line(value: &Value, limit: usize) -> String {
     }
 }
 
+/// The approval modes, in the order the form offers them, with their labels.
+pub const APPROVAL_MODES: [(&str, &str); 4] = [
+    ("ask", "手動（ask）"),
+    ("auto", "自動（auto）"),
+    ("allow", "全て許可（allow）"),
+    ("deny", "全て拒否（deny）"),
+];
+
+/// The label of approval mode `mode`.
+pub fn approval_mode(mode: &str) -> &str {
+    APPROVAL_MODES
+        .iter()
+        .find(|(name, _)| *name == mode)
+        .map_or(mode, |(_, label)| label)
+}
+
 pub fn outcome(outcome: &str) -> &'static str {
     match outcome {
         "completed" => "完了",

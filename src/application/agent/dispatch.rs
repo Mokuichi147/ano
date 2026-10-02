@@ -644,7 +644,6 @@ impl Agent {
             workspace: parent.workspace.clone(),
             allow_writes: spec.context.allow_writes && parent.allow_writes,
             allow_exec: spec.context.allow_exec && parent.allow_exec,
-            allow_web: spec.context.allow_web && parent.allow_web,
             checks: parent
                 .checks
                 .iter()

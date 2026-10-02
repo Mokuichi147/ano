@@ -715,16 +715,12 @@ fn bubble(app: &App, classes: &str) -> naui::Result<Stack> {
 /// The session's settings as name and value rows.
 fn info(app: &App, status: &Value) -> naui::Result<naui::Grid> {
     let text = |field: &str| status[field].as_str().unwrap_or("—").to_string();
-    let permissions = [
-        ("allow_writes", "書き込み"),
-        ("allow_exec", "コマンド"),
-        ("allow_web", "Web"),
-    ]
-    .iter()
-    .filter(|(field, _)| status[*field] == true)
-    .map(|(_, name)| *name)
-    .collect::<Vec<_>>()
-    .join("・");
+    let permissions = [("allow_writes", "書き込み"), ("allow_exec", "コマンド")]
+        .iter()
+        .filter(|(field, _)| status[*field] == true)
+        .map(|(_, name)| *name)
+        .collect::<Vec<_>>()
+        .join("・");
     let rows = [
         ("作業フォルダ", text("workspace")),
         ("環境", text("environment")),
@@ -738,7 +734,10 @@ fn info(app: &App, status: &Value) -> naui::Result<naui::Grid> {
                 permissions
             },
         ),
-        ("承認", text("approval_mode")),
+        (
+            "承認",
+            timeline::approval_mode(&text("approval_mode")).to_string(),
+        ),
         ("ユーザー", text("user")),
     ];
     let grid = app.ui.grid()?;

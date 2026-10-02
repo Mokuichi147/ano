@@ -189,4 +189,4 @@ Invoke-RestMethod -Method Post -Uri "http://127.0.0.1:8080/jobs/$jobId/cancel" `
 - Webhook 実行は対話端末を持たないため、MCP の承認は既定で拒否されます。環境に `approval_mode = "auto"` を設定すると、判定用モデルが承認した呼び出しだけを実行し、確認が必要と判定されたものは拒否します。すべて承認する `approval_mode = "allow"`（`auto_approve_mcp = true`）は信頼済みの環境だけにしてください。
 - 書き込みは `allow_writes = true` の環境でだけ可能です。
 - コマンド実行（`workspace_exec`）は `allow_exec = true` の環境でだけ使え、MCP と同じ承認モードで判定します。既定の `deny` では実行されません。`approval_mode = "auto"` では判定用モデルが承認したコマンドだけを実行します。
-- Web ページの取得（`web_fetch`）は `allow_web = true` の環境でだけ使え、同じ承認モードで判定します。取得先は公開アドレスに限られ、ローカルネットワークやクラウドのメタデータ endpoint には接続しません。
+- Web ページの取得（`web_fetch`）は MCP の tool と同じく常に使え、同じ承認モードで判定します。取得先は公開アドレスに限られ、ローカルネットワークやクラウドのメタデータ endpoint には接続しません。

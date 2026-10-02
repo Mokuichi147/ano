@@ -304,7 +304,6 @@ fn resolve_run_context(
                 }),
                 allow_writes: args.allow_writes,
                 allow_exec: args.allow_exec,
-                allow_web: args.allow_web,
                 checks: Default::default(),
             },
             approval_mode: config.agent.approval_mode,
@@ -437,7 +436,6 @@ mod tests {
         assert_eq!(context.workspace, Some(std::env::current_dir().unwrap()));
         assert!(!context.allow_writes);
         assert!(!context.allow_exec);
-        assert!(!context.allow_web);
         assert_eq!(approval_mode, ApprovalMode::Deny);
     }
 
@@ -447,7 +445,6 @@ mod tests {
             vec!["--workspace", "."],
             vec!["--allow-writes"],
             vec!["--allow-exec"],
-            vec!["--allow-web"],
             vec!["--auto-approve-mcp"],
         ] {
             let mut arguments = vec!["ano", "run", "--environment", "review", "review"];

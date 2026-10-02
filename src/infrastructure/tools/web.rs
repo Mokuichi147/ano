@@ -1,16 +1,15 @@
 //! `web_fetch`: read a web page as Markdown text.
 //!
-//! Only available when the environment sets `allow_web`, and every call goes
+//! Like an MCP tool, it needs no permission of its own: every call goes
 //! through the run's approval handler first, because a URL can carry data out
-//! of the workspace. Only public addresses are fetched: the host is resolved
+//! of the workspace, and the user's policy can disable it. Only public addresses are fetched: the host is resolved
 //! once, every address is checked, and the connection is pinned to them, so a
 //! page cannot reach the local network or cloud metadata endpoints, also not
 //! through a redirect or a changed DNS answer.
 
 use super::args::{optional_bool, optional_integer};
 use crate::{
-    application::registry::ToolRegistry,
-    domain::tool::{ToolContext, ToolDefinition},
+    application::registry::ToolRegistry, domain::tool::ToolDefinition,
     infrastructure::tools::names::WEB_FETCH_NAME,
 };
 use anyhow::{bail, Context, Result};
@@ -45,18 +44,12 @@ pub(super) fn register(registry: &ToolRegistry) -> Result<()> {
             "additionalProperties": false
         }),
     )
-    .with_approval()
-    .available_when(|context| context.allow_web);
+    .with_approval();
     definition.strict = false;
-    registry.register_contextual(definition, |arguments, context| async move {
-        web_fetch(arguments, &context).await
-    })
+    registry.register(definition, web_fetch)
 }
 
-async fn web_fetch(arguments: Value, context: &ToolContext) -> Result<Value> {
-    if !context.allow_web {
-        bail!("web access is not enabled for this environment (allow_web)");
-    }
+async fn web_fetch(arguments: Value) -> Result<Value> {
     let url = arguments["url"]
         .as_str()
         .context("web_fetch.url must be a string")?;
@@ -366,17 +359,6 @@ mod tests {
                 "{url}"
             );
         }
-    }
-
-    #[tokio::test]
-    async fn requires_allow_web() {
-        let error = web_fetch(
-            json!({"url": "https://example.com/"}),
-            &ToolContext::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("allow_web"));
     }
 
     #[tokio::test]

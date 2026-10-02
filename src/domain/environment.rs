@@ -27,9 +27,6 @@ pub struct EnvironmentConfig {
     /// Let `workspace_exec` run arbitrary commands in the workspace. Every
     /// command still goes through the approval mode.
     pub allow_exec: bool,
-    /// Let `web_fetch` read public web pages. Every fetch still goes through
-    /// the approval mode, since a URL can carry data out.
-    pub allow_web: bool,
     /// Shorthand for `approval_mode = "allow"`. Kept for existing configs.
     pub auto_approve_mcp: bool,
     /// How MCP approval requests are answered in this environment. Defaults

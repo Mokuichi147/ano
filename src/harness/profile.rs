@@ -60,7 +60,6 @@ impl ExecutionProfile {
                 workspace: environment.workspace.clone(),
                 allow_writes: environment.allow_writes,
                 allow_exec: environment.allow_exec,
-                allow_web: environment.allow_web,
                 checks: environment.checks.clone(),
             },
             approval_mode: environment.effective_approval_mode(),
