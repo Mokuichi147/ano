@@ -7,10 +7,10 @@ use std::{fmt, str::FromStr};
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalMode {
     /// Ask the user. Without a terminal, requests are denied.
-    #[default]
     Ask,
     /// A reviewer model allows low-risk calls within the user's request,
     /// denies clearly unsafe ones, and asks the user about the rest.
+    #[default]
     Auto,
     /// Approve every request.
     Allow,

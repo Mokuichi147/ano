@@ -75,6 +75,7 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `ano chat` | 同じ会話で複数ターンのやり取りをします（[対話モード](#対話モード)） |
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
+| `ano web` | ブラウザで対話する Web UI を起動します。セッションごとに作業フォルダ・権限・モデルを選べます（[docs/web.md](docs/web.md)） |
 | `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](docs/chronotope-history.md)） |
 | `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](docs/agent-runtime.md#スキルskill_read--skill_save)） |
@@ -110,7 +111,7 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `--session PATH` / `--recover-session` | 会話を保存・再開（[セッション](docs/agent-runtime.md#会話セッション)） |
 | `--compact-threshold-bytes N` / `--max-total-tokens N` | 履歴の圧縮とトークン上限（[圧縮と上限](docs/agent-runtime.md#履歴の圧縮)） |
 | `--max-tool-rounds N` | この実行で送る Responses 要求の回数の上限（`agent.max_tool_rounds` を上書き。既定は 100。最後の1回は tool を使わない報告に充てる）。暴走を止める歯止めで、費用の予算には `--max-total-tokens` を使う |
-| `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査し、迷うものだけ確認）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
+| `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査し、迷うものだけ確認。既定）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
 | `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |
 | `--quiet` / `--verbose` | 進捗ログを省略 / 途中経過もすべて残し、引数と結果を含めて詳しく表示 |
@@ -150,7 +151,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | `/exit`、Ctrl+D | 終了 |
 | Ctrl+C | 実行中のターンだけを中断し、会話は続ける（完了した操作は巻き戻しません） |
 
-MCP の tool 呼び出しを毎回確認せずに進めるには、`ano chat --approval-mode auto` か、設定の `[agent] approval_mode = "auto"` を使います。判定用モデルが依頼の範囲内で危険の少ない呼び出しを自動で承認し、影響の大きい操作だけを確認します（[自動承認](docs/mcp.md#自動承認auto)）。端末では全角文字の表示幅を考慮する行編集を使うため、IME での日本語入力や削除も正しく表示されます。`--session` を付けない場合、会話はプロセス内のメモリだけに保持されます。MCP の承認は同じ端末で確認します。stdin をパイプで渡すと、1行ずつ指示として処理します（承認は拒否されます）。
+承認モードの既定は `auto` です。判定用モデルが依頼の範囲内で危険の少ない呼び出しを自動で承認し、影響の大きい操作だけを確認します（[自動承認](docs/mcp.md#自動承認auto)）。すべてを自分で確認するには `--approval-mode ask` か、設定の `[agent] approval_mode = "ask"` を使います。端末では全角文字の表示幅を考慮する行編集を使うため、IME での日本語入力や削除も正しく表示されます。`--session` を付けない場合、会話はプロセス内のメモリだけに保持されます。MCP の承認は同じ端末で確認します。stdin をパイプで渡すと、1行ずつ指示として処理します（承認は拒否されます）。
 
 ### 画像・音声入力
 
@@ -500,7 +501,7 @@ ano chat --allow-writes
 > PR #8 をレビューして、気になる点をコメントして
 ```
 
-モデルは `issue_read` で Issue を読み、workspace を編集し、`review_changes` で別の新しい会話のレビュー担当にレビューさせ、指摘を判断して対処してから、`git_commit_push` で push し、`create_pull_request` で PR を作ります。レビューは必須で、レビュー後にファイルを変えた場合は再度レビューを受けるまで push できません（[変更のレビュー](docs/agent-runtime.md#変更のレビューreview_changes)）。push と PR 作成はそれぞれ承認を求めます（既定の `ask` では `[y/N]` で確認）。自分のリポジトリなど信頼できる Issue だけを扱う場合は、`--approval-mode auto` で判定用モデルに任せることもできます。利用できる tool は `ano mcp tools github` で確認できます（`ano mcp edit github` で選択）。
+モデルは `issue_read` で Issue を読み、workspace を編集し、`review_changes` で別の新しい会話のレビュー担当にレビューさせ、指摘を判断して対処してから、`git_commit_push` で push し、`create_pull_request` で PR を作ります。レビューは必須で、レビュー後にファイルを変えた場合は再度レビューを受けるまで push できません（[変更のレビュー](docs/agent-runtime.md#変更のレビューreview_changes)）。push と PR 作成はそれぞれ承認を求めます（既定の `auto` では判定用モデルが審査し、迷うものだけ `[y/N]` で確認）。第三者の Issue を扱う場合は、`--approval-mode ask` ですべてを自分で確認することもできます。利用できる tool は `ano mcp tools github` で確認できます（`ano mcp edit github` で選択）。
 
 `git_commit_push` の動作は次のとおりです。
 
@@ -557,6 +558,7 @@ registry.register(
 | [docs/chatgpt-subscription.md](docs/chatgpt-subscription.md) | ChatGPT ログイン、利用枠による接続、認証情報の保存、対応範囲 |
 | [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント、スキル |
 | [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、tool の確認と有効化、承認、ポリシーの名前空間、検索カタログ |
+| [docs/web.md](docs/web.md) | Web UI の起動とトークン、セッション、API、naui による画面のビルド |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
 
@@ -568,13 +570,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-統合テスト（`tests/`）はモックの Responses API を立て、ビルドした `ano` バイナリを実際に起動して検証します。ソースの構成は [docs/architecture.md](docs/architecture.md) を参照してください。
+統合テスト（`tests/`）はモックの Responses API を立て、ビルドした `ano` バイナリを実際に起動して検証します。Web UI の画面（`web-ui/`）を変えた場合は `web-ui/build.sh` でビルドし直します（[画面の実装](docs/web.md#画面の実装naui)）。ソースの構成は [docs/architecture.md](docs/architecture.md) を参照してください。
 
 ## セキュリティ上の注意
 
 - ano は起動したユーザーの OS 権限で動きます。`allow_writes`・`allow_exec`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。
 - `allow_exec` と `approval_mode = "allow"` を併用すると、モデルが任意のコマンドを確認なしで実行できます。使い捨てのコンテナなど、壊れても復元できる環境に限ってください。
 - リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` と `approval_mode = "allow"` は信頼済みの server に限ってください。`auto` モードの判定は補助的な安全策で、完全ではありません。
+- `ano web` はループバックアドレスでだけ待ち受け、起動時に表示されるトークンを要求します。トークン付きの URL は他人に渡さないでください（[docs/web.md](docs/web.md#セキュリティ)）。
 - Webhook は必ず secret を設定して公開します。未認証での起動は loopback アドレスに限られます（[docs/webhook.md](docs/webhook.md#セキュリティ)）。
 - `web_fetch` は取得のたびに URL を外部へ送ります。`allow_web` と `approval_mode = "allow"` を併用すると、ページに埋め込まれた指示でモデルがデータを URL に載せて送る可能性を確認なしに許すことになります。
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。

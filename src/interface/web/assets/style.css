@@ -1,0 +1,101 @@
+/* The page around naui's controls. naui lays them out with inline styles
+   and leaves their look to the browser; this sheet adds the frames of the
+   chat (bubbles, rows, the approval card) by the classes web-ui/ sets. */
+
+:root {
+  --bg: #f6f7f9;
+  --surface: #ffffff;
+  --surface-2: #f0f2f5;
+  --border: #dde1e7;
+  --user: #e8f0fe;
+  --code: #f3f4f6;
+  --warn: #b26a00;
+  --accent: #2f6fdf;
+  --radius: 10px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15181c;
+    --surface: #1d2126;
+    --surface-2: #252a30;
+    --border: #333a42;
+    --user: #22324d;
+    --code: #262b31;
+    --warn: #e0a040;
+    --accent: #5b8ff0;
+  }
+}
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  font: 15px/1.6 system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", sans-serif;
+}
+
+/* The window fills the page; the timeline scrolls inside it. */
+[data-naui-window] {
+  height: 100vh;
+  max-width: none !important;
+  min-height: 0 !important;
+}
+.app, .content, .chat, .main, .setup { min-height: 0; min-width: 0; }
+.app { height: 100%; }
+
+.topbar { background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.topbar > * { flex-shrink: 0; white-space: nowrap; }
+.topbar > .summary { flex-shrink: 1; }
+.summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.status { font-size: 13px; white-space: nowrap; }
+
+.setup { overflow-y: auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-sizing: border-box; }
+
+.composer { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
+.composer textarea { font: inherit; resize: vertical; }
+.side { background: var(--surface); border-left: 1px solid var(--border); flex-shrink: 0; }
+.side .value { overflow-wrap: anywhere; }
+.info > * { align-self: start !important; }
+
+.timeline { box-sizing: border-box; }
+
+.bubble { max-width: 860px; border-radius: var(--radius); overflow-wrap: anywhere; box-sizing: border-box; }
+.bubble.user { align-self: flex-end; background: var(--user); white-space: pre-wrap; }
+.bubble.assistant { align-self: stretch; background: var(--surface); border: 1px solid var(--border); }
+.bubble.streaming span { white-space: pre-wrap; }
+.markdown { display: block !important; }
+.markdown > :first-child { margin-top: 0; }
+.markdown > :last-child { margin-bottom: 0; }
+.markdown pre { background: var(--code); padding: 10px; border-radius: 6px; overflow-x: auto; }
+.markdown code { background: var(--code); padding: 1px 4px; border-radius: 4px; font-size: .92em; }
+.markdown pre code { background: none; padding: 0; }
+.markdown table { border-collapse: collapse; }
+.markdown th, .markdown td { border: 1px solid var(--border); padding: 4px 8px; }
+.markdown a { color: var(--accent); }
+
+.event { background: var(--surface-2); border-radius: 6px; padding: 2px 10px; font-size: 13px; box-sizing: border-box; }
+.event summary { cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.code {
+  display: block;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 360px;
+  overflow-y: auto;
+  background: var(--code);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 4px 0;
+}
+.line { font-size: 13px; padding: 0 10px; }
+
+.approval { background: var(--surface); border: 1px solid var(--warn); border-radius: var(--radius); box-sizing: border-box; }
+.approval.resolved { border-color: var(--border); }
+
+.locked main { max-width: 520px; margin: 80px auto; padding: 0 16px; color: CanvasText; }
+
+@media (max-width: 860px) {
+  .side { display: none !important; }
+}

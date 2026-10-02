@@ -6,9 +6,10 @@ use crate::{
         plan::TaskPlan,
         usage::{StopReason, UsageSummary},
     },
+    interface::summarize_event,
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::{
     collections::{HashMap, VecDeque},
     sync::{Arc, Mutex},
@@ -86,27 +87,12 @@ impl JobProgress {
             }
             _ => {}
         }
-        self.events.push_back(summarize_event(event));
+        self.events
+            .push_back(summarize_event(event, MAX_EVENT_FIELD_CHARS));
         if self.events.len() > MAX_RECENT_EVENTS {
             self.events.pop_front();
         }
     }
-}
-
-fn summarize_event(event: &AgentEvent) -> Value {
-    let mut value = serde_json::to_value(event).unwrap_or_else(|_| json!({"type": "unknown"}));
-    if let Some(fields) = value.as_object_mut() {
-        for field in fields.values_mut() {
-            let text = field.to_string();
-            if text.chars().count() > MAX_EVENT_FIELD_CHARS {
-                *field = json!({
-                    "truncated": true,
-                    "preview": text.chars().take(MAX_EVENT_FIELD_CHARS).collect::<String>(),
-                });
-            }
-        }
-    }
-    value
 }
 
 pub(super) struct JobRecord {

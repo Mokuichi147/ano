@@ -21,8 +21,8 @@ pub struct AgentConfig {
     /// Files in the workspace root (for example `AGENTS.md`) whose contents
     /// are appended to the instructions of every run. Missing files are skipped.
     pub project_instructions: Vec<String>,
-    /// How MCP approval requests are answered for CLI runs without a named
-    /// environment.
+    /// How MCP approval requests are answered for CLI runs and web UI
+    /// sessions without a named environment. Defaults to `auto`.
     pub approval_mode: ApprovalMode,
     /// Reviewer model for `approval_mode = "auto"`; defaults to `model`.
     pub approval_model: Option<String>,
@@ -41,7 +41,7 @@ impl Default for AgentConfig {
                 ..AgentSettings::default()
             },
             project_instructions: vec!["AGENTS.md".to_string()],
-            approval_mode: ApprovalMode::Ask,
+            approval_mode: ApprovalMode::Auto,
             approval_model: None,
             provider: None,
             roles: ModelRoles::default(),
@@ -259,7 +259,7 @@ mod tests {
         let config = parse("instructions = 'Be brief.'").unwrap();
         assert_eq!(config.settings.instructions, "Be brief.");
         assert_eq!(config.project_instructions, ["AGENTS.md"]);
-        assert_eq!(config.approval_mode, ApprovalMode::Ask);
+        assert_eq!(config.approval_mode, ApprovalMode::Auto);
     }
 
     #[test]

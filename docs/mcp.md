@@ -145,7 +145,7 @@ Responses API 管理方式の server は、`url` へ Streamable HTTP で接続�
 
 | モード | 動作 |
 | --- | --- |
-| `ask` | ユーザーに確認する（`[y/N]`）。確認できない場合（stdin が端末でない、Webhook）は拒否 |
+| `ask` | ユーザーに確認する（端末では `[y/N]`、`ano web` ではブラウザ）。確認できない場合（stdin が端末でない、Webhook）は拒否 |
 | `auto` | 判定用モデルが呼び出しを審査する。依頼の範囲内で危険の少ない呼び出しは自動承認、明らかに不適切な呼び出しは自動拒否し、それ以外は `ask` と同じく確認する |
 | `allow` | すべて承認 |
 | `deny` | すべて拒否 |
@@ -157,7 +157,7 @@ Responses API 管理方式の server は、`url` へ Streamable HTTP で接続�
 | `--non-interactive` / `--auto-approve-mcp` | `deny` / `allow` |
 | `--approval-mode MODE` | 指定したモード |
 | `--environment NAME`、Webhook ジョブ | 環境の `approval_mode`。未指定なら `auto_approve_mcp = true` で `allow`、それ以外は `deny` |
-| 上記以外の `ano run` / `ano chat` | `[agent] approval_mode`（既定 `ask`） |
+| 上記以外の `ano run` / `ano chat`、`ano web` のセッション | `[agent] approval_mode`（既定 `auto`）。`ano web` ではセッションごとに選べます |
 
 環境の権限を CLI から広げられないよう、`--approval-mode` と `--auto-approve-mcp` は `--environment` と併用できません。環境で自動承認を使う場合は、設定ファイルに `approval_mode = "auto"` を書きます。
 

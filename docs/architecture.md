@@ -6,6 +6,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 ┌──────────────────────────────────────────────────────────────────┐
 │ interface                                                        │
 │  cli（コマンドと端末での表示・承認）  webhook（axum サーバー）     │
+│  web（ブラウザの UI のサーバー。画面は web-ui/ の wasm）          │
 └──────────────────────────────┬───────────────────────────────────┘
                                │ Agent を組み立てさせる
                                ▼
@@ -145,8 +146,11 @@ src/
 │       ├── web.rs          web_fetch（公開 Web ページの取得と Markdown 変換）
 │       └── process.rs      子プロセスの実行（期限・出力上限・プロセスグループの停止）
 └── interface/
-    ├── cli/                clap による CLI（run・chat・tools・session・serve）、進捗表示、端末での承認
+    ├── cli/                clap による CLI（run・chat・tools・session・serve・web）、進捗表示、端末での承認
+    ├── web/                ano web のサーバー（セッション・SSE のイベント・ブラウザでの承認・Markdown の HTML 化）と、埋め込む画面
     └── webhook/            署名付き Webhook、ジョブ管理
+
+web-ui/                     ano web の画面。naui の DOM バックエンドで組み立てる wasm（build.sh で src/interface/web/assets/pkg/ へ出力）
 ```
 
 ## 1回の実行の流れ
@@ -163,4 +167,5 @@ src/
 - **セッションの状態遷移と保存を分ける。** 状態遷移（`domain::session::SessionData`）はメモリ上だけで完結し、保存・ロック・アーカイブは `Session` が担当します。別の保存先を使う場合も同じ遷移規則を再利用できます。
 - **組み立てはハーネスが担う。** `Harness` が組み込み tool・原文履歴・スキル・`ReviewGate` を含む `Agent` を組み立て、CLI と Webhook は実行設定とモデルを解決して渡します。プロセスごとに作る具象アダプター（`OpenAiClient`・`McpPool`）と `Session` は、バイナリのエントリポイント（CLI）が作ります。Webhook サーバーはクライアントと MCP ゲートウェイを受け取るだけで、自分では作りません。
 - **実行ループは tool の名前を知らない。** tool ごとの条件・期限・繰り返しの扱いは定義に、tool をまたぐ規則（レビューを受けた変更だけをコミットする、など）は拡張に置きます。別の用途のハーネスは、実行ループに手を入れずに自分の tool と規則を加えられます。
+- **Web UI の画面は別の crate にする。** 画面（`web-ui/`）は wasm32 でだけビルドし、ブラウザの `fetch` と `EventSource` で `ano web` の API と話すので、ano の型を参照しません。workspace のメンバーにして依存のロックを共有しますが、既定のビルド対象から外し、ビルドした JS と wasm をコミットして埋め込むことで、`ano` のビルドに wasm のツールチェーンを要求しません。
 - **crate は分けない。** エージェントとハーネスは同じ crate のモジュールとして分け、依存の向きはテストで守らせています。crate に分けるには、実行ループのテストが使っている OpenAI・MCP・セッションのアダプターをエージェント側へ含めるかテストダブルに置き換え、`ToolContext` が持つ検証コマンドの設定（`domain::environment::CheckConfig`）をエージェント側の型にする必要があります。エージェントだけを使う利用者が現れたときに見直します。

@@ -24,9 +24,9 @@ use crate::{
     domain::approval::ApprovalMode,
     harness::{models::connect_provider, Harness},
     infrastructure::{mcp::McpPool, session_store::Session, tools::register_builtin_tools},
-    interface::webhook,
+    interface::{web, webhook},
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 
@@ -61,6 +61,9 @@ enum Command {
     Chat(ChatArgs),
     Tools(ToolsArgs),
     Serve(ServeArgs),
+    /// Talk with the agent in the browser, in sessions with their own
+    /// working folder, permissions, and model.
+    Web(WebArgs),
     /// Inspect saved conversation state without contacting the model.
     Session(SessionArgs),
     /// Manage the authorization and the enabled tools of MCP servers.
@@ -277,6 +280,24 @@ struct ServeArgs {
     allow_unauthenticated: bool,
 }
 
+#[derive(Debug, Args)]
+struct WebArgs {
+    #[arg(
+        long,
+        value_name = "ADDRESS",
+        default_value = "127.0.0.1:8787",
+        help = "Loopback address and port to listen on"
+    )]
+    bind: String,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        help = "Working folder that new sessions start with (defaults to the current directory)"
+    )]
+    workspace: Option<PathBuf>,
+}
+
 /// Parse the process arguments and run the selected command.
 pub async fn run() -> Result<()> {
     // Neither file overrides variables that are already set, so the process
@@ -336,6 +357,7 @@ pub async fn run() -> Result<()> {
         Command::Run(args) => run::run_agent(config, cli.user, args, registry).await,
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
+        Command::Web(args) => web(config, cli.user, args, registry).await,
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
         Command::Provider(args) => provider::run(&config, &config_path, args).await,
         Command::Preset(args) => preset::run(&config, &config_path, args).await,
@@ -359,6 +381,24 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = webhook::serve(config, client, Arc::clone(&mcp), registry).await;
     // Close MCP connections after jobs have stopped, even on failure.
+    mcp.shutdown().await;
+    served
+}
+
+async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegistry) -> Result<()> {
+    let workspace = match args.workspace {
+        Some(path) => path,
+        None => std::env::current_dir().context("failed to determine current directory")?,
+    };
+    let options = web::WebOptions {
+        bind: args.bind,
+        workspace,
+        user,
+        token: std::env::var(web::TOKEN_ENV).ok(),
+    };
+    let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
+    let served = web::serve(config, Arc::clone(&mcp), registry, options).await;
+    // Close MCP connections after the sessions have stopped, even on failure.
     mcp.shutdown().await;
     served
 }

@@ -1,0 +1,38 @@
+[package]
+name = "ano-web-ui"
+description = "The browser UI of `ano web`, built with naui to WebAssembly"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+# The UI talks to the server with the browser's fetch and EventSource, so it
+# builds only for wasm32; elsewhere the crate is empty.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+naui = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# The same version as the wasm-bindgen CLI that build.sh runs.
+wasm-bindgen = "=0.2.127"
+js-sys = "=0.3.104"
+web-sys = { version = "=0.3.104", features = [
+    "Document",
+    "Element",
+    "EventSource",
+    "Headers",
+    "HtmlElement",
+    "HtmlTextAreaElement",
+    "KeyboardEvent",
+    "Location",
+    "MessageEvent",
+    "Request",
+    "RequestInit",
+    "Response",
+    "Window",
+    "DomTokenList",
+    "console",
+] }

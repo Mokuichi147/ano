@@ -134,11 +134,11 @@ max_tool_output_bytes = 131072
 # Missing files are skipped; set [] to disable.
 # project_instructions = ["AGENTS.md"]
 # How approval requests (MCP calls and workspace_exec commands) are answered
-# for runs without --environment:
+# for runs without --environment, and the default of `ano web` sessions:
 # "ask" (prompt on the terminal), "auto" (a reviewer model allows low-risk calls
 # within the user's request, denies clearly unsafe ones, and asks about the
-# rest), "allow", or "deny". Override with `--approval-mode`.
-# approval_mode = "ask"
+# rest; the default), "allow", or "deny". Override with `--approval-mode`.
+# approval_mode = "auto"
 # Reviewer model for auto mode; defaults to model.
 # approval_model = "a-fast-reviewer-model"
 # Omit instructions to use the built-in plan -> inspect -> edit -> verify workflow.

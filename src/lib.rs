@@ -17,7 +17,7 @@
 //! - [`harness`]: the agent at work in a workspace: its settings and
 //!   instructions, the review gate, approval modes, and the assembly of
 //!   agents from the config file.
-//! - [`interface`]: the CLI and the webhook server.
+//! - [`interface`]: the CLI, the webhook server, and the web UI server.
 //! - [`config`]: the configuration file, combining every layer's settings.
 //!
 //! The most common types are re-exported at the crate root.
