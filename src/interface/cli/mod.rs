@@ -292,9 +292,15 @@ struct WebArgs {
     #[arg(
         long,
         value_name = "PATH",
-        help = "Working folder that new sessions start with (defaults to the current directory)"
+        help = "Working folder that new sessions start with (defaults to the current directory); sessions may only choose it or folders inside it"
     )]
     workspace: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Let sessions choose any folder as their working folder, not only --workspace and the folders inside it"
+    )]
+    allow_any_workspace: bool,
 }
 
 /// Parse the process arguments and run the selected command.
@@ -395,6 +401,7 @@ async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegis
         user,
         token: std::env::var(web::TOKEN_ENV).ok(),
         authenticate: !args.no_auth,
+        any_workspace: args.allow_any_workspace,
     };
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = web::serve(config, Arc::clone(&mcp), registry, options).await;

@@ -79,8 +79,11 @@ pub struct WebOptions {
     /// machines can reach the server (with the token, unless
     /// `authenticate` is off).
     pub bind: String,
-    /// The workspace of sessions that name none.
+    /// The workspace of sessions that name none, and the folder whose
+    /// subfolders the page may choose unless `any_workspace`.
     pub workspace: PathBuf,
+    /// Let the page choose any folder as a session's workspace.
+    pub any_workspace: bool,
     /// The user whose policy and skills sessions use.
     pub user: String,
     /// The token other machines present; `None` makes a new one.
@@ -95,6 +98,8 @@ struct WebState {
     mcp: Arc<dyn McpGateway>,
     user: String,
     default_workspace: PathBuf,
+    /// See `Workbench::workspace_root`.
+    workspace_root: Option<PathBuf>,
     access: Access,
     sessions: RwLock<BTreeMap<String, Arc<WebSession>>>,
     /// Serializes session creation, so the limit holds.
@@ -149,6 +154,18 @@ pub async fn serve(
         }
         None => Some(uuid::Uuid::new_v4().simple().to_string()),
     };
+    let default_workspace = std::fs::canonicalize(&options.workspace).with_context(|| {
+        format!(
+            "workspace does not exist or cannot be accessed: {}",
+            options.workspace.display()
+        )
+    })?;
+    if !default_workspace.is_dir() {
+        bail!(
+            "workspace is not a directory: {}",
+            options.workspace.display()
+        );
+    }
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to listen on {address}"))?;
@@ -158,7 +175,8 @@ pub async fn serve(
         config,
         mcp,
         user: options.user,
-        default_workspace: options.workspace,
+        workspace_root: (!options.any_workspace).then(|| default_workspace.clone()),
+        default_workspace,
         access: Access::new(token, local.port()),
         sessions: RwLock::default(),
         creating: tokio::sync::Mutex::new(()),
@@ -395,6 +413,7 @@ async fn options(State(state): State<Arc<WebState>>) -> Response {
     Json(json!({
         "user": state.user,
         "default_workspace": state.default_workspace,
+        "workspace_root": state.workspace_root,
         "default_approval_mode": config.agent.approval_mode,
         "approval_modes": ApprovalMode::NAMES,
         "default_preset": {"name": DEFAULT_PRESET, "summary": default},
@@ -431,6 +450,7 @@ async fn create_session(
         mcp: &state.mcp,
         user: &state.user,
         default_workspace: &state.default_workspace,
+        workspace_root: state.workspace_root.as_deref(),
     };
     match WebSession::open(bench, request).await {
         Ok(session) => {

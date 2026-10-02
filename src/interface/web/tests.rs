@@ -92,6 +92,7 @@ impl Server {
             mcp: Arc::new(McpPool::new(Vec::new())),
             user: "default".into(),
             default_workspace: workspace.path().to_path_buf(),
+            workspace_root: None,
             access: Access::new(Some(TOKEN.into()), 1),
             sessions: RwLock::default(),
             creating: tokio::sync::Mutex::new(()),
@@ -526,6 +527,7 @@ async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
             WebOptions {
                 bind: bind.into(),
                 workspace: std::env::temp_dir(),
+                any_workspace: false,
                 user: "default".into(),
                 token: Some(token.into()),
                 authenticate: true,

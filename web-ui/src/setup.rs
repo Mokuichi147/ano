@@ -15,8 +15,14 @@ use std::{cell::Cell, rc::Rc};
 
 use crate::timeline::APPROVAL_MODES;
 
-const WORKSPACE_NOTE: &str =
-    "~ はホームディレクトリ。エージェントのファイル操作とコマンドはこのフォルダの中で行われます";
+/// What the workspace field accepts, as the server allows it.
+fn workspace_note(options: &Value) -> String {
+    let scope = match options["workspace_root"].as_str() {
+        Some(root) => format!("{root} とその中のフォルダを選べます。"),
+        None => String::new(),
+    };
+    format!("{scope}~ はホームディレクトリ。エージェントのファイル操作とコマンドはこのフォルダの中で行われます")
+}
 
 struct Form {
     options: Rc<Value>,
@@ -47,7 +53,7 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
 
     let workspace = ui.text_input(options["default_workspace"].as_str().unwrap_or_default())?;
     workspace.set_sizing(Sizing::fill_width());
-    let note = ui.label(WORKSPACE_NOTE)?;
+    let note = ui.label(&workspace_note(options))?;
     note.set_color(TextColor::Secondary);
     note.set_wrap(true);
     card.append(&caption(app, "作業フォルダ")?);
@@ -235,7 +241,7 @@ impl Form {
             self.workspace.set_text(default_workspace);
         }
         self.workspace.set_enabled(true);
-        self.note.set_text(WORKSPACE_NOTE);
+        self.note.set_text(&workspace_note(&self.options));
     }
 
     /// The body of `POST /api/sessions`.

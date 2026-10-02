@@ -123,6 +123,10 @@ pub(super) struct Workbench<'a> {
     pub(super) user: &'a str,
     /// The workspace of sessions that name none.
     pub(super) default_workspace: &'a Path,
+    /// The folder, canonical, whose subfolders the page may choose as
+    /// workspaces; `None` allows any. Environments' own workspaces come from
+    /// the config and are not limited.
+    pub(super) workspace_root: Option<&'a Path>,
 }
 
 impl WebSession {
@@ -323,6 +327,8 @@ fn resolve_profile(
         .filter(|path| !path.is_empty())
         .map(expand_home)
         .transpose()?;
+    // The config chose the workspace, not the page.
+    let mut configured = false;
     let (mut profile, base) = match &request.environment {
         Some(name) => {
             if request.allow_writes || request.allow_exec || request.approval_mode.is_some() {
@@ -331,7 +337,7 @@ fn resolve_profile(
             let mut profile = config.execution_profile(bench.user, name, &[])?;
             match (&profile.context.workspace, workspace) {
                 (Some(_), Some(_)) => bail!("environment '{name}' has its own workspace"),
-                (Some(_), None) => {}
+                (Some(_), None) => configured = true,
                 (None, workspace) => {
                     profile.context.workspace =
                         Some(workspace.unwrap_or_else(|| bench.default_workspace.to_path_buf()))
@@ -375,6 +381,15 @@ fn resolve_profile(
         })?;
         if !canonical.is_dir() {
             bail!("workspace is not a directory: {}", path.display());
+        }
+        if let Some(root) = bench.workspace_root.filter(|_| !configured) {
+            if !canonical.starts_with(root) {
+                bail!(
+                    "the workspace must be inside {} (start ano web with --allow-any-workspace to choose any folder): {}",
+                    root.display(),
+                    path.display()
+                );
+            }
         }
         profile.context.workspace = Some(canonical);
     }
@@ -422,8 +437,61 @@ mod tests {
             mcp: &mcp,
             user: "default",
             default_workspace,
+            workspace_root: None,
         };
         resolve_profile(&bench, &request)
+    }
+
+    #[test]
+    fn the_page_chooses_workspaces_only_inside_the_root_unless_any_is_allowed() {
+        let config = AppConfig::parse("[environments.fixed]\nworkspace = '/'").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("project")).unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let canonical_root = std::fs::canonicalize(root.path()).unwrap();
+        let harness = Harness {
+            registry: ToolRegistry::new(),
+            history: None,
+            skills: None,
+        };
+        let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
+        let resolve = |workspace_root: Option<&Path>, request: NewSession| {
+            let bench = Workbench {
+                config: &config,
+                harness: &harness,
+                mcp: &mcp,
+                user: "default",
+                default_workspace: root.path(),
+                workspace_root,
+            };
+            resolve_profile(&bench, &request).map(|(profile, ..)| profile.context.workspace)
+        };
+        let at = |path: &Path| NewSession {
+            workspace: Some(path.display().to_string()),
+            ..NewSession::default()
+        };
+        let limited = Some(canonical_root.as_path());
+
+        assert_eq!(
+            resolve(limited, NewSession::default()).unwrap(),
+            Some(canonical_root.clone())
+        );
+        assert_eq!(
+            resolve(limited, at(&root.path().join("project"))).unwrap(),
+            Some(canonical_root.join("project"))
+        );
+        for escape in [outside.path().to_path_buf(), root.path().join("..")] {
+            let error = resolve(limited, at(&escape)).unwrap_err().to_string();
+            assert!(error.contains("--allow-any-workspace"), "{error}");
+        }
+        // The config's environment may work anywhere.
+        let fixed = NewSession {
+            environment: Some("fixed".into()),
+            ..NewSession::default()
+        };
+        assert!(resolve(limited, fixed).is_ok());
+        // Without a root, any folder.
+        assert!(resolve(None, at(outside.path())).is_ok());
     }
 
     #[test]
