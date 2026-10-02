@@ -9,8 +9,8 @@ use crate::{
     timeline::{self, one_line, pretty},
 };
 use naui::{
-    Align, Button, GridCell, Label, Orientation, Padding, Scroll, ScrollPolicy, Sizing, Stack,
-    TextArea, TextColor, TextStyle, Track, Widget,
+    Align, Button, Expander, GridCell, Label, Orientation, Padding, Scroll, ScrollPolicy, Sizing,
+    Stack, TextArea, TextColor, TextStyle, Track, Widget,
 };
 use serde_json::{json, Value};
 use std::{
@@ -31,6 +31,11 @@ pub struct Chat {
     usage: Label,
     /// The message being generated.
     live: RefCell<Option<Live>>,
+    /// The work log since the last message: thinking, tool calls, and
+    /// decisions, folded into one row.
+    work: RefCell<Option<Work>>,
+    /// The thinking being streamed, in the work log.
+    thought: RefCell<Option<Thought>>,
     /// Approval requests that wait for an answer, by id.
     approvals: RefCell<HashMap<String, Approval>>,
     running: Cell<bool>,
@@ -41,6 +46,18 @@ pub struct Chat {
 
 struct Live {
     bubble: Stack,
+    label: Label,
+    text: String,
+}
+
+struct Work {
+    expander: Expander,
+    body: Stack,
+    entries: usize,
+}
+
+struct Thought {
+    expander: Expander,
     label: Label,
     text: String,
 }
@@ -127,6 +144,8 @@ impl Chat {
             plan,
             usage,
             live: RefCell::new(None),
+            work: RefCell::new(None),
+            thought: RefCell::new(None),
             approvals: RefCell::new(HashMap::new()),
             running: Cell::new(false),
             stream: RefCell::new(None),
@@ -247,6 +266,97 @@ impl Chat {
         }
     }
 
+    /// Add `widget` to the work log, which starts after the last message.
+    fn add_work(&self, app: &App, widget: &dyn Widget) {
+        let following = dom::near_end(&self.scroll);
+        let mut work = self.work.borrow_mut();
+        if work.is_none() {
+            let (Ok(expander), Ok(body)) = (
+                app.ui.expander("作業ログ"),
+                app.ui.stack(Orientation::Vertical),
+            ) else {
+                return;
+            };
+            body.set_spacing(6.0);
+            body.set_align(Align::Fill);
+            body.set_sizing(Sizing::fill_width());
+            expander.set_child(&body);
+            expander.set_sizing(Sizing::fill_width());
+            dom::add_class(&expander, "work");
+            self.timeline.append(&expander);
+            *work = Some(Work {
+                expander,
+                body,
+                entries: 0,
+            });
+        }
+        let Some(work) = work.as_mut() else { return };
+        work.body.append(widget);
+        work.entries += 1;
+        work.expander
+            .set_text(&format!("作業ログ（{}件）", work.entries));
+        if following {
+            dom::scroll_to_end(&self.scroll);
+        }
+    }
+
+    /// What follows starts a new work log.
+    fn end_work(&self) {
+        self.work.borrow_mut().take();
+        self.thought.borrow_mut().take();
+    }
+
+    /// A line of text in the work log.
+    fn work_notice(&self, app: &App, text: &str, color: TextColor) {
+        if let Ok(label) = app.ui.label(text) {
+            label.set_wrap(true);
+            label.set_color(color);
+            dom::add_class(&label, "line");
+            self.add_work(app, &label);
+        }
+    }
+
+    /// Show streamed thinking, added to or replacing what came so far.
+    fn stream_thought(&self, app: &App, text: &str, append: bool) {
+        if self.thought.borrow().is_none() {
+            let (Ok(expander), Ok(label)) = (app.ui.expander("思考中…"), app.ui.label(""))
+            else {
+                return;
+            };
+            label.set_wrap(true);
+            dom::add_class(&label, "thought");
+            expander.set_child(&label);
+            expander.set_sizing(Sizing::fill_width());
+            dom::add_class(&expander, "event");
+            self.add_work(app, &expander);
+            *self.thought.borrow_mut() = Some(Thought {
+                expander,
+                label,
+                text: String::new(),
+            });
+        }
+        let mut thought = self.thought.borrow_mut();
+        let Some(thought) = thought.as_mut() else {
+            return;
+        };
+        if !append {
+            thought.text.clear();
+        }
+        thought.text.push_str(text);
+        thought.label.set_text(&thought.text);
+    }
+
+    /// The thinking as kept: it completes the streamed one, if any.
+    fn show_thought(&self, app: &App, text: &str) {
+        if self.thought.borrow().is_none() {
+            self.stream_thought(app, text, false);
+        }
+        if let Some(thought) = self.thought.borrow_mut().take() {
+            thought.label.set_text(text);
+            thought.expander.set_text("思考");
+        }
+    }
+
     /// A line of text in the timeline.
     pub fn notice(&self, text: &str, color: TextColor) {
         let Some(app) = self.app.upgrade() else {
@@ -268,6 +378,7 @@ impl Chat {
         match event["type"].as_str().unwrap_or_default() {
             "user_message" => {
                 self.live.borrow_mut().take();
+                self.end_work();
                 if let Ok(bubble) = bubble(&app, "user") {
                     if let Ok(label) = app.ui.label(text) {
                         label.set_wrap(true);
@@ -281,6 +392,7 @@ impl Chat {
             "reset" => {
                 self.timeline.clear();
                 self.live.borrow_mut().take();
+                self.end_work();
                 self.approvals.borrow_mut().clear();
                 if event["truncated"] == true {
                     self.notice(
@@ -294,7 +406,12 @@ impl Chat {
                 self.stream_text(&app, text, true);
             }
             "partial" => self.stream_text(&app, text, false),
-            "reasoning" => app.set_activity("考え中…"),
+            "reasoning" => {
+                app.set_activity("考え中…");
+                self.stream_thought(&app, text, true);
+            }
+            "reasoning_partial" => self.stream_thought(&app, text, false),
+            "thinking" => self.show_thought(&app, text),
             "message" => self.show_message(&app, event["html"].as_str().unwrap_or_default()),
             "agent" => self.agent_event(&app, &event["event"]),
             "approval_requested" => self.ask_approval(&app, event),
@@ -320,6 +437,7 @@ impl Chat {
     fn stream_text(&self, app: &App, text: &str, append: bool) {
         let mut live = self.live.borrow_mut();
         if live.is_none() {
+            self.end_work();
             let (Ok(bubble), Ok(label)) = (bubble(app, "assistant streaming"), app.ui.label(""))
             else {
                 return;
@@ -347,6 +465,7 @@ impl Chat {
 
     /// A complete message, as HTML; it takes the place of the streamed text.
     fn show_message(&self, app: &App, html: &str) {
+        self.end_work();
         let following = dom::near_end(&self.scroll);
         let bubble = match self.live.borrow_mut().take() {
             Some(live) => {
@@ -381,7 +500,7 @@ impl Chat {
             dom::add_class(&label, "code");
             expander.set_child(&label);
         }
-        self.append(&expander);
+        self.add_work(app, &expander);
     }
 
     fn agent_event(&self, app: &App, event: &Value) {
@@ -393,11 +512,6 @@ impl Chat {
         match field("type") {
             "plan_updated" => self.render_plan(&event["plan"]),
             "usage_updated" | "execution_stopped" => {}
-            "reasoning_summary" => self.detail(
-                app,
-                &format!("推論の要約  {}", one_line(&event["text"], 80)),
-                &pretty(&event["text"]),
-            ),
             "local_tool_call" | "mcp_tool_call" => self.detail(
                 app,
                 &format!("{}  {}", target(), one_line(&event["arguments"], 120)),
@@ -408,7 +522,8 @@ impl Chat {
                 &format!("↳ {}  {}", target(), one_line(&event["output"], 120)),
                 &pretty(&event["output"]),
             ),
-            "local_tool_blocked" | "mcp_tool_blocked" => self.notice(
+            "local_tool_blocked" | "mcp_tool_blocked" => self.work_notice(
+                app,
                 &format!("{} は許可されていないため実行しませんでした", target()),
                 TextColor::Warning,
             ),
@@ -418,7 +533,8 @@ impl Chat {
                     .as_str()
                     .map(|reason| format!("（{reason}）"))
                     .unwrap_or_default();
-                self.notice(
+                self.work_notice(
+                    app,
                     &format!(
                         "承認 {}: {}{reason}",
                         target(),
@@ -431,7 +547,8 @@ impl Chat {
                     },
                 );
             }
-            "mcp_server_unavailable" => self.notice(
+            "mcp_server_unavailable" => self.work_notice(
+                app,
                 &format!(
                     "MCP サーバー {} に接続できません: {}",
                     field("server_label"),
@@ -454,14 +571,16 @@ impl Chat {
                 &pretty(&event["task"]),
             ),
             "subagent_finished" => match event["error"].as_str() {
-                Some(error) => self.notice(
+                Some(error) => self.work_notice(
+                    app,
                     &format!(
                         "サブエージェント終了: 失敗（{}）",
                         one_line(&json!(error), 200)
                     ),
                     TextColor::Danger,
                 ),
-                None => self.notice(
+                None => self.work_notice(
+                    app,
                     &format!(
                         "サブエージェント終了: {}",
                         timeline::outcome(field("outcome"))
@@ -469,7 +588,8 @@ impl Chat {
                     TextColor::Secondary,
                 ),
             },
-            "context_compacted" => self.notice(
+            "context_compacted" => self.work_notice(
+                app,
                 &format!(
                     "履歴を圧縮しました（{} → {} 件）",
                     event["record"]["before_items"], event["record"]["after_items"]
@@ -481,6 +601,8 @@ impl Chat {
     }
 
     fn ask_approval(self: &Rc<Self>, app: &App, event: &Value) {
+        // The card waits for the user, so it stays in view.
+        self.end_work();
         let id = event["id"].as_str().unwrap_or_default().to_string();
         let build = || -> naui::Result<Approval> {
             let card = app.ui.stack(Orientation::Vertical)?;
@@ -595,6 +717,7 @@ impl Chat {
     }
 
     fn finish_turn(self: &Rc<Self>, event: &Value) {
+        self.end_work();
         if let Some(live) = self.live.borrow_mut().take() {
             dom::remove_class(&live.bubble, "streaming");
         }

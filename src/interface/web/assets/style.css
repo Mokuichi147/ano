@@ -96,6 +96,12 @@ body {
 }
 .line { font-size: 13px; padding: 0 10px; }
 
+/* The work between messages: thinking, tool calls, and decisions. */
+.work { border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; font-size: 13px; box-sizing: border-box; }
+.work > summary { cursor: pointer; color: GrayText; }
+.work[open] > summary { margin-bottom: 6px; }
+.thought { display: block; white-space: pre-wrap; overflow-wrap: anywhere; color: GrayText; max-height: 360px; overflow-y: auto; margin: 4px 0; }
+
 .approval { background: var(--surface); border: 1px solid var(--warn); border-radius: var(--radius); box-sizing: border-box; }
 .approval.resolved { border-color: var(--border); }
 

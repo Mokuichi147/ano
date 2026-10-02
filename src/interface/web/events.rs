@@ -35,6 +35,11 @@ pub(super) enum UiEvent {
         text: String,
     },
     TurnStarted,
+    /// What the model thought before it went on (its reasoning text, when
+    /// the endpoint streams it).
+    Thinking {
+        text: String,
+    },
     /// A complete message of the model, with its Markdown as HTML.
     Message {
         text: String,
@@ -101,6 +106,11 @@ struct LogState {
     events: VecDeque<Outgoing>,
     /// The message being generated.
     partial: String,
+    /// The reasoning being streamed.
+    reasoning: String,
+    /// Reasoning was streamed since the last reasoning summary, which then
+    /// repeats it.
+    reasoning_streamed: bool,
     progress: Progress,
 }
 
@@ -131,6 +141,10 @@ impl EventLog {
     }
 
     fn push_locked(&self, state: &mut LogState, event: &UiEvent) {
+        // Reasoning ends when anything else happens, and comes before it.
+        if !matches!(event, UiEvent::Thinking { .. }) {
+            self.flush_reasoning(state);
+        }
         state.next_id += 1;
         let outgoing = Outgoing {
             id: Some(state.next_id),
@@ -158,13 +172,24 @@ impl EventLog {
         let mut state = self.lock();
         match delta {
             ResponseDelta::Text(text) => {
+                self.flush_reasoning(&mut state);
                 state.partial.push_str(text);
                 self.send_transient(json!({"type": "delta", "text": text}));
             }
             ResponseDelta::MessageDone => self.flush_locked(&mut state),
             ResponseDelta::Reasoning(text) => {
+                state.reasoning.push_str(text);
                 self.send_transient(json!({"type": "reasoning", "text": text}))
             }
+        }
+    }
+
+    /// Keep the streamed reasoning in the log.
+    fn flush_reasoning(&self, state: &mut LogState) {
+        let text = std::mem::take(&mut state.reasoning);
+        if !text.trim().is_empty() {
+            state.reasoning_streamed = true;
+            self.push_locked(state, &UiEvent::Thinking { text });
         }
     }
 
@@ -191,6 +216,15 @@ impl EventLog {
                 self.push_locked(&mut state, &UiEvent::message(text.clone()));
                 return;
             }
+            // The summary of reasoning that was not streamed is shown as
+            // thinking; streamed reasoning already is.
+            AgentEvent::ReasoningSummary { text, .. } => {
+                self.flush_reasoning(&mut state);
+                if !std::mem::take(&mut state.reasoning_streamed) {
+                    self.push_locked(&mut state, &UiEvent::Thinking { text: text.clone() });
+                }
+                return;
+            }
             AgentEvent::PlanUpdated { plan, .. } => state.progress.plan = Some(plan.clone()),
             _ => {}
         }
@@ -203,6 +237,7 @@ impl EventLog {
     pub(super) fn start_turn(&self, text: String) {
         let mut state = self.lock();
         state.progress.running = true;
+        state.reasoning_streamed = false;
         self.push_locked(&mut state, &UiEvent::UserMessage { text });
         self.push_locked(&mut state, &UiEvent::TurnStarted);
     }
@@ -246,6 +281,14 @@ impl EventLog {
                 .filter(|event| event.id.is_some_and(|id| id > after))
                 .cloned(),
         );
+        if !state.reasoning.is_empty() {
+            backlog.push(Outgoing {
+                id: None,
+                data: json!({"type": "reasoning_partial", "text": state.reasoning})
+                    .to_string()
+                    .into(),
+            });
+        }
         if !state.partial.is_empty() {
             backlog.push(Outgoing {
                 id: None,
@@ -347,5 +390,75 @@ mod tests {
         let (backlog, _) = log.subscribe(2);
         assert_eq!(backlog.len(), MAX_LOGGED_EVENTS);
         assert_eq!(backlog[0].id, Some(3));
+    }
+
+    #[test]
+    fn streamed_reasoning_is_kept_before_what_follows_it() {
+        let log = EventLog::default();
+        log.start_turn("hello".into());
+        log.text_delta(ResponseDelta::Reasoning("Let me "));
+        log.text_delta(ResponseDelta::Reasoning("check."));
+        // A page that connects now gets the reasoning so far.
+        let (backlog, _) = log.subscribe(2);
+        let partial: Value = serde_json::from_str(&backlog[0].data).unwrap();
+        assert_eq!(
+            partial,
+            json!({"type": "reasoning_partial", "text": "Let me check."})
+        );
+
+        log.record(&AgentEvent::ToolSearch {
+            round: 1,
+            query: "x".into(),
+            results: Vec::new(),
+        });
+        log.text_delta(ResponseDelta::Reasoning("Now answer."));
+        log.text_delta(ResponseDelta::Text("Done"));
+        log.text_delta(ResponseDelta::MessageDone);
+        let (backlog, _) = log.subscribe(0);
+        let events: Vec<Value> = backlog
+            .iter()
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect();
+        let types: Vec<&str> = events
+            .iter()
+            .map(|event| event["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            types,
+            [
+                "user_message",
+                "turn_started",
+                "thinking",
+                "agent",
+                "thinking",
+                "message"
+            ]
+        );
+        assert_eq!(events[2]["text"], "Let me check.");
+        assert_eq!(events[4]["text"], "Now answer.");
+    }
+
+    #[test]
+    fn reasoning_summaries_show_as_thinking_unless_the_reasoning_was_streamed() {
+        let log = EventLog::default();
+        let summary = |text: &str| AgentEvent::ReasoningSummary {
+            round: 1,
+            text: text.into(),
+        };
+        log.text_delta(ResponseDelta::Reasoning("Planning."));
+        log.record(&summary("Planning."));
+        log.record(&summary("Only a summary."));
+        let (backlog, _) = log.subscribe(0);
+        let events: Vec<Value> = backlog
+            .iter()
+            .map(|event| serde_json::from_str(&event.data).unwrap())
+            .collect();
+        assert_eq!(
+            events,
+            [
+                json!({"type": "thinking", "text": "Planning."}),
+                json!({"type": "thinking", "text": "Only a summary."}),
+            ]
+        );
     }
 }
