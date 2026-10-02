@@ -24,6 +24,16 @@ pub fn set_visible(widget: &dyn Widget, visible: bool) {
         .toggle_attribute_with_force("hidden", !visible);
 }
 
+/// Show `text` when the pointer rests on `widget`; empty removes it.
+pub fn set_title(widget: &dyn Widget, text: &str) {
+    let element = widget.native_element();
+    let _ = if text.is_empty() {
+        element.remove_attribute("title")
+    } else {
+        element.set_attribute("title", text)
+    };
+}
+
 /// Replace the contents of `widget` with `html`, which the server rendered
 /// from Markdown with raw HTML escaped.
 pub fn set_html(widget: &dyn Widget, html: &str) {

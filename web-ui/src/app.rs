@@ -181,16 +181,17 @@ impl App {
     fn show_header(&self, status: Option<&Value>) {
         match status {
             Some(status) => {
-                let workspace = status["workspace"]
-                    .as_str()
-                    .unwrap_or("（作業フォルダなし）");
+                let workspace = status["workspace"].as_str();
                 let model = status["model"].as_str().unwrap_or_default();
-                self.summary.set_text(&format!("{workspace}  ·  {model}"));
+                let folder = workspace.map_or("（作業フォルダなし）", folder_name);
+                self.summary.set_text(&format!("{folder}  ·  {model}"));
+                dom::set_title(&self.summary, workspace.unwrap_or_default());
                 self.set_running(status["running"].as_bool().unwrap_or(false));
                 dom::set_visible(&self.end, true);
             }
             None => {
                 self.summary.set_text("");
+                dom::set_title(&self.summary, "");
                 self.status.set_text("");
                 dom::set_visible(&self.stop, false);
                 dom::set_visible(&self.end, false);
@@ -265,4 +266,13 @@ impl Message {
             color: TextColor::Secondary,
         }
     }
+}
+
+/// The last part of `path`, the folder's own name.
+fn folder_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
 }
