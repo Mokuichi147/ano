@@ -38,6 +38,9 @@ body {
 /* The window fills the page; the timeline scrolls inside it. */
 [data-naui-window] {
   height: 100vh;
+  /* What is visible now: on iOS, 100vh also counts the area under the
+     browser's toolbar, which would hide the composer. */
+  height: 100dvh;
   max-width: none !important;
   min-height: 0 !important;
 }
