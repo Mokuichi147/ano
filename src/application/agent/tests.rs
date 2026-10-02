@@ -2068,6 +2068,15 @@ async fn repeating_one_tool_asks_the_model_to_change_approach() {
     let input = requests[4]["input"].as_array().unwrap();
     assert_eq!(input[0]["type"], "function_call_output");
     assert!(is_notice(&input[1]));
+    // The user hears of it as the run loop's notice, not the model's words.
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RuntimeNotice { text, .. } if text.contains("in 3 consecutive steps")
+    )));
+    assert!(!result
+        .events
+        .iter()
+        .any(|event| matches!(event, AgentEvent::AssistantProgress { .. })));
 }
 
 #[test]
@@ -2183,7 +2192,7 @@ async fn a_request_over_the_context_is_compacted_and_sent_again() {
         .starts_with("You compact the history"));
     assert!(result.events.iter().any(|event| matches!(
         event,
-        AgentEvent::AssistantProgress { text, .. } if text.contains("exceeded the model's context")
+        AgentEvent::RuntimeNotice { text, .. } if text.contains("exceeded the model's context")
     )));
 }
 

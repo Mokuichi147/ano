@@ -592,6 +592,7 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
                 progress!("[agent] {text}")
             }
         }
+        AgentEvent::RuntimeNotice { text, .. } => progress!("[agent] {text}"),
         AgentEvent::ReasoningSummary { text, .. } => status(format!("[reasoning] {text}")),
         AgentEvent::LocalToolCall {
             name, arguments, ..

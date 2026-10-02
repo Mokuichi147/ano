@@ -512,6 +512,7 @@ impl Chat {
         match field("type") {
             "plan_updated" => self.render_plan(&event["plan"]),
             "usage_updated" | "execution_stopped" => {}
+            "runtime_notice" => self.work_notice(app, field("text"), TextColor::Secondary),
             "local_tool_call" | "mcp_tool_call" => self.detail(
                 app,
                 &format!("{}  {}", target(), one_line(&event["arguments"], 120)),

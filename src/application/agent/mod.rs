@@ -861,10 +861,9 @@ impl Agent {
                 {
                     overflow_retried = true;
                     compact_now = true;
-                    events.push(AgentEvent::AssistantProgress {
+                    events.push(AgentEvent::RuntimeNotice {
                         round,
                         text: "The request exceeded the model's context; compacting the history and sending it again.".into(),
-                        streamed: false,
                     });
                     continue;
                 }
@@ -976,10 +975,9 @@ impl Agent {
                     session.record_runtime_input(&notice)?;
                 }
                 continuation.extend(notice.as_array().unwrap().iter().cloned());
-                events.push(AgentEvent::AssistantProgress {
+                events.push(AgentEvent::RuntimeNotice {
                     round,
                     text: format!("{name} was called in {count} consecutive steps; asking for a different approach."),
-                    streamed: false,
                 });
             }
             if let Some(history) = local_history.as_mut() {
@@ -1030,7 +1028,7 @@ impl Agent {
                     if let Some(history) = local_history.as_mut() {
                         history.extend(next_input.as_array().unwrap().iter().cloned());
                     }
-                    events.push(AgentEvent::AssistantProgress {
+                    events.push(AgentEvent::RuntimeNotice {
                         round,
                         text: if plan.goal.is_some() {
                             "Continuing until the goal's acceptance criteria are verified."
@@ -1038,7 +1036,6 @@ impl Agent {
                             "Continuing unfinished plan steps."
                         }
                         .into(),
-                        streamed: false,
                     });
                     continue;
                 }

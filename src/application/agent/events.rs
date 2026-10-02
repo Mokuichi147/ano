@@ -35,6 +35,12 @@ pub enum AgentEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         streamed: bool,
     },
+    /// What the run loop itself tells the user about the run, such as that
+    /// it asked the model to change its approach. Not the model's words.
+    RuntimeNotice {
+        round: usize,
+        text: String,
+    },
     /// Summary of the model's reasoning, when `reasoning_summary` is set.
     ReasoningSummary {
         round: usize,
