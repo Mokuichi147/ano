@@ -44,8 +44,9 @@ pub(super) const WEB_ENVIRONMENT: &str = "web";
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct NewSession {
-    /// The working directory. `~` stands for the home directory. Defaults
-    /// to the server's; an environment with a workspace uses its own.
+    /// The working directory. `~` stands for the home directory, and a
+    /// relative path starts at the server's workspace. Defaults to the
+    /// server's workspace; an environment with a workspace uses its own.
     pub(super) workspace: Option<String>,
     /// A configured environment, whose permissions and approval mode the
     /// session takes.
@@ -326,7 +327,8 @@ fn resolve_profile(
         .map(str::trim)
         .filter(|path| !path.is_empty())
         .map(expand_home)
-        .transpose()?;
+        .transpose()?
+        .map(|path| bench.default_workspace.join(path));
     // The config chose the workspace, not the page.
     let mut configured = false;
     let (mut profile, base) = match &request.environment {
@@ -480,6 +482,12 @@ mod tests {
             resolve(limited, at(&root.path().join("project"))).unwrap(),
             Some(canonical_root.join("project"))
         );
+        // A relative path starts at the server's workspace.
+        assert_eq!(
+            resolve(limited, at(Path::new("project"))).unwrap(),
+            Some(canonical_root.join("project"))
+        );
+        assert!(resolve(limited, at(Path::new(".."))).is_err());
         for escape in [outside.path().to_path_buf(), root.path().join("..")] {
             let error = resolve(limited, at(&escape)).unwrap_err().to_string();
             assert!(error.contains("--allow-any-workspace"), "{error}");

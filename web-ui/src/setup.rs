@@ -16,12 +16,28 @@ use std::{cell::Cell, rc::Rc};
 use crate::timeline::APPROVAL_MODES;
 
 /// What the workspace field accepts, as the server allows it.
-fn workspace_note(options: &Value) -> String {
-    let scope = match options["workspace_root"].as_str() {
-        Some(root) => format!("{root} とその中のフォルダを選べます。"),
-        None => String::new(),
-    };
-    format!("{scope}~ はホームディレクトリ。エージェントのファイル操作とコマンドはこのフォルダの中で行われます")
+fn workspace_note(options: &Value) -> &'static str {
+    if limited(options) {
+        "起動したフォルダからの相対パス（空欄は起動したフォルダ）。エージェントのファイル操作とコマンドはこのフォルダの中で行われます"
+    } else {
+        "~ はホームディレクトリ。エージェントのファイル操作とコマンドはこのフォルダの中で行われます"
+    }
+}
+
+/// Whether the server limits workspaces to the folder it started in, in
+/// which case the field takes a path relative to it.
+fn limited(options: &Value) -> bool {
+    options["workspace_root"].is_string()
+}
+
+/// What the workspace field starts with: nothing (the folder the server
+/// started in) when it takes relative paths, the full path otherwise.
+fn workspace_default(options: &Value) -> &str {
+    if limited(options) {
+        ""
+    } else {
+        options["default_workspace"].as_str().unwrap_or_default()
+    }
 }
 
 struct Form {
@@ -51,9 +67,12 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
     title.set_style(TextStyle::Title);
     card.append(&title);
 
-    let workspace = ui.text_input(options["default_workspace"].as_str().unwrap_or_default())?;
+    let workspace = ui.text_input(workspace_default(options))?;
     workspace.set_sizing(Sizing::fill_width());
-    let note = ui.label(&workspace_note(options))?;
+    if limited(options) {
+        workspace.set_placeholder("例: projects/app");
+    }
+    let note = ui.label(workspace_note(options))?;
     note.set_color(TextColor::Secondary);
     note.set_wrap(true);
     card.append(&caption(app, "作業フォルダ")?);
@@ -201,9 +220,7 @@ impl Form {
             checkbox.set_enabled(!fixed);
         }
         self.approval.set_enabled(!fixed);
-        let default_workspace = self.options["default_workspace"]
-            .as_str()
-            .unwrap_or_default();
+        let default_workspace = workspace_default(&self.options);
         match environment {
             Some(environment) => {
                 self.writes.set_checked(environment["allow_writes"] == true);
@@ -241,7 +258,7 @@ impl Form {
             self.workspace.set_text(default_workspace);
         }
         self.workspace.set_enabled(true);
-        self.note.set_text(&workspace_note(&self.options));
+        self.note.set_text(workspace_note(&self.options));
     }
 
     /// The body of `POST /api/sessions`.
