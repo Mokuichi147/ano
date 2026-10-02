@@ -119,7 +119,7 @@ annict (streamable_http, OAuth): 11 tools, 9 enabled
 - `ano mcp tools` は server が提供する tool をすべて表示し、設定で有効なものに `[x]` を付けます。`--user` で指定したユーザーのポリシーで使えない tool には `(disabled for user '...')` と表示します。設定に書かれているのに server が提供していない名前（書き間違いや廃止された tool）もまとめて表示します。
 - `ano mcp edit` は端末でチェックリストを開きます。スペースで切り替え、文字を入力すると絞り込み、Enter で保存、Esc で保存せずに終了します。
 - `ano mcp enable` / `ano mcp disable` は指定した tool を切り替えます。書き間違いを防ぐため、保存前に server へ接続して tool 名を確認します。接続できない server（Secure MCP Tunnel など）では `--no-verify` を付けてください。
-- 保存先は `--config` の設定ファイル（既定 `./config.toml`）の該当する `[[mcp_servers]]` です。コメントや他の設定はそのまま残し、変更後の設定が不正になる場合は保存しません。
+- 保存先は読み込んだ設定ファイル（`--config`、省略時はカレントディレクトリか OS 標準の設定ディレクトリの `config.toml`）の該当する `[[mcp_servers]]` です。コメントや他の設定はそのまま残し、変更後の設定が不正になる場合は保存しません。
 
 保存の方式は server の設定によって変わります。
 

@@ -164,10 +164,14 @@ async fn exec_commands_run_in_the_workspace_after_approval() {
 
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(directory.path().join("note.txt"), "from the workspace").unwrap();
+    // The built-in defaults, never the user's config in the OS config directory.
+    let config = tempfile::NamedTempFile::new().unwrap();
     let run = |extra: &'static [&'static str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
         command
             .current_dir(directory.path())
+            .arg("--config")
+            .arg(config.path())
             .env("OPENAI_BASE_URL", &endpoint)
             .env("OPENAI_API_KEY", "test-fixture-key")
             .args(["run", "--json", "--quiet"])

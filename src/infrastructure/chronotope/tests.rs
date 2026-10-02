@@ -21,7 +21,7 @@ fn binding(user: &str) -> SessionBinding {
 fn history(root: &Path, endpoint: &str) -> Chronotope {
     Chronotope::new(HistorySettings {
         enabled: true,
-        data_dir: root.join("history"),
+        data_dir: Some(root.join("history")),
         base_url: endpoint.into(),
         ..Default::default()
     })

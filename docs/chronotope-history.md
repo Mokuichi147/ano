@@ -20,6 +20,10 @@ chronotope は、原文・取得時刻・出典内の位置・変更履歴を保
 
 chronotope の HTTP サーバーを起動し、`config.toml` で `[history] enabled = true` を設定する。
 `data_dir` は ano が先に書き込む未送信キューなので、プロセスや chronotope の再起動後も削除しない。
+省略時は OS 標準のデータディレクトリの `history`（macOS は `~/Library/Application Support/ano/history`、
+Linux は `$XDG_DATA_HOME/ano/history`、既定 `~/.local/share/ano/history`）に置く。以前の既定の保存先（設定ファイルの隣の `.ano/history`）が
+残っていれば、未送信分を失わないようそちらを使い続ける。設定ファイルを OS 標準の設定ディレクトリへ移す場合は、
+先に `ano history sync` で未送信分を送るか、`data_dir` に以前の `.ano/history` の絶対パスを指定する。
 
 ```sh
 chronotope serve --data .ano/chronotope --addr 127.0.0.1:7878

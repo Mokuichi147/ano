@@ -150,10 +150,14 @@ async fn run_with_a_goal_reports_verified_criteria() {
     let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let directory = tempfile::tempdir().unwrap();
+    // The built-in defaults, never the user's config in the OS config directory.
+    let config = tempfile::NamedTempFile::new().unwrap();
     let ano = |arguments: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
         command
             .current_dir(directory.path())
+            .arg("--config")
+            .arg(config.path())
             .env("OPENAI_BASE_URL", &endpoint)
             .env("OPENAI_API_KEY", "fixture-key")
             .args(arguments)

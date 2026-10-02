@@ -618,7 +618,7 @@ fn resolve_api_key(base_url: &str, key_env: &str, value: Option<String>) -> Resu
     match value.filter(|value| !value.trim().is_empty()) {
         Some(value) => Ok(Some(value)),
         None if is_openai_endpoint(base_url) => bail!(
-            "{key_env} is not set; it is required for {base_url}. To use a local or self-hosted model instead, set base_url in the [api] section of config.toml (for example http://127.0.0.1:1234/v1) or the OPENAI_BASE_URL environment variable; config.toml is read from the current directory unless --config is given"
+            "{key_env} is not set; it is required for {base_url}. To use a local or self-hosted model instead, set base_url in the [api] section of config.toml (for example http://127.0.0.1:1234/v1) or the OPENAI_BASE_URL environment variable; config.toml is read from the current directory, then from the OS config directory, unless --config is given"
         ),
         None => Ok(None),
     }

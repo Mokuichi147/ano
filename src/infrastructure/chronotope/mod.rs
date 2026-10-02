@@ -34,7 +34,9 @@ use std::{
 pub struct HistorySettings {
     pub enabled: bool,
     pub base_url: String,
-    pub data_dir: PathBuf,
+    /// 未送信イベントのキュー。省略時は OS のデータディレクトリの `history`
+    /// （[`default_history_dir`]）。
+    pub data_dir: Option<PathBuf>,
     pub principal: String,
     pub token_env: Option<String>,
     pub timeout_secs: u64,
@@ -45,7 +47,7 @@ impl Default for HistorySettings {
         Self {
             enabled: false,
             base_url: "http://127.0.0.1:7878".into(),
-            data_dir: ".ano/history".into(),
+            data_dir: None,
             principal: "ano".into(),
             token_env: None,
             timeout_secs: 5,
@@ -70,21 +72,44 @@ impl HistorySettings {
         }
         HeaderValue::from_str(&self.principal)
             .context("history.principal がヘッダーに使用できません")?;
-        if self.timeout_secs == 0 || self.data_dir.as_os_str().is_empty() {
+        if self.timeout_secs == 0
+            || self
+                .data_dir
+                .as_ref()
+                .is_some_and(|dir| dir.as_os_str().is_empty())
+        {
             bail!("history.timeout_secs は正の数、data_dir は空でないパスにしてください");
         }
         Ok(())
     }
+
+    /// `data_dir`, or the default when it is omitted.
+    pub fn data_dir(&self) -> Result<PathBuf> {
+        match &self.data_dir {
+            Some(dir) => Ok(dir.clone()),
+            None => default_history_dir().context(
+                "OS のデータディレクトリを取得できません。history.data_dir を指定してください",
+            ),
+        }
+    }
+}
+
+/// OS のデータディレクトリ（macOS: `~/Library/Application Support/ano`、
+/// Linux: `$XDG_DATA_HOME/ano`、Windows: `%APPDATA%\ano\data`）の `history`。
+pub fn default_history_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "ano").map(|dirs| dirs.data_dir().join("history"))
 }
 
 pub struct Chronotope {
     settings: HistorySettings,
+    data_dir: PathBuf,
     client: Client,
 }
 
 impl Chronotope {
     pub fn new(settings: HistorySettings) -> Result<Self> {
         settings.validate()?;
+        let data_dir = settings.data_dir()?;
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-chronotope-principal",
@@ -108,7 +133,11 @@ impl Chronotope {
             // 実行終了時の同期で、到達できない接続先を timeout_secs まで待たない。
             .connect_timeout(Duration::from_secs(settings.timeout_secs.min(2)))
             .build()?;
-        Ok(Self { settings, client })
+        Ok(Self {
+            settings,
+            data_dir,
+            client,
+        })
     }
 
     pub fn from_settings(
@@ -138,10 +167,7 @@ impl Chronotope {
             &self.settings.principal,
             user,
         ))?;
-        Ok(self
-            .settings
-            .data_dir
-            .join(hex::encode(Sha256::digest(key))))
+        Ok(self.data_dir.join(hex::encode(Sha256::digest(key))))
     }
 
     async fn post(&self, user: &str, path: &str, body: &Value) -> Result<Value> {

@@ -1,9 +1,10 @@
 use super::{
+    choose_config_path,
     edit::{with_mcp_tool_filters, with_provider_changes, with_provider_renamed},
     expand_environment_variables, expand_home, remove_provider, save_mcp_tool_filters,
     update_provider, AppConfig, ModelRequest, SettingValue,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const PROVIDERS: &str = "[agent]\nmodel = 'gpt-main'\napproval_model = 'gpt-mini'\n[api]\ntimeout_secs = 30\n[providers.local]\nbase_url = 'http://192.168.1.10:1234/v1'\nmodel = 'qwen/qwen3'\n[providers.bare]\nbase_url = 'http://127.0.0.1:8000/v1'\ntimeout_secs = 5\n";
 
@@ -333,18 +334,30 @@ fn expands_environment_variables_in_url_text() {
         expand_environment_variables("${HOST}${PATH_VAR}", &get_env).unwrap(),
         "example.test/mcp"
     );
-    assert_eq!(expand_environment_variables("$HOST$/a", &get_env).unwrap(), "example.test$/a");
+    assert_eq!(
+        expand_environment_variables("$HOST$/a", &get_env).unwrap(),
+        "example.test$/a"
+    );
 
     let plain = "https://host/path?a=b&c=d";
-    assert_eq!(expand_environment_variables(plain, &get_env).unwrap(), plain);
+    assert_eq!(
+        expand_environment_variables(plain, &get_env).unwrap(),
+        plain
+    );
     assert_eq!(
         expand_environment_variables("keep ${not id} and unclosed ${HOST", &get_env).unwrap(),
         "keep ${not id} and unclosed ${HOST"
     );
-    assert_eq!(expand_environment_variables("${HOST.NAME}", &get_env).unwrap(), "${HOST.NAME}");
+    assert_eq!(
+        expand_environment_variables("${HOST.NAME}", &get_env).unwrap(),
+        "${HOST.NAME}"
+    );
     assert_eq!(expand_environment_variables("$1", &get_env).unwrap(), "$1");
     assert_eq!(expand_environment_variables("$$", &get_env).unwrap(), "$");
-    assert_eq!(expand_environment_variables("$${HOST}", &get_env).unwrap(), "${HOST}");
+    assert_eq!(
+        expand_environment_variables("$${HOST}", &get_env).unwrap(),
+        "${HOST}"
+    );
     assert_eq!(expand_environment_variables("$", &get_env).unwrap(), "$");
 }
 
@@ -391,7 +404,10 @@ fn the_process_environment_expands_the_config_url() {
     )
     .unwrap();
     let config = AppConfig::load(&path).unwrap();
-    assert_eq!(config.mcp_servers[0].url.as_deref(), Some("https://annict.test/mcp"));
+    assert_eq!(
+        config.mcp_servers[0].url.as_deref(),
+        Some("https://annict.test/mcp")
+    );
     match saved {
         Some(value) => std::env::set_var(name, value),
         None => std::env::remove_var(name),
@@ -402,6 +418,39 @@ fn the_process_environment_expands_the_config_url() {
 fn missing_explicit_config_file_is_an_error() {
     assert!(AppConfig::load("definitely-missing-ano-config.toml").is_err());
     assert!(AppConfig::load_or_default("definitely-missing-ano-config.toml").is_ok());
+}
+
+#[test]
+fn a_config_file_in_the_current_directory_comes_before_the_os_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join("config.toml");
+    let user = PathBuf::from("/home/alice/.config/ano/config.toml");
+    // Without a local file, the OS one is used even before it exists, so the
+    // editing commands create it there.
+    assert_eq!(choose_config_path(local.clone(), Some(user.clone())), user);
+    assert_eq!(choose_config_path(local.clone(), None), local);
+    std::fs::write(&local, "").unwrap();
+    assert_eq!(choose_config_path(local.clone(), Some(user)), local);
+}
+
+#[test]
+fn history_keeps_a_queue_left_in_the_former_default_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = AppConfig::parse("[history]\nenabled = true").unwrap();
+    config.resolve_paths(directory.path(), None).unwrap();
+    assert_eq!(config.history.data_dir, None);
+
+    let legacy = directory.path().join(".ano/history");
+    std::fs::create_dir_all(&legacy).unwrap();
+    config.resolve_paths(directory.path(), None).unwrap();
+    assert_eq!(config.history.data_dir, Some(legacy));
+
+    let mut config = AppConfig::parse("[history]\ndata_dir = 'queue'").unwrap();
+    config.resolve_paths(directory.path(), None).unwrap();
+    assert_eq!(
+        config.history.data_dir,
+        Some(directory.path().join("queue"))
+    );
 }
 
 #[test]
@@ -586,7 +635,8 @@ fn provider_changes_keep_the_rest_of_the_file() {
 #[test]
 fn provider_files_are_created_and_references_block_removal() {
     let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("config.toml");
+    // The OS config directory may not exist yet.
+    let path = directory.path().join("ano/config.toml");
     update_provider(
         &path,
         "lan",
@@ -594,6 +644,15 @@ fn provider_files_are_created_and_references_block_removal() {
         &[("model", Some(SettingValue::Text("qwen".into())))],
     )
     .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
     let config = AppConfig::load(&path).unwrap();
     assert_eq!(config.provider_model("lan"), Some("qwen"));
     // An invalid result is never written.

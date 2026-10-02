@@ -301,6 +301,20 @@ fn edit_config_file(
     let directory = path
         .parent()
         .context("config file has no parent directory")?;
+    if text.is_none() {
+        // The config names commands and workspaces, so a directory created for
+        // it is the owner's only.
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder
+            .create(directory)
+            .with_context(|| format!("failed to create directory {}", directory.display()))?;
+    }
     let mut file = tempfile::NamedTempFile::new_in(directory)
         .with_context(|| format!("failed to write config file {}", path.display()))?;
     file.write_all(updated.as_bytes())?;

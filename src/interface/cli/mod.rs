@@ -20,7 +20,7 @@ pub use approval::InteractiveApproval;
 
 use crate::{
     application::{ports::McpGateway, registry::ToolRegistry},
-    config::AppConfig,
+    config::{default_config_path, user_env_path, AppConfig},
     domain::approval::ApprovalMode,
     harness::{models::connect_provider, Harness},
     infrastructure::{mcp::McpPool, session_store::Session, tools::register_builtin_tools},
@@ -30,8 +30,6 @@ use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 
-const DEFAULT_CONFIG_PATH: &str = "config.toml";
-
 #[derive(Debug, Parser)]
 #[command(
     name = "ano",
@@ -39,8 +37,10 @@ const DEFAULT_CONFIG_PATH: &str = "config.toml";
     about = "Autonomous Rust agent powered by the OpenAI Responses API"
 )]
 struct Cli {
-    /// Config file. Defaults to ./config.toml when present; an explicitly
-    /// given path must exist.
+    /// Config file. Defaults to ./config.toml when present, otherwise
+    /// config.toml in the OS config directory (macOS: ~/Library/Application
+    /// Support/ano, Linux: ~/.config/ano, Windows: %APPDATA%\ano\config); an
+    /// explicitly given path must exist.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 
@@ -279,12 +279,16 @@ struct ServeArgs {
 
 /// Parse the process arguments and run the selected command.
 pub async fn run() -> Result<()> {
+    // Neither file overrides variables that are already set, so the process
+    // environment comes first, then the current directory's .env.
     dotenvy::dotenv().ok();
+    if let Some(path) = user_env_path().filter(|path| path.exists()) {
+        if let Err(error) = dotenvy::from_path(&path) {
+            eprintln!("warning: failed to read {}: {error}", path.display());
+        }
+    }
     let cli = Cli::parse();
-    let config_path = cli
-        .config
-        .clone()
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_PATH));
+    let config_path = cli.config.clone().unwrap_or_else(default_config_path);
     let config = match &cli.config {
         Some(path) => AppConfig::load(path)?,
         None => AppConfig::load_or_default(&config_path)?,

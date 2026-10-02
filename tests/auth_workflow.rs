@@ -4,6 +4,9 @@ use std::process::{Command, Output};
 fn run(directory: &std::path::Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ano"))
         .current_dir(directory)
+        // Keep the user's .env in the OS config directory from setting them again.
+        .env("HOME", directory)
+        .env("XDG_CONFIG_HOME", directory)
         .env_remove("OPENAI_API_KEY")
         .env_remove("OPENAI_BASE_URL")
         .args(["--config", "settings/ano.toml"])

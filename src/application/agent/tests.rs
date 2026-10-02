@@ -2337,7 +2337,7 @@ async fn raw_history_does_not_change_requests_without_a_session() {
                 enabled: true,
                 // Nothing listens here; the run keeps the events for a later sync.
                 base_url: "http://127.0.0.1:9".into(),
-                data_dir: root.path().join("history"),
+                data_dir: Some(root.path().join("history")),
                 ..Default::default()
             },
         )

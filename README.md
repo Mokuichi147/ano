@@ -53,12 +53,15 @@ Rust 1.89 以降と、OpenAI API キー、[ChatGPT サブスクリプション](
 
 ```sh
 cargo install --path .
-cp config.example.toml config.toml
+# macOS
+mkdir -p ~/Library/Application\ Support/ano && cp config.example.toml ~/Library/Application\ Support/ano/config.toml
+# Linux
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/ano" && cp config.example.toml "${XDG_CONFIG_HOME:-$HOME/.config}/ano/config.toml"
 export OPENAI_API_KEY="sk-..."
 ano run --environment default "README とソースを読み、実装の概要を説明して"
 ```
 
-インストールせずに `cargo run -- run ...` でも実行できます。Windows（PowerShell）では `Copy-Item config.example.toml config.toml`、`$env:OPENAI_API_KEY = "sk-..."` のように読み替えてください。
+設定ファイルは OS 標準の設定ディレクトリに置きます（[設定ファイル](#設定ファイル)）。インストールせずに `cargo run -- run ...` でも実行できます。Windows（PowerShell）では `New-Item -ItemType Directory -Force $env:APPDATA\ano\config; Copy-Item config.example.toml $env:APPDATA\ano\config\config.toml`、`$env:OPENAI_API_KEY = "sk-..."` のように読み替えてください。
 
 ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`config.toml` の `[api]` に `auth = "chatgpt"` を追加してください。`[agent].model` には契約プランで利用できる Codex モデルを指定します。認証情報は ano 専用のファイルに保存されます。設定・制約は [ChatGPT サブスクリプション](docs/chatgpt-subscription.md) を参照してください。
 
@@ -155,7 +158,7 @@ MCP の tool 呼び出しを毎回確認せずに進めるには、`ano chat --a
 
 ### 実行環境
 
-`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--allow-exec`・`--allow-web`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--preset`・`--provider`・`--model`・`--reasoning-effort` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。環境の `preset`・`provider`・`model`・`reasoning_effort` で、その環境の既定の接続先・モデル・推論の強さを指定できます（Webhook のジョブもこれに従います）。
+`--environment` を指定すると、Webhook と同じ環境設定で実行します。ユーザーと環境の両方が許可した tool だけが使えます。`workspace` を省略した環境は、CLI ではカレントディレクトリを workspace にします（Webhook のジョブでは workspace なし）。環境の権限を CLI から広げられないよう、`--workspace`・`--allow-writes`・`--allow-exec`・`--allow-web`・`--approval-mode`・`--auto-approve-mcp` との併用はエラーになります。`--preset`・`--provider`・`--model`・`--reasoning-effort` は併用でき、`--non-interactive` で環境の MCP 自動承認も無効にできます。環境の `preset`・`provider`・`model`・`reasoning_effort` で、その環境の既定の接続先・モデル・推論の強さを指定できます（Webhook のジョブもこれに従います）。
 
 ```toml
 [environments.coding]
@@ -194,7 +197,18 @@ ano run --environment default --json --quiet "実装の概要を説明して" | 
 
 ## 設定ファイル
 
-`--config` を省略するとカレントディレクトリの `config.toml` を読み、無ければ組み込みの既定値で動きます。全項目の例は [config.example.toml](config.example.toml) を参照してください。
+`--config` を省略すると、次の順に最初に見つかった `config.toml` を読みます。どちらも無ければ組み込みの既定値で動きます。全項目の例は [config.example.toml](config.example.toml) を参照してください。
+
+1. カレントディレクトリの `config.toml`（プロジェクトごとの設定）
+2. OS 標準の設定ディレクトリの `config.toml`
+
+| OS | 設定ディレクトリ |
+| --- | --- |
+| macOS | `~/Library/Application Support/ano` |
+| Linux | `$XDG_CONFIG_HOME/ano`（既定 `~/.config/ano`） |
+| Windows | `%APPDATA%\ano\config` |
+
+`ano provider`・`ano model`・`ano preset`・`ano mcp` は読み込んだ設定ファイルを書き換えます。どこにも無い場合、`ano provider`・`ano model`・`ano preset` は OS 標準の設定ディレクトリに作成します（`ano mcp` は設定済みの MCP サーバーが必要です）。
 
 | セクション | 内容 | 詳細 |
 | --- | --- | --- |
@@ -229,9 +243,9 @@ project_instructions = ["AGENTS.md", "docs/agent-rules.md"]   # 既定は ["AGEN
 
 ### パスと API キー
 
-`environments.*.workspace` と MCP の `cwd` の相対パスは、設定ファイルのあるディレクトリを基準に解決します。先頭の `~`（`~` と `~/...`）はホームディレクトリに展開します（MCP の `command` も同様）。CLI の `--workspace` は起動ディレクトリを基準にします。
+`environments.*.workspace` と MCP の `cwd` の相対パスは、設定ファイルのあるディレクトリを基準に解決します。OS 標準の設定ディレクトリに置いた設定では、絶対パスか `~/...` で指定してください。先頭の `~`（`~` と `~/...`）はホームディレクトリに展開します（MCP の `command` も同様）。CLI の `--workspace` は起動ディレクトリを基準にします。
 
-API キーは設定ファイルに保存せず、`api_key_env` で指定した環境変数から読み込みます。`OPENAI_BASE_URL` を設定すると、設定ファイルの `[api]` の `base_url` より優先して endpoint を変更できます（モックサーバーなど）。`[providers]` の接続先は `OPENAI_BASE_URL` の影響を受けません。
+API キーは設定ファイルに保存せず、`api_key_env` で指定した環境変数から読み込みます。環境変数は `.env` にも書けます。起動時にカレントディレクトリ（無ければ親ディレクトリ）の `.env`、続いて OS 標準の設定ディレクトリの `.env`（`config.toml` の隣）を読みます。すでに設定されている変数は上書きしないため、優先順はシェルの環境変数、カレントの `.env`、設定ディレクトリの `.env` の順です。設定ディレクトリの `.env` は、どのディレクトリから起動しても使う API キー（MCP の `url` が参照する変数を含む）の置き場所に向いています。秘密情報を含むので、所有者だけが読めるようにしてください（`chmod 600`）。`OPENAI_BASE_URL` を設定すると、設定ファイルの `[api]` の `base_url` より優先して endpoint を変更できます（モックサーバーなど）。`[providers]` の接続先は `OPENAI_BASE_URL` の影響を受けません。
 
 ### ローカル AI（LM Studio・Ollama など）
 
@@ -246,7 +260,7 @@ model = "ロードしたモデル名"
 ```
 
 - **API キーは不要です。** キーが必須なのは OpenAI 公式の endpoint（`api.openai.com`）だけで、それ以外は `api_key_env` の環境変数が未設定なら Authorization ヘッダーを付けずに送ります。LAN 内の別マシンや Docker 上のサーバーでも同じです。サーバー側で認証を有効にしている場合は、`api_key_env` に指定した環境変数にキーを設定してください。
-- `config.toml` はカレントディレクトリから読みます。別のディレクトリで実行する場合は `--config` で指定するか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
+- `config.toml` はカレントディレクトリ、無ければ OS 標準の設定ディレクトリから読みます（[設定ファイル](#設定ファイル)）。どこからでも同じ接続先を使うには OS 標準の設定ディレクトリに置くか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
 - LM Studio で Remote MCP を使う場合は、Server Settings で MCP 利用を有効にします。
 - 回答はストリーミングで表示します（`stream: true` に対応していない server でも動きます）。
 - 長い会話の圧縮は、`/responses/compact` の代わりにモデル自身が書く要約で行います（`[agent] compaction = "auto"` の既定動作）。LM Studio が返す読み込み中のコンテキスト長に近づいたところで圧縮します。llama.cpp の server も `/v1/models` の `meta.n_ctx` から取得します。ほかのサーバーでは `context_window` を指定してください（[履歴の圧縮](docs/agent-runtime.md#履歴の圧縮)）。
@@ -285,7 +299,6 @@ auth = "chatgpt"                             # ChatGPT サブスクリプショ�
 model = "gpt-5-codex"
 
 [environments.review]
-workspace = "."
 provider = "codex"                           # この環境の既定の接続先
 ```
 
@@ -305,7 +318,7 @@ ano chat --environment review                    # 環境の provider（codex）
 
 #### 接続先の管理
 
-`ano provider` で接続先を、`ano model` で接続先ごとのモデルを、設定ファイルを直接編集せずに管理できます。設定ファイルのコメントや書式は保ったまま該当箇所だけを書き換えます。書き換え後の設定が不正になる場合は保存しません。`config.toml` がなければ作成します。
+`ano provider` で接続先を、`ano model` で接続先ごとのモデルを、設定ファイルを直接編集せずに管理できます。設定ファイルのコメントや書式は保ったまま該当箇所だけを書き換えます。書き換え後の設定が不正になる場合は保存しません。設定ファイルがなければ OS 標準の設定ディレクトリに作成します（[設定ファイル](#設定ファイル)）。
 
 ```sh
 ano provider add lan --base-url http://192.168.1.10:1234/v1 --model qwen/qwen3-coder-30b --fallback codex

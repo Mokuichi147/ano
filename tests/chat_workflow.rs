@@ -152,8 +152,12 @@ async fn chat_compacts_on_request_with_a_summary() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let workspace = tempfile::tempdir().unwrap();
+    // The built-in defaults, never the user's config in the OS config directory.
+    let config = tempfile::NamedTempFile::new().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
         .current_dir(workspace.path())
+        .arg("--config")
+        .arg(config.path())
         .env("OPENAI_BASE_URL", &endpoint)
         .env("OPENAI_API_KEY", "test-fixture-key")
         .arg("chat")
@@ -232,8 +236,12 @@ async fn chat_sets_shows_and_clears_a_goal() {
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let workspace = tempfile::tempdir().unwrap();
+    // The built-in defaults, never the user's config in the OS config directory.
+    let config = tempfile::NamedTempFile::new().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
         .current_dir(workspace.path())
+        .arg("--config")
+        .arg(config.path())
         .env("OPENAI_BASE_URL", &endpoint)
         .env("OPENAI_API_KEY", "test-fixture-key")
         .arg("chat")

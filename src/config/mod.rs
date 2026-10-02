@@ -35,6 +35,46 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+/// The file name of the config file, both in the current directory and in
+/// the OS config directory.
+pub const CONFIG_FILE_NAME: &str = "config.toml";
+
+/// The default `history.data_dir` before it moved to the OS data directory,
+/// relative to the config file.
+const LEGACY_HISTORY_DIR: &str = ".ano/history";
+
+/// The OS config directory (macOS: `~/Library/Application Support/ano`,
+/// Linux: `$XDG_CONFIG_HOME/ano` or `~/.config/ano`, Windows:
+/// `%APPDATA%\ano\config`).
+fn user_config_dir() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "ano").map(|dirs| dirs.config_dir().to_path_buf())
+}
+
+/// `config.toml` in the OS config directory.
+pub fn user_config_path() -> Option<PathBuf> {
+    user_config_dir().map(|dir| dir.join(CONFIG_FILE_NAME))
+}
+
+/// `.env` in the OS config directory, read after the one of the current
+/// directory, so that API keys need not be exported in every shell.
+pub fn user_env_path() -> Option<PathBuf> {
+    user_config_dir().map(|dir| dir.join(".env"))
+}
+
+/// The config file to read and edit when `--config` is not given:
+/// `config.toml` in the current directory when it exists, otherwise the one in
+/// the OS config directory, which the editing commands create when missing.
+pub fn default_config_path() -> PathBuf {
+    choose_config_path(PathBuf::from(CONFIG_FILE_NAME), user_config_path())
+}
+
+fn choose_config_path(local: PathBuf, user: Option<PathBuf>) -> PathBuf {
+    match user {
+        Some(user) if !local.exists() => user,
+        _ => local,
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
@@ -71,11 +111,8 @@ impl AppConfig {
         for server in &mut config.mcp_servers {
             let label = &server.label;
             if let Some(url) = &mut server.url {
-                *url = expand_environment_variables(
-                    url.as_str(),
-                    |name| std::env::var(name).ok(),
-                )
-                .with_context(|| format!("invalid url of MCP server '{}'", label))?;
+                *url = expand_environment_variables(url.as_str(), |name| std::env::var(name).ok())
+                    .with_context(|| format!("invalid url of MCP server '{}'", label))?;
             }
         }
         config.resolve_paths(directory, std::env::home_dir().as_deref())?;
@@ -95,7 +132,16 @@ impl AppConfig {
                     .with_context(|| format!("invalid providers.{name}.chatgpt_auth_file"))?;
             }
         }
-        self.history.data_dir = resolve_path(&self.history.data_dir, directory, home)?;
+        match &mut self.history.data_dir {
+            Some(dir) => *dir = resolve_path(dir, directory, home)?,
+            // 以前の既定の保存先に未送信キューが残っていれば、送れるように使い続ける。
+            None => {
+                let legacy = directory.join(LEGACY_HISTORY_DIR);
+                if legacy.is_dir() {
+                    self.history.data_dir = Some(legacy);
+                }
+            }
+        }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
         }

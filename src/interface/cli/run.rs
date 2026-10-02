@@ -280,8 +280,17 @@ fn resolve_run_context(
     user_id: &str,
     args: &AgentOptions,
 ) -> Result<RunContext> {
+    let current_dir = || std::env::current_dir().context("failed to determine current directory");
     let mut profile = match &args.environment {
-        Some(name) => config.execution_profile(user_id, name, &args.disabled_tools)?,
+        Some(name) => {
+            let mut profile = config.execution_profile(user_id, name, &args.disabled_tools)?;
+            // An environment without a workspace works where the CLI was
+            // started; webhook jobs of that environment have none.
+            if profile.context.workspace.is_none() {
+                profile.context.workspace = Some(current_dir()?);
+            }
+            profile
+        }
         None => ExecutionProfile {
             settings: config.agent.settings.clone(),
             project_instructions: config.agent.project_instructions.clone(),
@@ -291,9 +300,7 @@ fn resolve_run_context(
                 environment: "cli".to_string(),
                 workspace: Some(match &args.workspace {
                     Some(path) => path.clone(),
-                    None => {
-                        std::env::current_dir().context("failed to determine current directory")?
-                    }
+                    None => current_dir()?,
                 }),
                 allow_writes: args.allow_writes,
                 allow_exec: args.allow_exec,
@@ -427,7 +434,7 @@ mod tests {
         assert!(policy.is_disabled("workspace_write"));
         assert!(policy.is_disabled("echo"));
         assert_eq!(context.environment, "review");
-        assert!(context.workspace.is_none());
+        assert_eq!(context.workspace, Some(std::env::current_dir().unwrap()));
         assert!(!context.allow_writes);
         assert!(!context.allow_exec);
         assert!(!context.allow_web);
