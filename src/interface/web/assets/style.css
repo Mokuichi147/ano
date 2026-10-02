@@ -55,6 +55,11 @@ body {
 
 .composer { background: var(--surface); border-top: 1px solid var(--border); flex-shrink: 0; }
 .composer textarea { font: inherit; resize: vertical; }
+
+/* Safari on iOS zooms into a focused field whose text is under 16px. */
+@media (hover: none) and (pointer: coarse) {
+  input, textarea, select { font-size: 16px !important; }
+}
 .side { background: var(--surface); border-left: 1px solid var(--border); flex-shrink: 0; }
 .side .value { overflow-wrap: anywhere; }
 .info > * { align-self: start !important; }
