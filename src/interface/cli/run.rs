@@ -93,10 +93,8 @@ pub(super) fn prepare_agent(
             ApprovalMode::Ask => eprintln!(
                 "warning: stdin is not a terminal; MCP approval requests will be denied (use --approval-mode auto or allow)"
             ),
-            ApprovalMode::Auto => eprintln!(
-                "warning: stdin is not a terminal; MCP calls that automatic review does not allow will be denied"
-            ),
-            ApprovalMode::Allow | ApprovalMode::Deny => {}
+            // Automatic review asks nobody.
+            ApprovalMode::Auto | ApprovalMode::Allow | ApprovalMode::Deny => {}
         }
         Arc::new(DenyApproval)
     };

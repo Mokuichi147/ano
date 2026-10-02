@@ -17,21 +17,21 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct ApprovalFactory {
     pub mode: ApprovalMode,
-    /// Answers the requests that go to the user: a prompt on a terminal, a
-    /// denial when nobody can answer.
+    /// Answers the requests of the `ask` mode: a prompt on a terminal or in
+    /// the browser, a denial when nobody can answer.
     pub ask_user: Arc<dyn ApprovalHandler>,
 }
 
 impl ApprovalFactory {
-    /// The handler for `mode`. `auto` reviews with `reviewer` and passes
-    /// uncertain calls to `ask_user`.
+    /// The handler for `mode`. `auto` reviews with `reviewer` and denies
+    /// what it does not clearly allow, without asking the user.
     pub fn build(&self, reviewer: ModelTarget) -> Arc<dyn ApprovalHandler> {
         match self.mode {
             ApprovalMode::Allow => Arc::new(AlwaysApprove),
             ApprovalMode::Deny => Arc::new(DenyApproval),
             ApprovalMode::Ask => Arc::clone(&self.ask_user),
             ApprovalMode::Auto => Arc::new(
-                AutoApproval::new(reviewer.client, reviewer.model, Arc::clone(&self.ask_user))
+                AutoApproval::new(reviewer.client, reviewer.model)
                     .with_reasoning_effort(reviewer.reasoning_effort),
             ),
         }

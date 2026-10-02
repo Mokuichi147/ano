@@ -253,8 +253,6 @@ pub struct McpApprovalRequest {
     /// Text the user gave for the current run, to judge whether the call is
     /// within the request.
     pub user_request: String,
-    /// Why an automatic review passed this request on to the user.
-    pub review: Option<String>,
 }
 
 impl McpApprovalRequest {

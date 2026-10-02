@@ -110,7 +110,7 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | `--session PATH` / `--recover-session` | 会話を保存・再開（[セッション](docs/agent-runtime.md#会話セッション)） |
 | `--compact-threshold-bytes N` / `--max-total-tokens N` | 履歴の圧縮とトークン上限（[圧縮と上限](docs/agent-runtime.md#履歴の圧縮)） |
 | `--max-tool-rounds N` | この実行で送る Responses 要求の回数の上限（`agent.max_tool_rounds` を上書き。既定は 100。最後の1回は tool を使わない報告に充てる）。暴走を止める歯止めで、費用の予算には `--max-total-tokens` を使う |
-| `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査し、迷うものだけ確認。既定）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
+| `--approval-mode MODE` | MCP 呼び出しの承認方法。`ask`（確認）・`auto`（判定用モデルが審査して許可・拒否し、確認はしない。既定）・`allow`・`deny`（[承認モード](docs/mcp.md#承認モード)） |
 | `--auto-approve-mcp` / `--non-interactive` | `--approval-mode allow` / `deny` と同じ |
 | `--json` | 結果を1つの JSON オブジェクトとして stdout へ出力（`run` のみ） |
 | `--quiet` / `--verbose` | 進捗ログを省略 / 途中経過もすべて残し、引数と結果を含めて詳しく表示 |
@@ -150,7 +150,7 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | `/exit`、Ctrl+D | 終了 |
 | Ctrl+C | 実行中のターンだけを中断し、会話は続ける（完了した操作は巻き戻しません） |
 
-承認モードの既定は `auto` です。判定用モデルが依頼の範囲内で危険の少ない呼び出しを自動で承認し、影響の大きい操作だけを確認します（[自動承認](docs/mcp.md#自動承認auto)）。すべてを自分で確認するには `--approval-mode ask` か、設定の `[agent] approval_mode = "ask"` を使います。端末では全角文字の表示幅を考慮する行編集を使うため、IME での日本語入力や削除も正しく表示されます。`--session` を付けない場合、会話はプロセス内のメモリだけに保持されます。MCP の承認は同じ端末で確認します。stdin をパイプで渡すと、1行ずつ指示として処理します（承認は拒否されます）。
+承認モードの既定は `auto` です。判定用モデルが依頼の範囲内で危険の少ない呼び出しを自動で承認し、それ以外は確認せずに拒否して理由をモデルに返します（[自動承認](docs/mcp.md#自動承認auto)）。すべてを自分で確認するには `--approval-mode ask` か、設定の `[agent] approval_mode = "ask"` を使います。端末では全角文字の表示幅を考慮する行編集を使うため、IME での日本語入力や削除も正しく表示されます。`--session` を付けない場合、会話はプロセス内のメモリだけに保持されます。MCP の承認は同じ端末で確認します。stdin をパイプで渡すと、1行ずつ指示として処理します（承認は拒否されます）。
 
 ### 画像・音声入力
 
@@ -455,7 +455,7 @@ ano chat --allow-writes --allow-exec                          # コマンドご�
 ano run --allow-exec --approval-mode auto "テストを実行して失敗を直して"  # 判定用モデルが審査
 ```
 
-- **コマンドごとに承認が必要です。** MCP と同じ[承認モード](docs/mcp.md#承認モード)（`ask`・`auto`・`allow`・`deny`）で判定し、拒否されたコマンドは実行しません。環境の既定は `deny` なので、Webhook などで使う場合は `approval_mode = "auto"` などを設定します。`auto` の判定用モデルは、調査・ビルド・テストを許可し、依頼にない削除・履歴の書き換え・push・インストール・ネットワーク接続などは確認に回します。
+- **コマンドごとに承認が必要です。** MCP と同じ[承認モード](docs/mcp.md#承認モード)（`ask`・`auto`・`allow`・`deny`）で判定し、拒否されたコマンドは実行しません。環境の既定は `deny` なので、Webhook などで使う場合は `approval_mode = "auto"` などを設定します。`auto` の判定用モデルは、調査・ビルド・テストと、そのための読み取りだけのネットワーク接続（リポジトリの remote からの `git fetch`・`git ls-remote`、依存の取得など）を許可し、依頼にない削除・履歴の書き換え・push・インストール・データの送信や依頼に要らない接続先へのネットワーク接続などは拒否します（必要なら依頼の中で明示して頼み直します）。
 - Unix では `/bin/sh -c`、Windows では `cmd /C` で実行します。作業ディレクトリは workspace（`cwd` で workspace 内のサブディレクトリを指定可）で、stdin は閉じています。
 - `timeout_secs`（既定120秒、最大1800秒）で打ち切り、それまでの出力を返します。Unix ではコマンドを専用のプロセスグループで起動し、終了・タイムアウト・中断（Ctrl+C）の時点で、コマンドが残したバックグラウンドプロセスも停止します。
 - 出力は stdout・stderr それぞれ先頭 16 KiB と末尾 48 KiB を返します（エラーは末尾に出ることが多いため）。`workspace_check` の出力も同じ形式です。
@@ -495,7 +495,7 @@ ano chat --allow-writes
 > PR #8 をレビューして、気になる点をコメントして
 ```
 
-モデルは `issue_read` で Issue を読み、workspace を編集し、`review_changes` で別の新しい会話のレビュー担当にレビューさせ、指摘を判断して対処してから、`git_commit_push` で push し、`create_pull_request` で PR を作ります。レビューは必須で、レビュー後にファイルを変えた場合は再度レビューを受けるまで push できません（[変更のレビュー](docs/agent-runtime.md#変更のレビューreview_changes)）。push と PR 作成はそれぞれ承認を求めます（既定の `auto` では判定用モデルが審査し、迷うものだけ `[y/N]` で確認）。第三者の Issue を扱う場合は、`--approval-mode ask` ですべてを自分で確認することもできます。利用できる tool は `ano mcp tools github` で確認できます（`ano mcp edit github` で選択）。
+モデルは `issue_read` で Issue を読み、workspace を編集し、`review_changes` で別の新しい会話のレビュー担当にレビューさせ、指摘を判断して対処してから、`git_commit_push` で push し、`create_pull_request` で PR を作ります。レビューは必須で、レビュー後にファイルを変えた場合は再度レビューを受けるまで push できません（[変更のレビュー](docs/agent-runtime.md#変更のレビューreview_changes)）。push と PR 作成はそれぞれ承認を求めます（既定の `auto` では判定用モデルが審査し、依頼に明示されていなければ拒否）。第三者の Issue を扱う場合は、`--approval-mode ask` ですべてを `[y/N]` で自分で確認することもできます。利用できる tool は `ano mcp tools github` で確認できます（`ano mcp edit github` で選択）。
 
 `git_commit_push` の動作は次のとおりです。
 

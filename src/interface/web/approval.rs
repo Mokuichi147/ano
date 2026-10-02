@@ -78,7 +78,6 @@ impl ApprovalHandler for WebApproval {
             mcp: request.source == ApprovalSource::Mcp,
             target: request.target(),
             arguments,
-            review: request.review.clone(),
         });
         let mut waiting = Waiting {
             approval: self,
@@ -109,7 +108,6 @@ mod tests {
             arguments: json!({"command": "ls"}),
             tool_description: None,
             user_request: "list".into(),
-            review: None,
         }
     }
 

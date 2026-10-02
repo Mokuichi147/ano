@@ -622,12 +622,6 @@ impl Chat {
                 "対象: {}",
                 event["target"].as_str().unwrap_or_default()
             ))?);
-            if let Some(review) = event["review"].as_str() {
-                let label = app.ui.label(&format!("自動判定: {review}"))?;
-                label.set_wrap(true);
-                label.set_color(TextColor::Secondary);
-                card.append(&label);
-            }
             if event["arguments"]["truncated"] == true {
                 let label = app.ui.label("引数が長いため、先頭だけを表示しています。")?;
                 label.set_color(TextColor::Warning);

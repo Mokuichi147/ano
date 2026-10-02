@@ -12,13 +12,8 @@ pub struct InteractiveApproval;
 #[async_trait]
 impl ApprovalHandler for InteractiveApproval {
     async fn approve(&self, request: McpApprovalRequest) -> Result<bool> {
-        let review = request
-            .review
-            .as_ref()
-            .map(|review| format!("Automatic review: {review}\n"))
-            .unwrap_or_default();
         let prompt = format!(
-            "\n{}: {}\nArguments: {}\n{review}Allow this call? [y/N] ",
+            "\n{}: {}\nArguments: {}\nAllow this call? [y/N] ",
             request.heading(),
             request.target(),
             request.arguments

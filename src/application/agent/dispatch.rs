@@ -822,7 +822,6 @@ impl Agent {
                 arguments: arguments.clone(),
                 tool_description: Some(tool.description.clone()),
                 user_request: scope.user_request.to_string(),
-                review: None,
             };
             let decision = self
                 .request_approval(scope.deny_approvals, approval_request)

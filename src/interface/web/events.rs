@@ -55,8 +55,6 @@ pub(super) enum UiEvent {
         mcp: bool,
         target: String,
         arguments: Value,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        review: Option<String>,
     },
     ApprovalResolved {
         id: String,

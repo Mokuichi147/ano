@@ -155,9 +155,6 @@ impl ApprovalHandler for ChatApproval {
             request.target(),
             request.arguments
         );
-        if let Some(review) = &request.review {
-            eprintln!("Automatic review: {review}");
-        }
         std::io::stderr().flush().ok();
         Ok(
             match self.lines.read("Allow this call? [y/N] ", false).await {

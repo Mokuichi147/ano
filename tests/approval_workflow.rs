@@ -6,10 +6,10 @@ use std::{
 };
 use tokio::process::Command;
 
-/// In auto mode a reviewer model approves a read-only call on its own; a
-/// call it wants the user to confirm is denied when nobody can be asked.
+/// In auto mode a reviewer model approves a read-only call on its own and
+/// denies a call it is not sure about, without asking anyone.
 #[tokio::test]
-async fn auto_mode_reviews_mcp_calls_and_denies_deferred_ones_without_a_terminal() {
+async fn auto_mode_reviews_mcp_calls_and_denies_uncertain_ones_without_asking() {
     let agent_requests = Arc::new(Mutex::new(Vec::<Value>::new()));
     let reviews = Arc::new(Mutex::new(Vec::<Value>::new()));
     let (captured_agent, captured_reviews) = (Arc::clone(&agent_requests), Arc::clone(&reviews));
@@ -82,10 +82,7 @@ async fn auto_mode_reviews_mcp_calls_and_denies_deferred_ones_without_a_terminal
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
-    assert!(
-        stderr.contains("automatic review does not allow will be denied"),
-        "{stderr}"
-    );
+    assert!(!stderr.contains("will be denied"), "{stderr}");
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     let approvals = result["events"]
         .as_array()
@@ -111,7 +108,7 @@ async fn auto_mode_reviews_mcp_calls_and_denies_deferred_ones_without_a_terminal
             (
                 "delete_issue".to_string(),
                 false,
-                "auto review deferred: Deleting is irreversible.".to_string()
+                "auto: denied, not clearly allowed: Deleting is irreversible.".to_string()
             ),
         ]
     );

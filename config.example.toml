@@ -136,8 +136,8 @@ max_tool_output_bytes = 131072
 # How approval requests (MCP calls and workspace_exec commands) are answered
 # for runs without --environment, and the default of `ano web` sessions:
 # "ask" (prompt on the terminal), "auto" (a reviewer model allows low-risk calls
-# within the user's request, denies clearly unsafe ones, and asks about the
-# rest; the default), "allow", or "deny". Override with `--approval-mode`.
+# within the user's request and denies the rest without asking; the
+# default), "allow", or "deny". Override with `--approval-mode`.
 # approval_mode = "auto"
 # Reviewer model for auto mode; defaults to model.
 # approval_model = "a-fast-reviewer-model"
@@ -207,7 +207,7 @@ enabled = false
 allowed_tools = ["echo", "unix_time", "workspace_list", "workspace_read", "workspace_search", "workspace_find", "workspace_check", "history_*"]
 allow_writes = false
 # Environments default to "deny" because webhook jobs have nobody to ask.
-# "auto" allows what the reviewer approves and denies the rest when unattended.
+# "auto" allows what the reviewer approves and denies the rest.
 # approval_mode = "auto"
 
 # Example writable coding environment. workspace_* also allows
