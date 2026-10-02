@@ -2,9 +2,10 @@
 //! its own working directory, permissions, and model.
 //!
 //! The API is scoped to sessions (`/api/sessions/{id}/...`); for now one
-//! session runs at a time. The server listens on a loopback address only and
-//! admits a browser that opened the URL with the token printed at startup,
-//! which then holds the token in a cookie.
+//! session runs at a time. The server admits a browser that opened the URL
+//! with the token printed at startup, which then holds the token in a
+//! cookie. It listens on loopback by default; another address makes it
+//! reachable from other machines, over plain HTTP.
 
 mod approval;
 mod events;
@@ -39,7 +40,7 @@ use session::{NewSession, TurnRefused, WebSession, Workbench};
 use std::{
     collections::BTreeMap,
     convert::Infallible,
-    net::SocketAddr,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
     path::PathBuf,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
@@ -71,7 +72,8 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wa
 /// How `ano web` serves.
 #[derive(Debug, Clone)]
 pub struct WebOptions {
-    /// A loopback address and port.
+    /// The address and port to listen on. Other than loopback, other
+    /// machines can reach the server (still only with the token).
     pub bind: String,
     /// The workspace of sessions that name none.
     pub workspace: PathBuf,
@@ -129,9 +131,6 @@ pub async fn serve(
         .bind
         .parse()
         .with_context(|| format!("invalid address {}; use IP:PORT", options.bind))?;
-    if !address.ip().is_loopback() {
-        bail!("ano web listens only on a loopback address such as 127.0.0.1, not {address}");
-    }
     let token = match options.token {
         Some(token) => {
             // The token goes into a URL and a cookie as it is.
@@ -163,9 +162,17 @@ pub async fn serve(
         turns: Mutex::new(JoinSet::new()),
     });
     println!(
-        "ano web UI: http://{local}/?token={}\nOpen this URL in a browser. Ctrl+C stops the server.",
-        state.token
+        "ano web UI: {}\nOpen this URL in a browser. Ctrl+C stops the server.",
+        page_url(local, &state.token)
     );
+    if !local.ip().is_loopback() {
+        eprintln!(
+            "warning: ano web is reachable from other machines on {local}. The token and the conversation travel unencrypted over HTTP; use it only on networks you trust."
+        );
+        if local.ip().is_unspecified() {
+            eprintln!("From another machine, use this machine's address in place of the host.");
+        }
+    }
     let shutdown_state = Arc::clone(&state);
     let served = axum::serve(listener, router(Arc::clone(&state)))
         .with_graceful_shutdown(async move {
@@ -190,6 +197,20 @@ pub async fn serve(
         turns.abort_all();
     }
     served
+}
+
+/// The URL that admits a browser. An unspecified address (`0.0.0.0`,
+/// `::`) is shown as this machine's loopback, which it also listens on.
+fn page_url(local: SocketAddr, token: &str) -> String {
+    let host = match local.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    format!(
+        "http://{}/?token={token}",
+        SocketAddr::new(host, local.port())
+    )
 }
 
 /// End every session. Dropping them ends their event streams, so the

@@ -577,7 +577,7 @@ cargo test
 - ano は起動したユーザーの OS 権限で動きます。`allow_writes`・`allow_exec`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。
 - `allow_exec` と `approval_mode = "allow"` を併用すると、モデルが任意のコマンドを確認なしで実行できます。使い捨てのコンテナなど、壊れても復元できる環境に限ってください。
 - リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` と `approval_mode = "allow"` は信頼済みの server に限ってください。`auto` モードの判定は補助的な安全策で、完全ではありません。
-- `ano web` はループバックアドレスでだけ待ち受け、起動時に表示されるトークンを要求します。トークン付きの URL は他人に渡さないでください（[docs/web.md](docs/web.md#セキュリティ)）。
+- `ano web` は起動時に表示されるトークンを要求します。トークン付きの URL は他人に渡さないでください。`--bind` でループバック以外のアドレスにすると、トークンと会話は暗号化されない HTTP でネットワークを流れます。信頼できるネットワークでだけ使ってください（[docs/web.md](docs/web.md#セキュリティ)）。
 - Webhook は必ず secret を設定して公開します。未認証での起動は loopback アドレスに限られます（[docs/webhook.md](docs/webhook.md#セキュリティ)）。
 - `web_fetch` は取得のたびに URL を外部へ送ります。`allow_web` と `approval_mode = "allow"` を併用すると、ページに埋め込まれた指示でモデルがデータを URL に載せて送る可能性を確認なしに許すことになります。
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。

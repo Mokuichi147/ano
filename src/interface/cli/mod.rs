@@ -286,7 +286,7 @@ struct WebArgs {
         long,
         value_name = "ADDRESS",
         default_value = "127.0.0.1:8787",
-        help = "Loopback address and port to listen on"
+        help = "Address and port to listen on; other than loopback (such as 0.0.0.0:8787), other machines can open the UI with the token, over plain HTTP"
     )]
     bind: String,
 

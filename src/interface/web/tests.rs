@@ -1,6 +1,6 @@
 use super::{
-    close_sessions, router, serve, session::TurnRefused, WebOptions, WebState, MAX_SESSIONS,
-    TOKEN_ENV,
+    close_sessions, page_url, router, serve, session::TurnRefused, WebOptions, WebState,
+    MAX_SESSIONS, TOKEN_ENV,
 };
 use crate::{
     application::registry::ToolRegistry, config::AppConfig, domain::tool::ToolDefinition,
@@ -490,7 +490,7 @@ async fn ending_a_running_session_stops_its_turn_before_it_reports_the_end() {
 }
 
 #[tokio::test]
-async fn the_server_listens_only_on_loopback_with_a_token_fit_for_urls_and_cookies() {
+async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
     let start = |bind: &str, token: &str| {
         serve(
             AppConfig::default(),
@@ -508,6 +508,13 @@ async fn the_server_listens_only_on_loopback_with_a_token_fit_for_urls_and_cooki
         let error = start("127.0.0.1:0", token).await.unwrap_err().to_string();
         assert!(error.contains(TOKEN_ENV), "{error}");
     }
-    let error = start("0.0.0.0:0", "token").await.unwrap_err().to_string();
-    assert!(error.contains("loopback"), "{error}");
+}
+
+#[test]
+fn the_printed_url_opens_on_this_machine_for_any_address() {
+    let url = |address: &str| page_url(address.parse().unwrap(), "t");
+    assert_eq!(url("127.0.0.1:8787"), "http://127.0.0.1:8787/?token=t");
+    assert_eq!(url("0.0.0.0:8787"), "http://127.0.0.1:8787/?token=t");
+    assert_eq!(url("[::]:8787"), "http://[::1]:8787/?token=t");
+    assert_eq!(url("192.168.1.5:8787"), "http://192.168.1.5:8787/?token=t");
 }
