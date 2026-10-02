@@ -2,11 +2,13 @@
 //! its own working directory, permissions, and model.
 //!
 //! The API is scoped to sessions (`/api/sessions/{id}/...`); for now one
-//! session runs at a time. The server admits a browser that opened the URL
-//! with the token printed at startup, which then holds the token in a
-//! cookie. It listens on loopback by default; another address makes it
-//! reachable from other machines, over plain HTTP.
+//! session runs at a time. It listens on loopback by default; another
+//! address makes it reachable from other machines, over plain HTTP. A
+//! browser on this machine needs nothing more; one on another machine opens
+//! the URL with the token printed at startup, which then stays in a cookie
+//! (`access`).
 
+mod access;
 mod approval;
 mod events;
 mod markdown;
@@ -20,9 +22,10 @@ use crate::{
     domain::approval::ApprovalMode,
     harness::Harness,
 };
+use access::Access;
 use anyhow::{bail, Context, Result};
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{
@@ -73,14 +76,17 @@ const CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self' 'wa
 #[derive(Debug, Clone)]
 pub struct WebOptions {
     /// The address and port to listen on. Other than loopback, other
-    /// machines can reach the server (still only with the token).
+    /// machines can reach the server (with the token, unless
+    /// `authenticate` is off).
     pub bind: String,
     /// The workspace of sessions that name none.
     pub workspace: PathBuf,
     /// The user whose policy and skills sessions use.
     pub user: String,
-    /// The token the browser must present; `None` makes a new one.
+    /// The token other machines present; `None` makes a new one.
     pub token: Option<String>,
+    /// Off, anyone who reaches the server may use it without the token.
+    pub authenticate: bool,
 }
 
 struct WebState {
@@ -89,10 +95,7 @@ struct WebState {
     mcp: Arc<dyn McpGateway>,
     user: String,
     default_workspace: PathBuf,
-    token: String,
-    /// The cookie that holds the token; named by port, so servers on other
-    /// ports of the same host keep their own.
-    cookie: String,
+    access: Access,
     sessions: RwLock<BTreeMap<String, Arc<WebSession>>>,
     /// Serializes session creation, so the limit holds.
     creating: tokio::sync::Mutex<()>,
@@ -132,6 +135,7 @@ pub async fn serve(
         .parse()
         .with_context(|| format!("invalid address {}; use IP:PORT", options.bind))?;
     let token = match options.token {
+        _ if !options.authenticate => None,
         Some(token) => {
             // The token goes into a URL and a cookie as it is.
             if token.is_empty()
@@ -141,9 +145,9 @@ pub async fn serve(
             {
                 bail!("{TOKEN_ENV} must be ASCII letters, digits, '-', '_', '.', and '~'");
             }
-            token
+            Some(token)
         }
-        None => uuid::Uuid::new_v4().simple().to_string(),
+        None => Some(uuid::Uuid::new_v4().simple().to_string()),
     };
     let listener = TcpListener::bind(address)
         .await
@@ -155,32 +159,36 @@ pub async fn serve(
         mcp,
         user: options.user,
         default_workspace: options.workspace,
-        cookie: format!("ano_web_{}", local.port()),
-        token,
+        access: Access::new(token, local.port()),
         sessions: RwLock::default(),
         creating: tokio::sync::Mutex::new(()),
         turns: Mutex::new(JoinSet::new()),
     });
     println!(
-        "ano web UI: {}\nOpen this URL in a browser. Ctrl+C stops the server.",
-        page_url(local, &state.token)
+        "{}\nCtrl+C stops the server.",
+        startup_message(local, state.access.token())
     );
     if !local.ip().is_loopback() {
-        eprintln!(
-            "warning: ano web is reachable from other machines on {local}. The token and the conversation travel unencrypted over HTTP; use it only on networks you trust."
-        );
-        if local.ip().is_unspecified() {
-            eprintln!("From another machine, use this machine's address in place of the host.");
+        match state.access.token() {
+            Some(_) => eprintln!(
+                "warning: ano web is reachable from other machines on {local}. The token and the conversation travel unencrypted over HTTP; use it only on networks you trust."
+            ),
+            None => eprintln!(
+                "warning: ano web is reachable from other machines on {local} without authentication: anyone who can reach it can run the agent with its permissions. Use --no-auth only on networks you trust."
+            ),
         }
     }
     let shutdown_state = Arc::clone(&state);
-    let served = axum::serve(listener, router(Arc::clone(&state)))
-        .with_graceful_shutdown(async move {
-            tokio::signal::ctrl_c().await.ok();
-            close_sessions(&shutdown_state).await;
-        })
-        .await
-        .context("web server stopped unexpectedly");
+    let served = axum::serve(
+        listener,
+        router(Arc::clone(&state)).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        tokio::signal::ctrl_c().await.ok();
+        close_sessions(&shutdown_state).await;
+    })
+    .await
+    .context("web server stopped unexpectedly");
     close_sessions(&state).await;
     let mut turns = std::mem::take(
         &mut *state
@@ -199,18 +207,26 @@ pub async fn serve(
     served
 }
 
-/// The URL that admits a browser. An unspecified address (`0.0.0.0`,
-/// `::`) is shown as this machine's loopback, which it also listens on.
-fn page_url(local: SocketAddr, token: &str) -> String {
-    let host = match local.ip() {
-        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
-        ip => ip,
+/// Where to open the UI. A browser on this machine needs no token; other
+/// machines get the token's URL. An unspecified address (`0.0.0.0`, `::`)
+/// is shown as this machine's loopback, which it also listens on.
+fn startup_message(local: SocketAddr, token: Option<&str>) -> String {
+    let port = local.port();
+    let this_machine = match local.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+        IpAddr::V6(ip) if ip.is_unspecified() => Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+        ip if ip.is_loopback() => Some(ip),
+        _ => None,
     };
-    format!(
-        "http://{}/?token={token}",
-        SocketAddr::new(host, local.port())
-    )
+    match (this_machine, token) {
+        (Some(ip), Some(token)) if local.ip().is_unspecified() => format!(
+            "ano web UI: http://{}/\nFrom other machines: http://<this machine's address>:{port}/?token={token}",
+            SocketAddr::new(ip, port)
+        ),
+        (Some(ip), _) => format!("ano web UI: http://{}/", SocketAddr::new(ip, port)),
+        (None, Some(token)) => format!("ano web UI: http://{local}/?token={token}"),
+        (None, None) => format!("ano web UI: http://{local}/"),
+    }
 }
 
 /// End every session. Dropping them ends their event streams, so the
@@ -242,7 +258,7 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/sessions/{id}/events", get(session_events))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
-            require_token,
+            require_access,
         ));
     Router::new()
         .route("/", get(index))
@@ -262,6 +278,9 @@ fn router(state: Arc<WebState>) -> Router {
 }
 
 async fn security_headers(request: Request, next: Next) -> Response {
+    if !access::same_origin(request.method(), request.headers()) {
+        return error_response(StatusCode::FORBIDDEN, "cross-origin request refused");
+    }
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
     headers.insert(
@@ -290,33 +309,13 @@ async fn asset(content_type: &'static str, body: impl IntoResponse) -> Response 
         .into_response()
 }
 
-/// The token of `headers`' cookie matches the server's.
-fn has_token(state: &WebState, headers: &HeaderMap) -> bool {
-    headers
-        .get_all(header::COOKIE)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|cookies| cookies.split(';'))
-        .filter_map(|cookie| cookie.trim().split_once('='))
-        .any(|(name, value)| name == state.cookie && same_token(value, &state.token))
-}
-
-/// Compare without stopping at the first difference.
-fn same_token(given: &str, token: &str) -> bool {
-    given.len() == token.len()
-        && given
-            .bytes()
-            .zip(token.bytes())
-            .fold(0, |difference, (a, b)| difference | (a ^ b))
-            == 0
-}
-
-async fn require_token(
+async fn require_access(
     State(state): State<Arc<WebState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> Response {
-    if has_token(&state, request.headers()) {
+    if state.access.admits(peer, request.headers()) {
         next.run(request).await
     } else {
         error_response(
@@ -335,25 +334,26 @@ struct IndexQuery {
 /// reloads without it, so the token leaves the address bar.
 async fn index(
     State(state): State<Arc<WebState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<IndexQuery>,
     headers: HeaderMap,
 ) -> Response {
     if let Some(token) = query.token {
-        if !same_token(&token, &state.token) {
+        if !state.access.is_token(&token) {
             return (StatusCode::UNAUTHORIZED, Html(LOCKED_HTML)).into_response();
         }
-        let cookie = format!(
-            "{}={}; Path=/; HttpOnly; SameSite=Strict",
-            state.cookie, state.token
-        );
-        let Ok(value) = HeaderValue::from_str(&cookie) else {
+        let Some(Ok(value)) = state
+            .access
+            .cookie()
+            .map(|cookie| HeaderValue::from_str(&cookie))
+        else {
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         };
         let mut response = Redirect::to("/").into_response();
         response.headers_mut().insert(header::SET_COOKIE, value);
         return response;
     }
-    if has_token(&state, &headers) {
+    if state.access.admits(peer, &headers) {
         ([(header::CACHE_CONTROL, "no-cache")], Html(INDEX_HTML)).into_response()
     } else {
         (StatusCode::UNAUTHORIZED, Html(LOCKED_HTML)).into_response()

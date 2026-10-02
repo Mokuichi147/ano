@@ -1,6 +1,6 @@
 use super::{
-    close_sessions, page_url, router, serve, session::TurnRefused, WebOptions, WebState,
-    MAX_SESSIONS, TOKEN_ENV,
+    access::Access, close_sessions, router, serve, session::TurnRefused, startup_message,
+    WebOptions, WebState, MAX_SESSIONS, TOKEN_ENV,
 };
 use crate::{
     application::registry::ToolRegistry, config::AppConfig, domain::tool::ToolDefinition,
@@ -10,12 +10,17 @@ use axum::{http::StatusCode, routing::post, Json, Router};
 use futures::StreamExt;
 use serde_json::{json, Value};
 use std::{
+    net::SocketAddr,
     sync::{Arc, Mutex, RwLock},
     time::Duration,
 };
 use tokio::{sync::Notify, task::JoinSet};
 
 const TOKEN: &str = "secret-token";
+/// The cookie that holds the token on the test server.
+const COOKIE: &str = "ano_web_1";
+/// The host that a browser on another machine names.
+const OTHER_HOST: &str = "192.168.1.5:8787";
 
 /// A Responses API that answers by the last input item: "approve" calls the
 /// tool that needs approval (after loading it with `tool_search`), "hang"
@@ -87,15 +92,14 @@ impl Server {
             mcp: Arc::new(McpPool::new(Vec::new())),
             user: "default".into(),
             default_workspace: workspace.path().to_path_buf(),
-            token: TOKEN.into(),
-            cookie: "ano_web_test".into(),
+            access: Access::new(Some(TOKEN.into()), 1),
             sessions: RwLock::default(),
             creating: tokio::sync::Mutex::new(()),
             turns: Mutex::new(JoinSet::new()),
         });
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        let app = router(Arc::clone(&state));
+        let app = router(Arc::clone(&state)).into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self {
             url,
@@ -111,7 +115,7 @@ impl Server {
     fn request(&self, method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
         self.http
             .request(method, format!("{}{path}", self.url))
-            .header("cookie", format!("other=1; ano_web_test={TOKEN}"))
+            .header("cookie", format!("other=1; {COOKIE}={TOKEN}"))
     }
 
     async fn post(&self, path: &str, body: Value) -> reqwest::Response {
@@ -147,75 +151,98 @@ impl Server {
 }
 
 #[tokio::test]
-async fn the_page_and_the_api_need_the_token() {
+async fn this_machine_needs_no_token_but_other_machines_and_sites_do() {
     let server = Server::start("http://127.0.0.1:9/v1").await;
     let http = &server.http;
+    let get = |path: &str, host: &str, cookie: Option<String>| {
+        let mut request = http
+            .get(format!("{}{path}", server.url))
+            .header("host", host.to_string());
+        if let Some(cookie) = cookie {
+            request = request.header("cookie", cookie);
+        }
+        request.send()
+    };
+
+    // A browser on this machine.
     let api = http
         .get(format!("{}/api/sessions", server.url))
         .send()
         .await
         .unwrap();
-    assert_eq!(api.status(), StatusCode::UNAUTHORIZED);
-    let wrong = http
-        .get(format!("{}/api/sessions", server.url))
-        .header("cookie", "ano_web_test=secret-tokem")
-        .send()
+    assert_eq!(api.status(), StatusCode::OK);
+    assert_eq!(api.json::<Value>().await.unwrap(), json!([]));
+    let page = http.get(format!("{}/", server.url)).send().await.unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    assert!(page.text().await.unwrap().contains("/assets/main.js"));
+
+    // Another site whose name resolves to this machine (DNS rebinding).
+    let rebound = get("/api/sessions", "attacker.example:8787", None)
         .await
         .unwrap();
-    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
-    let locked = http.get(format!("{}/", server.url)).send().await.unwrap();
+    assert_eq!(rebound.status(), StatusCode::UNAUTHORIZED);
+
+    // Another machine: the token, then the cookie.
+    let locked = get("/", OTHER_HOST, None).await.unwrap();
     assert_eq!(locked.status(), StatusCode::UNAUTHORIZED);
     assert!(locked.headers()["content-security-policy"]
         .to_str()
         .unwrap()
         .contains("default-src 'self'"));
-    let wrong = http
-        .get(format!("{}/?token=nope", server.url))
-        .send()
-        .await
-        .unwrap();
+    let wrong = get("/?token=nope", OTHER_HOST, None).await.unwrap();
     assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
-
-    let login = http
-        .get(format!("{}/?token={TOKEN}", server.url))
-        .send()
+    let login = get(&format!("/?token={TOKEN}"), OTHER_HOST, None)
         .await
         .unwrap();
     assert_eq!(login.status(), StatusCode::SEE_OTHER);
     assert_eq!(login.headers()["location"], "/");
     let cookie = login.headers()["set-cookie"].to_str().unwrap();
     assert!(
-        cookie.starts_with(&format!("ano_web_test={TOKEN};")),
+        cookie.starts_with(&format!("{COOKIE}={TOKEN};")),
         "{cookie}"
     );
     assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
-
-    let page = server
-        .request(reqwest::Method::GET, "/")
-        .send()
+    let page = get("/", OTHER_HOST, Some(format!("{COOKIE}={TOKEN}")))
         .await
         .unwrap();
     assert_eq!(page.status(), StatusCode::OK);
-    assert!(page.text().await.unwrap().contains("/assets/main.js"));
+    let api = get(
+        "/api/sessions",
+        OTHER_HOST,
+        Some(format!("{COOKIE}={TOKEN}")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(api.status(), StatusCode::OK);
+    let wrong = get(
+        "/api/sessions",
+        OTHER_HOST,
+        Some(format!("{COOKIE}=secret-tokem")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+
+    // A page of another site cannot change anything, token or not.
+    let forged = server
+        .request(reqwest::Method::POST, "/api/sessions")
+        .header("origin", "https://attacker.example")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+    assert!(server.state.sessions().is_empty());
+
     for (path, content_type) in [
         ("/assets/main.js", "text/javascript"),
         ("/assets/pkg/ano_web_ui.js", "text/javascript"),
         ("/assets/pkg/ano_web_ui_bg.wasm", "application/wasm"),
     ] {
-        let asset = http
-            .get(format!("{}{path}", server.url))
-            .send()
-            .await
-            .unwrap();
+        let asset = get(path, OTHER_HOST, None).await.unwrap();
         assert_eq!(asset.status(), StatusCode::OK, "{path}");
         assert_eq!(asset.headers()["content-type"], content_type, "{path}");
     }
-    let sessions = server
-        .request(reqwest::Method::GET, "/api/sessions")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(sessions.json::<Value>().await.unwrap(), json!([]));
 }
 
 #[tokio::test]
@@ -501,6 +528,7 @@ async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
                 workspace: std::env::temp_dir(),
                 user: "default".into(),
                 token: Some(token.into()),
+                authenticate: true,
             },
         )
     };
@@ -511,10 +539,23 @@ async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
 }
 
 #[test]
-fn the_printed_url_opens_on_this_machine_for_any_address() {
-    let url = |address: &str| page_url(address.parse().unwrap(), "t");
-    assert_eq!(url("127.0.0.1:8787"), "http://127.0.0.1:8787/?token=t");
-    assert_eq!(url("0.0.0.0:8787"), "http://127.0.0.1:8787/?token=t");
-    assert_eq!(url("[::]:8787"), "http://[::1]:8787/?token=t");
-    assert_eq!(url("192.168.1.5:8787"), "http://192.168.1.5:8787/?token=t");
+fn the_printed_urls_need_the_token_only_from_other_machines() {
+    let message = |address: &str, token| startup_message(address.parse().unwrap(), token);
+    assert_eq!(
+        message("127.0.0.1:8787", Some("t")),
+        "ano web UI: http://127.0.0.1:8787/"
+    );
+    assert_eq!(
+        message("0.0.0.0:8787", Some("t")),
+        "ano web UI: http://127.0.0.1:8787/\nFrom other machines: http://<this machine's address>:8787/?token=t"
+    );
+    assert_eq!(message("[::]:8787", None), "ano web UI: http://[::1]:8787/");
+    assert_eq!(
+        message("192.168.1.5:8787", Some("t")),
+        "ano web UI: http://192.168.1.5:8787/?token=t"
+    );
+    assert_eq!(
+        message("192.168.1.5:8787", None),
+        "ano web UI: http://192.168.1.5:8787/"
+    );
 }

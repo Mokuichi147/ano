@@ -292,6 +292,12 @@ struct WebArgs {
 
     #[arg(
         long,
+        help = "Let other machines use the UI without the token (this machine never needs it); anyone who can reach the server can then run the agent"
+    )]
+    no_auth: bool,
+
+    #[arg(
+        long,
         value_name = "PATH",
         help = "Working folder that new sessions start with (defaults to the current directory)"
     )]
@@ -395,6 +401,7 @@ async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegis
         workspace,
         user,
         token: std::env::var(web::TOKEN_ENV).ok(),
+        authenticate: !args.no_auth,
     };
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = web::serve(config, Arc::clone(&mcp), registry, options).await;
