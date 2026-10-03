@@ -22,6 +22,23 @@ const COOKIE: &str = "ano_web_1";
 /// The host that a browser on another machine names.
 const OTHER_HOST: &str = "192.168.1.5:8787";
 
+#[test]
+fn form_fonts_prevent_focus_zoom_without_restricting_page_zoom() {
+    // Keep the font rule before the first media query so it is not gated by
+    // touch/hover capabilities:
+    // an iOS device can also have a mouse or trackpad attached.
+    let base_css = super::STYLE_CSS.split("@media").next().unwrap();
+    assert!(base_css.contains("input, textarea, select { font-size: 16px !important; }"));
+
+    // Keep pinch-to-zoom available rather than hiding the problem by
+    // restricting the viewport's scale.
+    let viewport = super::INDEX_HTML
+        .lines()
+        .find(|line| line.contains("name=\"viewport\""))
+        .unwrap();
+    assert!(viewport.contains("content=\"width=device-width, initial-scale=1\""));
+}
+
 /// A Responses API that answers by the last input item: "approve" calls the
 /// tool that needs approval (after loading it with `tool_search`), "hang"
 /// never answers, and anything else gets a Markdown answer.
@@ -237,6 +254,7 @@ async fn this_machine_needs_no_token_but_other_machines_and_sites_do() {
 
     for (path, content_type) in [
         ("/assets/main.js", "text/javascript"),
+        ("/assets/style.css", "text/css"),
         ("/assets/pkg/ano_web_ui.js", "text/javascript"),
         ("/assets/pkg/ano_web_ui_bg.wasm", "application/wasm"),
     ] {
