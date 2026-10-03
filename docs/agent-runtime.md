@@ -25,9 +25,9 @@
 | `max_tool_output_bytes` | 131072 | tool 出力（JSON のバイト数）の上限。超えた出力は先頭と末尾だけを残し、`truncated: true` と元のサイズを付けてモデルへ返します（4096 以上） |
 | `tool_discovery_limit` | 12 | `tool_search` 1回で有効化する tool 数 |
 | `max_output_tokens` | なし | 各応答の出力トークン上限 |
-| `reasoning_effort` | なし | 推論モデルの `reasoning.effort`（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`・`max`・`ultra`。対応範囲はモデルによる）。CLI では `--reasoning-effort`、`ano chat` では `/effort`。接続先・モデルと組にするには[プリセット](../README.md#プリセットとロール)を使う |
+| `reasoning_effort` | なし | 推論モデルの `reasoning.effort`（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`・`max`・`ultra`。対応範囲はモデルによる）。CLI では `--reasoning-effort`、`ano chat` では `/effort`。接続先・モデルと組にするには[プリセット](providers.md#プリセットとロール)を使う |
 | `reasoning_summary` | なし | 推論の要約（`auto`・`concise`・`detailed`）。要約は `reasoning_summary` イベントとして進捗に表示 |
-| `project_instructions` | `["AGENTS.md"]` | instructions の末尾に追加する workspace 内のファイル（[README](../README.md#プロジェクト指示agentsmd)） |
+| `project_instructions` | `["AGENTS.md"]` | instructions の末尾に追加する workspace 内のファイル（[プロジェクト指示](configuration.md#プロジェクト指示agentsmd)） |
 
 - モデルが不正な JSON 引数を返した場合や tool が失敗した場合は、実行を中断せず、エラー内容を tool 出力としてモデルへ返します。
 - `workspace_check` は検証ごとの `timeout_secs`、`workspace_exec` は呼び出しの `timeout_secs`（既定120秒、最大1800秒）を使い、結果回収のために外側の制限へ5秒の猶予を設けます。
@@ -60,7 +60,7 @@ ano session .ano/review.json          # 状態・計画・累積使用量を表�
 ano session .ano/review.json --json   # 保存内容をすべて JSON で表示
 ```
 
-- セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。endpoint だけは `--provider` の明示か `ano chat` の `/provider` で切り替えられます。その際、元の endpoint でしか読めない暗号化された推論を履歴から除きます。リモート圧縮済みの会話は移せません（[複数の接続先を切り替える](../README.md#複数の接続先を切り替える)）。
+- セッションはユーザー・環境・workspace・Responses API endpoint に束縛され、別の実行コンテキストでは開けません。endpoint だけは `--provider` の明示か `ano chat` の `/provider` で切り替えられます。その際、元の endpoint でしか読めない暗号化された推論を履歴から除きます。リモート圧縮済みの会話は移せません（[複数の接続先を切り替える](providers.md#複数の接続先を切り替える)）。
 - `--preset`・`--provider`・`--model`・`--reasoning-effort` や `/preset`・`/provider`・`/model`・`/effort` で選んだ接続先・モデル・推論の強さはセッションに記録され、指定なしで再開したときに引き継がれます。
 - 履歴と tool 結果をローカルに保存し、次の要求では完全な履歴を `store:false` で再送します。
 - 実行中のセッションは sidecar lock（`<名前>.lock`）で二重起動を防ぎます。壊れたファイルはそのまま残して読み込みを拒否します。サイズ上限は 32 MiB です。
@@ -225,7 +225,7 @@ MCP tool の検索対象は [MCP の設定](mcp.md#検索カタログtool_catalo
 `delegate_task` は、まとまった作業を新しい会話のサブエージェントに任せ、その最終回答（報告）だけを受け取るランタイム tool です。多数のファイルを調べる調査や独立した部分作業を切り出すことで、元の会話の履歴を小さく保てます。
 
 - サブエージェントは同じ tool・ポリシー・workspace・承認ハンドラーで動き、元の会話は見えません。モデルは `task` に目的・前提・報告してほしい内容を書きます。
-- 接続先・モデル・推論の強さは、`[agent.roles] delegate` にプリセットを指定するとそれを使い、指定しなければ元のエージェントと同じです（[プリセットとロール](../README.md#プリセットとロール)）。進捗には `[subagent] started on MODEL` と使うモデルを表示します。
+- 接続先・モデル・推論の強さは、`[agent.roles] delegate` にプリセットを指定するとそれを使い、指定しなければ元のエージェントと同じです（[プリセットとロール](providers.md#プリセットとロール)）。進捗には `[subagent] started on MODEL` と使うモデルを表示します。
 - サブエージェントはさらに委任できません（1段まで）。1つの応答に複数の `delegate_task` があれば、他の tool と同じく並行実行します。
 - tool 出力は `report`（最終回答）・`outcome`・`stop_reason` と、サブエージェントが作った計画（`plan`）です。失敗した場合は `subagent_failed` として元のエージェントに返し、実行は続けます。
 - 承認の判定には、モデルが書いた `task` ではなく元のユーザーの依頼文を使います。

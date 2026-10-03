@@ -141,7 +141,7 @@ Responses API 管理方式の server は、`url` へ Streamable HTTP で接続�
 
 ### 承認モード
 
-承認が必要な呼び出しにどう答えるかは、承認モードで決まります。同じ承認モードが、コマンド実行の [`workspace_exec`](../README.md#コマンド実行workspace_exec) など、承認が必要なローカル tool にも適用されます（判定は `local_tool_approval` イベントに記録します）。
+承認が必要な呼び出しにどう答えるかは、承認モードで決まります。同じ承認モードが、コマンド実行の [`workspace_exec`](tools.md#コマンド実行workspace_exec) など、承認が必要なローカル tool にも適用されます（判定は `local_tool_approval` イベントに記録します）。
 
 | モード | 動作 |
 | --- | --- |
