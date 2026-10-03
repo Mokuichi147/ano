@@ -1,6 +1,6 @@
 # ano
 
-OpenAI Responses API を使う、Rust 製の自律型 AI エージェントです。モデルが返した function call を自動で実行し、結果を次のリクエストへ返すループで、ファイルの調査・編集・検証のような複数ステップの作業を進めます。CLI・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
+OpenAI Responses API を使う、Rust 製の自律型 AI エージェントです。モデルが返した function call を自動で実行し、結果を次のリクエストへ返すループで、ファイルの調査・編集・検証のような複数ステップの作業を進めます。CLI・ブラウザの Web UI・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
 
 - [特長](#特長)
 - [クイックスタート](#クイックスタート)
@@ -33,13 +33,14 @@ OpenAI Responses API を使う、Rust 製の自律型 AI エージェントで�
 - workspace 内に閉じたファイル一覧・パス名検索（グロブ）・分割読み取り（バイト位置・行番号）・全文検索（正規表現対応、`.gitignore` 対応）・書き込み・移動・削除
 - 競合検出付きの正確なファイル編集と、設定で登録した検証コマンド（ビルド・テスト）の実行
 - 承認付きのシェルコマンド実行（`workspace_exec`、opt-in）
-- 承認付きの Web ページ取得と Markdown 変換（`web_fetch`、opt-in。公開アドレスのみ）
+- Web ページの取得と Markdown 変換（`web_fetch`）。専用の権限設定は無く、tool ポリシーで許可されていれば使え、取得ごとに承認モードで判定する（公開アドレスのみ）
 - リモート MCP（Responses API 経由、Secure MCP Tunnel 対応）と、ano からの直接接続（stdio / Streamable HTTP。OAuth 認証・ステートレス server 対応）
 - ユーザー・実行環境ごとの tool allowlist / denylist（ワイルドカード対応）と MCP 承認フロー
 
 **入出力と連携**
 - テキスト・画像・音声入力（音声は文字起こしせず native `input_audio` として送信）
 - GitHub MCP と組み合わせた、Issue の解決から Pull Request 作成・レビューまでの対話的な作業（別の新しい会話でのレビュー `review_changes` を push 前に必須とし、指定ファイルだけをコミットして push する `git_commit_push`）
+- ブラウザで対話する Web UI（`ano web`）。セッションごとに作業フォルダ・環境・プリセット・権限・承認モードを選び、承認が必要な呼び出しはブラウザで許可・拒否できる（承認カードが出るのは承認モード `ask` のとき。[Web UI](#web-uiano-web)）
 - 名前付き実行環境を選べる署名付き Webhook と、実行中の進捗確認・中止・タイムアウトに対応した非同期ジョブ API
 - LM Studio などの OpenAI 互換 `/v1/responses` endpoint と、`/v1/chat/completions` だけを提供するサーバー（`wire_api = "chat_completions"`）
 - 名前付きの複数の接続先（`[providers]`）と、実行ごと・環境ごと・対話の途中（`/provider`・`/model`）での接続先とモデルの切り替え
@@ -73,9 +74,10 @@ ChatGPT の利用枠を使う場合は `ano auth login` でログインし、`co
 | --- | --- |
 | `ano run [PROMPT]` | タスクを実行します。PROMPT を省略すると stdin から読みます |
 | `ano chat` | 同じ会話で複数ターンのやり取りをします（[対話モード](#対話モード)） |
+| `ano auth login/status/logout` | ChatGPT サブスクリプションにログインし、保存した認証情報の状態を確認・削除します（[ChatGPT サブスクリプション](docs/chatgpt-subscription.md)） |
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
-| `ano web` | ブラウザで対話する Web UI を起動します。セッションごとに作業フォルダ・権限・モデルを選べます（[docs/web.md](docs/web.md)） |
+| `ano web` | ブラウザで対話する Web UI を起動します。セッションごとに作業フォルダ・環境・プリセット・権限・承認モードを選べます（[Web UI](#web-uiano-web)、[docs/web.md](docs/web.md)） |
 | `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](docs/chronotope-history.md)） |
 | `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](docs/agent-runtime.md#スキルskill_read--skill_save)） |
@@ -151,6 +153,25 @@ ano chat --environment coding --session .ano/review.json   # 終了後も会話�
 | Ctrl+C | 実行中のターンだけを中断し、会話は続ける（完了した操作は巻き戻しません） |
 
 承認モードの既定は `auto` です。判定用モデルが依頼の範囲内で危険の少ない呼び出しを自動で承認し、それ以外は確認せずに拒否して理由をモデルに返します（[自動承認](docs/mcp.md#自動承認auto)）。すべてを自分で確認するには `--approval-mode ask` か、設定の `[agent] approval_mode = "ask"` を使います。端末では全角文字の表示幅を考慮する行編集を使うため、IME での日本語入力や削除も正しく表示されます。`--session` を付けない場合、会話はプロセス内のメモリだけに保持されます。MCP の承認は同じ端末で確認します。stdin をパイプで渡すと、1行ずつ指示として処理します（承認は拒否されます）。
+
+### Web UI（`ano web`）
+
+`ano web` は、ブラウザからエージェントと対話するサーバーを起動します。セッションごとに作業フォルダ・環境・プリセット・権限（ファイルの書き込み・コマンドの実行）・承認モードを選び、コマンド実行・Web ページの取得・MCP の呼び出しは 1 回ごとに承認モードで判定します（承認カードが出るのは `ask` のときだけ）。画面で選んだ作業フォルダが存在しないときは、選べる範囲内であれば確認してから作成してセッションを始めます。会話はサーバーのメモリにだけあり、セッションの終了やサーバーの停止で消えます（`[history]` を有効にしている場合は、原文の会話・ツール履歴は chronotope に保存されます）。同時に動かせるセッションは 1 つです。
+
+```sh
+ano web                                  # http://127.0.0.1:8787
+ano web --workspace ~/src/my-project     # 作業フォルダの初期値と、選べる範囲の起点
+ano web --bind 0.0.0.0:8787              # LAN のほかの端末からも開ける（トークン付き URL、暗号化されない HTTP）
+```
+
+| オプション | 内容 |
+| --- | --- |
+| `--bind ADDRESS` | 待ち受けアドレスとポート（既定 `127.0.0.1:8787`）。ループバック以外にすると、ほかの端末から起動時に表示されるトークンで開けます（`--no-auth` ではトークンも不要です） |
+| `--workspace PATH` | 作業フォルダの初期値で、画面から選べる範囲の起点（既定はカレントディレクトリ）。このフォルダとその中だけを選べます（環境が自分の `workspace` を持つ場合はその設定に従います） |
+| `--allow-any-workspace` | 範囲の制限を外し、任意のフォルダを作業フォルダに選べるようにする |
+| `--no-auth` | ほかの端末にもトークンを求めない（ネットワーク上の誰でも操作できる。信頼できるネットワークだけ） |
+
+この PC のブラウザからはトークンなしで開けます。`--config` と `--user` はほかのコマンドと同じで、セッションはそのユーザーのポリシーとスキルで動きます。画面の説明・API・`ANO_WEB_TOKEN`・セキュリティは [docs/web.md](docs/web.md) を参照してください。
 
 ### 画像・音声入力
 
@@ -427,11 +448,12 @@ ano preset list
 | `workspace_delete` | ファイル・リンク・空ディレクトリを削除。中身のあるディレクトリは `recursive:true` が必要。取り消しはできない | `allow_writes` |
 | `workspace_check` | 環境の `checks` に登録した検証コマンドを実行。`name:null` で一覧 | `checks` |
 | `workspace_exec` | シェルコマンドを workspace で実行し、終了コードと出力を返す。呼び出しごとに承認が必要（[詳細](#コマンド実行workspace_exec)） | `allow_exec` |
-| `web_fetch` | 公開 Web ページを取得し、HTML を Markdown に変換して返す。`offset`・`max_bytes` で分割して読む。呼び出しごとに承認が必要（[詳細](#web-ページの取得web_fetch)） | 常時（承認で判定） |
+| `web_fetch` | 公開 Web ページを取得し、HTML を Markdown に変換して返す。`offset`・`max_bytes` で分割して読む。呼び出しごとに承認が必要（[詳細](#web-ページの取得web_fetch)） | 承認で判定（tool ポリシーで許可時） |
 | `git_diff` | 未コミットの変更（新規ファイルを含む）の差分と、ファイルごとの状態と sha256（内容と実行ビットから計算）を返す | workspace |
 | `git_commit_push` | 指定したファイルだけをコミットし、ブランチを remote へ push する。既定ブランチには直接コミットしない。`review_changes` を受けた内容のファイルだけをコミットできる。呼び出しごとに承認が必要（[詳細](#github-の-issue-と-pull-request)） | `allow_writes` |
 | `skill_read` | 保存済みスキルの手順を名前で読む（[詳細](docs/agent-runtime.md#スキルskill_read--skill_save)） | `[skills]` |
 | `skill_save` | 上手くいった手順をスキルとして保存・更新する。呼び出しごとに承認が必要 | `[skills]` |
+| `history_search` / `history_get` / `history_context` / `history_conversations` | chronotope に保存した会話・ツール履歴の原文を検索し、発言 ID から前後ごと読む | `[history]` |
 | `task_plan` | 作業計画の読み書き（[詳細](docs/agent-runtime.md#作業計画と完了判定)） | 常時 |
 | `tool_search` | 登録済み tool・MCP の検索（[詳細](docs/agent-runtime.md#tool-の遅延公開tool_search)） | 常時 |
 | `delegate_task` | 作業をサブエージェントに任せ、報告を受け取る（[詳細](docs/agent-runtime.md#サブエージェントdelegate_task)） | 常時 |
@@ -464,7 +486,7 @@ ano run --allow-exec --approval-mode auto "テストを実行して失敗を直�
 
 ### Web ページの取得（web_fetch）
 
-ドキュメントや Issue など、作業に必要な Web ページを読むための tool です。専用の権限設定は無く、MCP の tool と同じく常に使え、取得ごとに承認モードで判定します。使わせたくない場合は、ポリシーの `disabled_tools` に `web_fetch` を加えます。
+ドキュメントや Issue など、作業に必要な Web ページを読むための tool です。専用の権限設定は無く、MCP の tool と同じく tool ポリシーで許可されていれば使え、取得ごとに承認モードで判定します。ユーザーや環境の `allowed_tools` を使う場合は、その allowlist に `web_fetch` を含め、使わせたくない場合は `disabled_tools` に `web_fetch` を加えます。
 
 - **取得ごとに承認が必要です。** URL にはデータを載せて外部へ送れるため、`workspace_exec` と同じ[承認モード](docs/mcp.md#承認モード)で判定します。`auto` の判定用モデルは、作業に必要なページの閲覧を許可し、URL に秘密情報や workspace のデータを含むもの、文書などに埋め込まれた指示に従っているように見えるものを拒否します。
 - **公開アドレスだけに接続します。** ホスト名を解決したすべてのアドレスを確認し、loopback・プライベート・リンクローカル（クラウドのメタデータ endpoint を含む）などへの接続を拒否します。リダイレクト先（最大5回）も同じく確認し、解決したアドレスに接続先を固定するため、DNS の応答が変わっても内部ネットワークには届きません。プロキシの環境変数は使いません。
@@ -552,6 +574,7 @@ registry.register(
 | [docs/chatgpt-subscription.md](docs/chatgpt-subscription.md) | ChatGPT ログイン、利用枠による接続、認証情報の保存、対応範囲 |
 | [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント、スキル |
 | [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、tool の確認と有効化、承認、ポリシーの名前空間、検索カタログ |
+| [docs/chronotope-history.md](docs/chronotope-history.md) | 原文会話・ツール履歴の保存と再送、ローカル未送信キュー、`history_*` tool と `ano history` |
 | [docs/web.md](docs/web.md) | Web UI の起動とトークン、セッション、API、naui による画面のビルド |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
@@ -571,7 +594,7 @@ cargo test
 - ano は起動したユーザーの OS 権限で動きます。`allow_writes`・`allow_exec`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。
 - `allow_exec` と `approval_mode = "allow"` を併用すると、モデルが任意のコマンドを確認なしで実行できます。使い捨てのコンテナなど、壊れても復元できる環境に限ってください。
 - リモート MCP server は外部へデータを送信できます。信頼できる server だけを登録し、`require_approval = "never"` と `approval_mode = "allow"` は信頼済みの server に限ってください。`auto` モードの判定は補助的な安全策で、完全ではありません。
-- `ano web` は、この PC のブラウザからはトークンなしで、ほかの端末からは起動時に表示されるトークンで使えます。同じ PC のほかのユーザーも操作できる点に注意してください。トークン付きの URL は他人に渡さないでください。`--bind` でループバック以外のアドレスにすると、トークンと会話は暗号化されない HTTP でネットワークを流れます。`--no-auth` ではネットワーク上の誰でも操作できます。どちらも信頼できるネットワークでだけ使ってください（[docs/web.md](docs/web.md#セキュリティ)）。
+- `ano web` は、この PC のブラウザからはトークンなしで、ほかの端末からは起動時に表示されるトークンで使えます。同じ PC のほかのユーザーも操作できる点に注意してください。トークン付きの URL は他人に渡さないでください。`--bind` でループバック以外のアドレスにすると、トークンと会話は暗号化されない HTTP でネットワークを流れます。`--no-auth` ではネットワーク上の誰でも操作できます。どちらも信頼できるネットワークでだけ使ってください。画面から選べる作業フォルダは、既定では `--workspace`（省略時は起動したディレクトリ）とその中だけで、`--allow-any-workspace` で制限を外せます（設定ファイルで環境に指定した `workspace` はこの制限を受けません。[docs/web.md](docs/web.md#セキュリティ)）。
 - Webhook は必ず secret を設定して公開します。未認証での起動は loopback アドレスに限られます（[docs/webhook.md](docs/webhook.md#セキュリティ)）。
 - `web_fetch` は取得のたびに URL を外部へ送ります。`approval_mode = "allow"` では、ページに埋め込まれた指示でモデルがデータを URL に載せて送る可能性を確認なしに許すことになります。
 - `workspace_delete` による削除は取り消せません。書き込みを許可する環境は、Git などで復元できる workspace にしてください。
