@@ -7,8 +7,8 @@ use crate::{
     dom,
 };
 use naui::{
-    Align, Checkbox, ComboBox, GridCell, Label, Orientation, Padding, Sizing, Stack, TextColor,
-    TextInput, TextStyle, Track,
+    Align, Button, Checkbox, ComboBox, DialogButtons, DialogResponse, GridCell, Label, Orientation,
+    Padding, Sizing, Stack, TextColor, TextInput, TextStyle, Track,
 };
 use serde_json::{json, Map, Value};
 use std::{cell::Cell, rc::Rc};
@@ -156,20 +156,13 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
         let app = Rc::clone(app);
         let start = start.clone();
         move || {
-            let body = form.request();
-            let app = Rc::clone(&app);
-            let form = Rc::clone(&form);
-            let start = start.clone();
             start.set_enabled(false);
-            app.clone().spawn(async move {
-                match api::post("/api/sessions", &body).await {
-                    Ok(status) => app.open_session(&status),
-                    Err(error) => {
-                        form.show_message(Some(Message::error(error)));
-                        start.set_enabled(true);
-                    }
-                }
-            });
+            start_session(
+                Rc::clone(&app),
+                Rc::clone(&form),
+                start.clone(),
+                form.request(),
+            );
         }
     });
 
@@ -181,6 +174,48 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
     dom::add_class(&page, "setup");
     page.append(&card);
     Ok(page)
+}
+
+/// Ask the server for a session with `body`. A folder that does not exist is
+/// created once the user agrees.
+fn start_session(app: Rc<App>, form: Rc<Form>, start: Button, body: Value) {
+    app.clone().spawn(async move {
+        match api::post_detailed("/api/sessions", &body).await {
+            Ok(status) => app.open_session(&status),
+            Err((_, details)) if details["missing_workspace"].is_string() => {
+                start.set_enabled(true);
+                confirm_new_folder(app, form, start, body);
+            }
+            Err((error, _)) => {
+                form.show_message(Some(Message::error(error)));
+                start.set_enabled(true);
+            }
+        }
+    });
+}
+
+fn confirm_new_folder(app: Rc<App>, form: Rc<Form>, start: Button, mut body: Value) {
+    let Ok(dialog) = app.ui.dialog("フォルダを作成しますか？") else {
+        return;
+    };
+    dialog.set_message(&format!(
+        "「{}」はありません。作成して、このフォルダで始めますか？",
+        form.workspace.text().trim()
+    ));
+    dialog.set_buttons(DialogButtons::new().primary("作成").cancel("キャンセル"));
+    dialog.on_response(move |response| {
+        if response == DialogResponse::Primary {
+            body["create_workspace"] = json!(true);
+            start.set_enabled(false);
+            start_session(
+                Rc::clone(&app),
+                Rc::clone(&form),
+                start.clone(),
+                body.clone(),
+            );
+        }
+    });
+    dialog.open();
 }
 
 fn caption(app: &App, text: &str) -> naui::Result<Label> {

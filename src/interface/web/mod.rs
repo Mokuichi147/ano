@@ -39,7 +39,7 @@ use events::Outgoing;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
-use session::{NewSession, TurnRefused, WebSession, Workbench};
+use session::{MissingWorkspace, NewSession, TurnRefused, WebSession, Workbench};
 use std::{
     collections::BTreeMap,
     convert::Infallible,
@@ -462,7 +462,19 @@ async fn create_session(
                 .insert(session.id().to_string(), session);
             (StatusCode::CREATED, Json(status)).into_response()
         }
-        Err(error) => error_response(StatusCode::BAD_REQUEST, &format!("{error:#}")),
+        // The page asks whether to create the folder, and asks again with
+        // `create_workspace`.
+        Err(error) => match error.downcast_ref::<MissingWorkspace>() {
+            Some(missing) => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": format!("{error:#}"),
+                    "missing_workspace": missing.0,
+                })),
+            )
+                .into_response(),
+            None => error_response(StatusCode::BAD_REQUEST, &format!("{error:#}")),
+        },
     }
 }
 

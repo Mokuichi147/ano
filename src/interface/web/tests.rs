@@ -275,6 +275,36 @@ async fn a_session_works_in_its_folder_and_asks_the_page_for_approval() {
         .unwrap()
         .contains("workspace does not exist"));
 
+    // A missing folder is created only once the page confirms it.
+    let new_folder = folder.path().join("new");
+    let missing = server
+        .post("/api/sessions", json!({"workspace": new_folder}))
+        .await;
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    let missing: Value = missing.json().await.unwrap();
+    assert_eq!(
+        missing["missing_workspace"],
+        json!(std::fs::canonicalize(folder.path()).unwrap().join("new"))
+    );
+    assert!(!new_folder.exists());
+    let confirmed = server
+        .post(
+            "/api/sessions",
+            json!({"workspace": new_folder, "create_workspace": true}),
+        )
+        .await;
+    assert_eq!(confirmed.status(), StatusCode::CREATED);
+    assert!(new_folder.is_dir());
+    let id = confirmed.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    server
+        .request(reqwest::Method::DELETE, &format!("/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+
     let created = server
         .post(
             "/api/sessions",
