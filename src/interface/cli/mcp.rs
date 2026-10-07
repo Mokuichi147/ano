@@ -10,7 +10,7 @@ use crate::{
         policy::UserPolicy,
     },
     infrastructure::{
-        mcp::{list_server_tools, McpPool},
+        mcp::{list_server_tools, redact_urls, McpPool},
         mcp_oauth::OAuthStore,
     },
 };
@@ -126,7 +126,7 @@ pub(super) async fn run(
                     Err(error) => {
                         failed += 1;
                         println!("{}", server_heading(server));
-                        println!("  error: {error:#}");
+                        println!("  error: {}", redact_urls(&format!("{error:#}")));
                     }
                 }
             }

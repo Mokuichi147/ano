@@ -36,18 +36,25 @@ type McpClient = RunningService<RoleClient, ClientConfig>;
 /// Longest connection error kept for progress output and events.
 const MAX_FAILURE_CHARS: usize = 300;
 
+/// `text` with every URL's credentials, query and fragment removed, since a
+/// configured URL may carry an API key there (`?apiKey=${VAR}`). Text
+/// without such URLs is returned unchanged.
+pub(crate) fn redact_urls(text: &str) -> std::borrow::Cow<'_, str> {
+    static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^\s/@]*@)?(?P<rest>[^\s?#)]*)(?:[?#][^\s)]*)?").unwrap()
+    });
+    URL.replace_all(text, "$scheme$rest")
+}
+
 /// A connection error made safe to show: URLs lose their credentials and
 /// query (where API keys are often passed), and long text is cut, since the
 /// error may carry text the server sent.
 fn redact_error(error: &str) -> String {
-    static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^\s/@]*@)?(?P<rest>[^\s?#)]*)(?:[?#][^\s)]*)?").unwrap()
-    });
     // Credentials a library may print in other forms, such as headers.
     static SECRET: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"(?i)\b((?:[a-z0-9]+[_-])*(?:bearer|basic|authorization|token|api[_-]?key|secret|password))(\s*[:=]\s*|\s+)(?:(?:bearer|basic)\s+)?[^\s,;)\]}]+").unwrap()
     });
-    let redacted = URL.replace_all(error, "$scheme$rest");
+    let redacted = redact_urls(error);
     let redacted = SECRET.replace_all(&redacted, "$1$2[redacted]");
     let mut text: String = redacted.chars().take(MAX_FAILURE_CHARS).collect();
     if redacted.chars().count() > MAX_FAILURE_CHARS {
@@ -654,6 +661,20 @@ mod tests {
             .any(|message| message["method"] == "notifications/initialized"));
         pool.shutdown().await;
         server.abort();
+    }
+
+    #[test]
+    fn urls_lose_credentials_query_and_fragment() {
+        assert_eq!(
+            super::redact_urls("https://user:pw@mcp.example/mcp?apiKey=tvly-secret#frag"),
+            "https://mcp.example/mcp"
+        );
+        assert_eq!(
+            super::redact_urls("streamable_http: http://localhost:8080/mcp?token=t (OAuth)"),
+            "streamable_http: http://localhost:8080/mcp (OAuth)"
+        );
+        let plain = "streamable_http: https://mcp.example/mcp/ (OAuth)";
+        assert_eq!(super::redact_urls(plain), plain);
     }
 
     #[test]

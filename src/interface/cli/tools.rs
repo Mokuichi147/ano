@@ -4,9 +4,16 @@ use super::ToolsArgs;
 use crate::{
     application::registry::ToolRegistry,
     config::AppConfig,
-    domain::{mcp::McpTransport, plan::TASK_PLAN_NAME, tool::DELEGATE_TASK_NAME},
-    infrastructure::tools::names::{
-        GIT_COMMIT_PUSH_NAME, REVIEW_CHANGES_NAME, WORKSPACE_CHECK_NAME, WORKSPACE_EXEC_NAME,
+    domain::{
+        mcp::{McpServerConfig, McpTransport},
+        plan::TASK_PLAN_NAME,
+        tool::DELEGATE_TASK_NAME,
+    },
+    infrastructure::{
+        mcp::redact_urls,
+        tools::names::{
+            GIT_COMMIT_PUSH_NAME, REVIEW_CHANGES_NAME, WORKSPACE_CHECK_NAME, WORKSPACE_EXEC_NAME,
+        },
     },
 };
 use anyhow::Result;
@@ -101,24 +108,12 @@ pub(super) fn list_tools(
                     .collect::<Vec<_>>()
             })
         };
-        let target = match server.transport {
-            McpTransport::Responses => server
-                .url
-                .as_deref()
-                .or(server.tunnel_id.as_deref())
-                .unwrap_or("(invalid remote MCP configuration)")
-                .to_string(),
-            McpTransport::Stdio => format!(
-                "stdio: {}",
-                server.command.as_deref().unwrap_or("(missing command)")
-            ),
-            McpTransport::StreamableHttp => format!(
-                "streamable_http: {}{}",
-                server.url.as_deref().unwrap_or("(missing URL)"),
-                if server.oauth { " (OAuth)" } else { "" }
-            ),
-        };
-        println!("  {} ({:?}) -> {}", server.label, server.transport, target);
+        println!(
+            "  {} ({:?}) -> {}",
+            server.label,
+            server.transport,
+            mcp_target(server)
+        );
         if let Some(names) = filtered {
             if names.is_empty() {
                 println!("    discoverable_tools: none (check catalog and policy)");
@@ -136,4 +131,74 @@ pub(super) fn list_tools(
         }
     }
     Ok(())
+}
+
+/// Where an MCP server is reached, for display.
+fn mcp_target(server: &McpServerConfig) -> String {
+    // The url may carry an API key expanded from the environment.
+    let url = server.url.as_deref().map(redact_urls);
+    match server.transport {
+        McpTransport::Responses => url
+            .as_deref()
+            .or(server.tunnel_id.as_deref())
+            .unwrap_or("(invalid remote MCP configuration)")
+            .to_string(),
+        McpTransport::Stdio => format!(
+            "stdio: {}",
+            server.command.as_deref().unwrap_or("(missing command)")
+        ),
+        McpTransport::StreamableHttp => format!(
+            "streamable_http: {}{}",
+            url.as_deref().unwrap_or("(missing URL)"),
+            if server.oauth { " (OAuth)" } else { "" }
+        ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mcp_target;
+    use crate::domain::mcp::McpServerConfig;
+
+    fn server(toml: &str) -> McpServerConfig {
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn mcp_targets_hide_api_keys_in_urls() {
+        let remote = server(
+            r#"
+            label = "tavily"
+            url = "https://user:pw@mcp.example/mcp?apiKey=tvly-secret"
+            "#,
+        );
+        assert_eq!(mcp_target(&remote), "https://mcp.example/mcp");
+        let direct = server(
+            r#"
+            label = "tavily"
+            transport = "streamable_http"
+            url = "https://mcp.example/mcp?apiKey=tvly-secret#frag"
+            oauth = true
+            "#,
+        );
+        assert_eq!(
+            mcp_target(&direct),
+            "streamable_http: https://mcp.example/mcp (OAuth)"
+        );
+    }
+
+    #[test]
+    fn mcp_targets_keep_urls_without_query() {
+        let direct = server(
+            r#"
+            label = "local"
+            transport = "streamable_http"
+            url = "http://127.0.0.1:8080/mcp/"
+            "#,
+        );
+        assert_eq!(
+            mcp_target(&direct),
+            "streamable_http: http://127.0.0.1:8080/mcp/"
+        );
+    }
 }
