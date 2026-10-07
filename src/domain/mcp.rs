@@ -82,6 +82,11 @@ pub struct McpServerConfig {
     /// not share state between tasks; it then connects once per run.
     #[serde(default = "default_reuse_connection")]
     pub reuse_connection: bool,
+    /// Why this server cannot be used, set when loading the config could not
+    /// resolve one of its settings (such as an unset environment variable in
+    /// `url`). Only this server is left out; the rest of ano keeps working.
+    #[serde(skip)]
+    pub unavailable: Option<String>,
 }
 
 fn default_reuse_connection() -> bool {
@@ -153,6 +158,15 @@ impl McpServerConfig {
             }
         }
         Ok(())
+    }
+
+    /// Fail with the reason the server cannot be used, if loading the config
+    /// recorded one.
+    pub fn ensure_usable(&self) -> Result<()> {
+        match &self.unavailable {
+            Some(reason) => bail!("MCP server '{}' is unavailable: {reason}", self.label),
+            None => Ok(()),
+        }
     }
 
     /// Whether the server's own `allowed_tools` and `disabled_tools` permit

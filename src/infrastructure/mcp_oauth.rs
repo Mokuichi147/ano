@@ -73,6 +73,8 @@ impl OAuthStore {
     /// Credentials are keyed by the URL too, so pointing a label at another
     /// server never sends it the previous server's tokens.
     fn path(&self, server: &McpServerConfig) -> Result<PathBuf> {
+        // Without its real URL the key would not match the saved credentials.
+        server.ensure_usable()?;
         let directory = self
             .directory
             .as_ref()
@@ -145,6 +147,7 @@ impl OAuthStore {
         if !server.oauth {
             bail!("MCP server '{label}' does not use OAuth; set `oauth = true` in its config");
         }
+        server.ensure_usable()?;
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("failed to listen for the OAuth callback")?;
@@ -344,6 +347,7 @@ mod tests {
             tool_catalog: None,
             require_approval: McpApprovalMode::Always,
             reuse_connection: true,
+            unavailable: None,
         }
     }
 

@@ -952,6 +952,7 @@ async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
         }]),
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
+        unavailable: None,
     };
     let server_mock = mock_responses(vec![
         search_response("r1", "close issue"),
@@ -995,6 +996,98 @@ async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
 }
 
 #[tokio::test]
+async fn responses_mcp_servers_with_unresolved_settings_are_left_out() {
+    let server = |label: &str| McpServerConfig {
+        label: label.into(),
+        transport: McpTransport::Responses,
+        url: Some("https://example.test/mcp".into()),
+        tunnel_id: None,
+        command: None,
+        args: vec![],
+        cwd: None,
+        env_vars: Default::default(),
+        description: None,
+        authorization_env: None,
+        oauth: false,
+        oauth_scopes: None,
+        allowed_tools: None,
+        disabled_tools: vec![],
+        tool_catalog: Some(vec![McpToolCatalog {
+            name: "close_issue".into(),
+            description: Some("Close an issue".into()),
+        }]),
+        require_approval: McpApprovalMode::Always,
+        reuse_connection: true,
+        unavailable: None,
+    };
+    let mut unresolved_url = server("github");
+    unresolved_url.url = Some("https://example.test/mcp?key=${ANO_TEST_UNSET_KEY}".into());
+    unresolved_url.unavailable =
+        Some("invalid url: environment variable 'ANO_TEST_UNSET_KEY' is not set".into());
+    let mut missing_token = server("tracker");
+    missing_token.authorization_env = Some("ANO_TEST_UNSET_MCP_TOKEN".into());
+    std::env::remove_var("ANO_TEST_UNSET_MCP_TOKEN");
+    let mut usable = server("docs");
+    usable.tool_catalog = Some(vec![McpToolCatalog {
+        name: "close_ticket".into(),
+        description: Some("Close an issue ticket".into()),
+    }]);
+    let server_mock = mock_responses(vec![
+        search_response("r1", "close issue"),
+        text_response("r2", "Done."),
+    ])
+    .await;
+    let agent = Agent::new(
+        OpenAiClient::new("test", &server_mock.url),
+        AgentSettings::default(),
+        Arc::new(McpPool::new(vec![unresolved_url, missing_token, usable])),
+        ToolRegistry::new(),
+        UserPolicy::default(),
+        Arc::new(AlwaysApprove),
+    );
+    let result = agent
+        .run(RunRequest::new(vec![InputPart::Text(
+            "Close issue 7".into(),
+        )]))
+        .await
+        .unwrap();
+
+    assert_eq!(result.text, "Done.");
+    let unavailable: Vec<(&str, &str)> = result
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::McpServerUnavailable {
+                server_label,
+                error,
+            } => Some((server_label.as_str(), error.as_str())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(unavailable.len(), 2, "{unavailable:?}");
+    assert_eq!(unavailable[0].0, "github");
+    assert!(
+        unavailable[0].1.contains("ANO_TEST_UNSET_KEY"),
+        "{unavailable:?}"
+    );
+    assert_eq!(unavailable[1].0, "tracker");
+    assert!(
+        unavailable[1].1.contains("ANO_TEST_UNSET_MCP_TOKEN"),
+        "{unavailable:?}"
+    );
+    let requests = server_mock.requests.lock().unwrap();
+    let instructions = requests[0]["instructions"].as_str().unwrap();
+    assert!(!instructions.contains("close_issue"), "{instructions}");
+    assert!(instructions.contains("close_ticket"), "{instructions}");
+    assert!(instructions.contains("github, tracker"), "{instructions}");
+    let tools = requests[1]["tools"].as_array().unwrap();
+    let mcp: Vec<&Value> = tools.iter().filter(|tool| tool["type"] == "mcp").collect();
+    assert_eq!(mcp.len(), 1, "{tools:?}");
+    assert_eq!(mcp[0]["server_label"], "docs");
+    assert_eq!(mcp[0]["allowed_tools"], json!(["close_ticket"]));
+}
+
+#[tokio::test]
 async fn responses_mcp_approval_requires_policy_and_selection() {
     let server = McpServerConfig {
         label: "github".into(),
@@ -1017,6 +1110,7 @@ async fn responses_mcp_approval_requires_policy_and_selection() {
         }]),
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
+        unavailable: None,
     };
     let agent = agent(ToolRegistry::new(), vec![server.clone()]);
     let request = |tool: &str| McpApprovalRequest {
@@ -1102,6 +1196,7 @@ fn remote_server(label: &str) -> McpServerConfig {
         tool_catalog: None,
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
+        unavailable: None,
     }
 }
 

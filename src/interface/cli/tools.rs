@@ -119,6 +119,9 @@ pub(super) fn list_tools(
             ),
         };
         println!("  {} ({:?}) -> {}", server.label, server.transport, target);
+        if let Some(reason) = &server.unavailable {
+            println!("    unavailable: {reason}");
+        }
         if let Some(names) = filtered {
             if names.is_empty() {
                 println!("    discoverable_tools: none (check catalog and policy)");

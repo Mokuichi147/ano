@@ -371,7 +371,7 @@ fn missing_or_empty_variable_is_an_error() {
 }
 
 #[test]
-fn an_absent_variable_makes_the_config_url_an_error() {
+fn an_absent_variable_leaves_only_that_server_unusable() {
     let name = "ANO_ENV_EXPAND_MISSING_VAR";
     let saved = std::env::var(name).ok();
     std::env::remove_var(name);
@@ -379,13 +379,15 @@ fn an_absent_variable_makes_the_config_url_an_error() {
     let path = directory.path().join("config.toml");
     std::fs::write(
         &path,
-        format!("[[mcp_servers]]\nlabel = 'annict'\ntransport = 'streamable_http'\nurl = \"${{{name}}}/mcp\"\n"),
+        format!("[[mcp_servers]]\nlabel = 'annict'\ntransport = 'streamable_http'\nurl = \"${{{name}}}/mcp\"\n\n[[mcp_servers]]\nlabel = 'files'\ntransport = 'streamable_http'\nurl = 'https://files.test/mcp'\n"),
     )
     .unwrap();
-    let error = AppConfig::load(&path).unwrap_err();
-    let details = format!("{error:#}");
+    let config = AppConfig::load(&path).unwrap();
+    let annict = &config.mcp_servers[0];
+    let details = format!("{:#}", annict.ensure_usable().unwrap_err());
     assert!(details.contains("annict"), "{details}");
     assert!(details.contains(name), "{details}");
+    assert!(config.mcp_servers[1].ensure_usable().is_ok());
     if let Some(value) = saved {
         std::env::set_var(name, value);
     }
