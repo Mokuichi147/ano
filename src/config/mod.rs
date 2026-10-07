@@ -108,11 +108,14 @@ impl AppConfig {
         let directory = absolute_path
             .parent()
             .context("config file has no parent directory")?;
+        // An unset variable leaves only that server unusable, so that one
+        // missing key does not stop every command.
         for server in &mut config.mcp_servers {
-            let label = &server.label;
             if let Some(url) = &mut server.url {
-                *url = expand_environment_variables(url.as_str(), |name| std::env::var(name).ok())
-                    .with_context(|| format!("invalid url of MCP server '{}'", label))?;
+                match expand_environment_variables(url.as_str(), |name| std::env::var(name).ok()) {
+                    Ok(expanded) => *url = expanded,
+                    Err(error) => server.unavailable = Some(format!("invalid url: {error:#}")),
+                }
             }
         }
         config.resolve_paths(directory, std::env::home_dir().as_deref())?;

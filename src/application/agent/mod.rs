@@ -663,7 +663,14 @@ impl Agent {
             .as_ref()
             .is_some_and(|session| session.replays_history());
         let (servers, unavailable) = self.mcp.connect_available(&self.policy).await?;
-        let mcp_runtime = McpRuntime::new(servers, self.policy.clone());
+        let mcp_runtime = McpRuntime::new(
+            servers,
+            self.policy.clone(),
+            unavailable
+                .iter()
+                .map(|failure| failure.label.clone())
+                .collect(),
+        );
         if let Some(catalog) = self.tool_catalog(&mcp_runtime, &request.context) {
             base_instructions.push_str("\n\n");
             base_instructions.push_str(&catalog);

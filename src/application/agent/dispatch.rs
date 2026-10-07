@@ -734,7 +734,9 @@ impl Agent {
             ..
         } = scope;
         let server = self.mcp.configs().iter().find(|server| {
-            server.transport == McpTransport::Responses && server.label == request.server_label
+            server.transport == McpTransport::Responses
+                && server.label == request.server_label
+                && !scope.mcp_runtime.is_unavailable(&server.label)
         });
         let permitted = server
             .is_some_and(|server| server.is_tool_allowed(&self.policy, &request.tool_name))

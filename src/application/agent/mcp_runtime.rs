@@ -5,18 +5,35 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 /// The MCP connections one run may use, filtered by that run's policy.
 #[derive(Default)]
 pub(crate) struct McpRuntime {
     servers: Vec<Arc<dyn DirectMcpServer>>,
     policy: UserPolicy,
+    /// Labels of the servers this run could not use.
+    unavailable: HashSet<String>,
 }
 
 impl McpRuntime {
-    pub fn new(servers: Vec<Arc<dyn DirectMcpServer>>, policy: UserPolicy) -> Self {
-        Self { servers, policy }
+    pub fn new(
+        servers: Vec<Arc<dyn DirectMcpServer>>,
+        policy: UserPolicy,
+        unavailable: HashSet<String>,
+    ) -> Self {
+        Self {
+            servers,
+            policy,
+            unavailable,
+        }
+    }
+
+    /// Whether the server `label` was found unusable at the start of the run.
+    /// Responses-managed servers are not connected by ano, so this is how a
+    /// run leaves out the ones whose settings could not be resolved.
+    pub fn is_unavailable(&self, label: &str) -> bool {
+        self.unavailable.contains(label)
     }
 
     /// Tools on the borrowed servers that the run's policy allows.

@@ -78,6 +78,17 @@ impl ActiveTools {
 }
 
 impl Agent {
+    /// The Responses-managed MCP servers this run can offer to the model.
+    fn responses_servers<'a>(
+        &'a self,
+        mcp_runtime: &'a McpRuntime,
+    ) -> impl Iterator<Item = &'a McpServerConfig> + 'a {
+        self.mcp.configs().iter().filter(|server| {
+            server.transport == McpTransport::Responses
+                && !mcp_runtime.is_unavailable(&server.label)
+        })
+    }
+
     /// The tools of the next request. `depth` is the nesting of the run;
     /// only the top-level run may delegate to a sub-agent.
     pub(super) fn response_tools(
@@ -127,10 +138,7 @@ impl Agent {
                 .map(|definition| definition.as_response_tool()),
         );
 
-        for server in self.mcp.configs() {
-            if server.transport != McpTransport::Responses {
-                continue;
-            }
+        for server in self.responses_servers(mcp_runtime) {
             let Some(selected_tools) = active.responses_mcp.get(&server.label) else {
                 continue;
             };
@@ -186,10 +194,7 @@ impl Agent {
         // Label, description, and tool names of each MCP server, in the
         // order they are configured.
         let mut servers: Vec<(String, Option<String>, Vec<String>)> = Vec::new();
-        for server in self.mcp.configs() {
-            if server.transport != McpTransport::Responses {
-                continue;
-            }
+        for server in self.responses_servers(mcp_runtime) {
             let names = server
                 .discoverable_tools(&self.policy)
                 .into_iter()
@@ -326,10 +331,7 @@ impl Agent {
             }
         }
 
-        for server in self.mcp.configs() {
-            if server.transport != McpTransport::Responses {
-                continue;
-            }
+        for server in self.responses_servers(mcp_runtime) {
             for catalog in server.discoverable_tools(&self.policy) {
                 let description = catalog.description.unwrap_or_else(|| {
                     format!("MCP tool '{}' on server '{}'.", catalog.name, server.label)
