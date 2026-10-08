@@ -114,6 +114,9 @@ pub(super) fn list_tools(
             server.transport,
             mcp_target(server)
         );
+        if let Some(reason) = &server.unavailable {
+            println!("    unavailable: {reason}");
+        }
         if let Some(names) = filtered {
             if names.is_empty() {
                 println!("    discoverable_tools: none (check catalog and policy)");

@@ -336,7 +336,9 @@ pub trait McpGateway: Send + Sync {
     async fn connect(&self, policy: &UserPolicy) -> Result<Vec<Arc<dyn DirectMcpServer>>>;
     /// Like [`Self::connect`], but a server that cannot be connected is left
     /// out and reported, so one unreachable or misconfigured server does not
-    /// stop runs that may not need it. Runs use this. The default calls
+    /// stop runs that may not need it. Responses-managed servers whose
+    /// settings cannot be resolved are reported too, and runs leave them
+    /// out of the tools offered to the model. Runs use this. The default calls
     /// `connect`, so it still fails as a whole; implement it to report
     /// failures per server, as `McpPool` does.
     async fn connect_available(

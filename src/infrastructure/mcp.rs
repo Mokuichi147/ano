@@ -167,7 +167,8 @@ impl McpPool {
     }
 
     /// Like `connect_for`, but servers that fail to connect are reported by
-    /// label instead of failing the rest.
+    /// label instead of failing the rest. Responses-managed servers whose
+    /// settings cannot be resolved are reported the same way.
     async fn connect_available_for(
         &self,
         policy: &UserPolicy,
@@ -199,6 +200,17 @@ impl McpPool {
                     label: self.configs[index].label.clone(),
                     error: redact_error(&format!("{error:#}")),
                 }),
+            }
+        }
+        for config in self.configs.iter().filter(|config| {
+            config.transport == McpTransport::Responses
+                && !policy.is_mcp_server_disabled(&config.label)
+        }) {
+            if let Err(error) = check_responses_server(config) {
+                failures.push(McpServerFailure {
+                    label: config.label.clone(),
+                    error: redact_error(&format!("{error:#}")),
+                });
             }
         }
         Ok((servers, failures))
@@ -327,9 +339,25 @@ impl ConnectedMcpServer {
     }
 }
 
+/// Check the settings ano fills in for a Responses-managed server, which the
+/// provider connects to: a missing value would otherwise fail the request.
+fn check_responses_server(config: &McpServerConfig) -> Result<()> {
+    config.ensure_usable()?;
+    if let Some(authorization_env) = &config.authorization_env {
+        std::env::var(authorization_env).with_context(|| {
+            format!(
+                "MCP server '{}' requires environment variable '{}'",
+                config.label, authorization_env
+            )
+        })?;
+    }
+    Ok(())
+}
+
 /// Start and initialize an MCP session with a directly connected server.
 async fn open_service(config: &McpServerConfig, oauth: &OAuthStore) -> Result<McpClient> {
     config.validate()?;
+    config.ensure_usable()?;
     let service = match config.transport {
         McpTransport::Responses => {
             anyhow::bail!(
@@ -566,6 +594,7 @@ mod tests {
             tool_catalog: None,
             require_approval: McpApprovalMode::Always,
             reuse_connection: true,
+            unavailable: None,
         }
     }
 
@@ -614,6 +643,43 @@ mod tests {
 
         pool.shutdown().await;
         assert!(pool.connect_available_for(&policy).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn servers_with_unresolved_settings_are_reported_without_connecting() {
+        let mut direct = stdio_server("files");
+        direct.unavailable = Some("invalid url: environment variable 'X' is not set".into());
+        let mut responses = stdio_server("github");
+        responses.transport = McpTransport::Responses;
+        responses.command = None;
+        responses.url = Some("https://example.test/mcp".into());
+        responses.authorization_env = Some("ANO_TEST_UNSET_RESPONSES_TOKEN".into());
+        std::env::remove_var("ANO_TEST_UNSET_RESPONSES_TOKEN");
+        let mut usable = responses.clone();
+        usable.label = "docs".into();
+        usable.authorization_env = None;
+        let pool = McpPool::new(vec![direct, responses, usable]);
+
+        let (servers, failures) = pool
+            .connect_available_for(&UserPolicy::default())
+            .await
+            .unwrap();
+        assert!(servers.is_empty());
+        let labels: Vec<&str> = failures
+            .iter()
+            .map(|failure| failure.label.as_str())
+            .collect();
+        assert_eq!(labels, ["files", "github"]);
+        assert!(
+            failures[0].error.contains("is unavailable"),
+            "{}",
+            failures[0].error
+        );
+        assert!(
+            failures[1].error.contains("ANO_TEST_UNSET_RESPONSES_TOKEN"),
+            "{}",
+            failures[1].error
+        );
     }
 
     #[tokio::test]
