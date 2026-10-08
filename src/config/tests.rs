@@ -470,6 +470,22 @@ fn resolves_environment_paths_relative_to_config_file() {
 }
 
 #[test]
+fn server_urls_must_be_absolute_http_urls() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "[[mcp_servers]]\nlabel = 'schemeless'\ntransport = 'streamable_http'\nurl = 'mcp.example/mcp?apiKey=secret'\n[[mcp_servers]]\nlabel = 'ok'\ntransport = 'streamable_http'\nurl = 'https://mcp.example/mcp'\n",
+    )
+    .unwrap();
+    let config = AppConfig::load(&path).unwrap();
+    let reason = config.mcp_servers[0].unavailable.as_deref().unwrap();
+    assert_eq!(reason, "url must start with http:// or https://");
+    assert!(!reason.contains("secret"));
+    assert_eq!(config.mcp_servers[1].unavailable, None);
+}
+
+#[test]
 fn expands_home_in_workspace_cwd_and_command() {
     let directory = tempfile::tempdir().unwrap();
     let mut config = AppConfig::parse("[environments.home]\nworkspace = '~'\n[environments.project]\nworkspace = '~/repo'\n[environments.literal]\nworkspace = '~user/repo'\n[[mcp_servers]]\nlabel = 'local'\ntransport = 'stdio'\ncommand = '~/bin/server'\ncwd = '~/servers'\n[[mcp_servers]]\nlabel = 'path'\ntransport = 'stdio'\ncommand = 'node'\n").unwrap();

@@ -10,7 +10,7 @@ use crate::{
         tool::DELEGATE_TASK_NAME,
     },
     infrastructure::{
-        mcp::redact_urls,
+        mcp::redact_url,
         tools::names::{
             GIT_COMMIT_PUSH_NAME, REVIEW_CHANGES_NAME, WORKSPACE_CHECK_NAME, WORKSPACE_EXEC_NAME,
         },
@@ -139,7 +139,7 @@ pub(super) fn list_tools(
 /// Where an MCP server is reached, for display.
 fn mcp_target(server: &McpServerConfig) -> String {
     // The url may carry an API key expanded from the environment.
-    let url = server.url.as_deref().map(redact_urls);
+    let url = server.url.as_deref().map(redact_url);
     match server.transport {
         McpTransport::Responses => url
             .as_deref()
@@ -187,6 +187,21 @@ mod tests {
         assert_eq!(
             mcp_target(&direct),
             "streamable_http: https://mcp.example/mcp (OAuth)"
+        );
+    }
+
+    #[test]
+    fn mcp_targets_hide_queries_with_parentheses() {
+        let direct = server(
+            r#"
+            label = "tavily"
+            transport = "streamable_http"
+            url = "https://mcp.example/mcp?filter=(x)&apiKey=tvly-secret"
+            "#,
+        );
+        assert_eq!(
+            mcp_target(&direct),
+            "streamable_http: https://mcp.example/mcp"
         );
     }
 

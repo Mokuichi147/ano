@@ -46,6 +46,24 @@ pub(crate) fn redact_urls(text: &str) -> std::borrow::Cow<'_, str> {
     URL.replace_all(text, "$scheme$rest")
 }
 
+/// `url` without its userinfo, query and fragment, for showing a configured
+/// URL. Unlike [`redact_urls`] it reads the URL's structure, so a `(` or `)`
+/// in the path or query cannot end the URL early.
+pub(crate) fn redact_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (format!("{scheme}://"), rest),
+        None => (String::new(), url),
+    };
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
+    let (authority, path) = rest
+        .find('/')
+        .map_or((rest, ""), |index| rest.split_at(index));
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    format!("{scheme}{host}{path}")
+}
+
 /// A connection error made safe to show: URLs lose their credentials and
 /// query (where API keys are often passed), and long text is cut, since the
 /// error may carry text the server sent.
@@ -727,6 +745,27 @@ mod tests {
             .any(|message| message["method"] == "notifications/initialized"));
         pool.shutdown().await;
         server.abort();
+    }
+
+    #[test]
+    fn configured_urls_lose_credentials_query_and_fragment() {
+        assert_eq!(
+            super::redact_url("https://user:pw@mcp.example/mcp?apiKey=tvly-secret#frag"),
+            "https://mcp.example/mcp"
+        );
+        // Parentheses in the query must not let the key through.
+        assert_eq!(
+            super::redact_url("https://mcp.example/mcp(foo)?filter=(x)&apiKey=secret"),
+            "https://mcp.example/mcp(foo)"
+        );
+        assert_eq!(
+            super::redact_url("https://mcp.example?apiKey=secret"),
+            "https://mcp.example"
+        );
+        assert_eq!(
+            super::redact_url("http://127.0.0.1:8080/mcp/"),
+            "http://127.0.0.1:8080/mcp/"
+        );
     }
 
     #[test]
