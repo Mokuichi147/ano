@@ -439,9 +439,10 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
     Ok(Some(home.join(components.as_path())))
 }
 
-/// Whether `url` is absolute and uses HTTP or HTTPS, as the MCP transports need.
+/// Whether `url` parses as an absolute HTTP or HTTPS URL with a host.
 fn is_http_url(url: &str) -> bool {
-    url.starts_with("http://") || url.starts_with("https://")
+    reqwest::Url::parse(url)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
 }
 
 /// Replace environment-variable references in `text` with each variable's

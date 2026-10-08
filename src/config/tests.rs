@@ -475,14 +475,15 @@ fn server_urls_must_be_absolute_http_urls() {
     let path = directory.path().join("config.toml");
     std::fs::write(
         &path,
-        "[[mcp_servers]]\nlabel = 'schemeless'\ntransport = 'streamable_http'\nurl = 'mcp.example/mcp?apiKey=secret'\n[[mcp_servers]]\nlabel = 'ok'\ntransport = 'streamable_http'\nurl = 'https://mcp.example/mcp'\n",
+        "[[mcp_servers]]\nlabel = 'schemeless'\ntransport = 'streamable_http'\nurl = 'mcp.example/mcp?apiKey=secret'\n[[mcp_servers]]\nlabel = 'misplaced-userinfo'\ntransport = 'streamable_http'\nurl = 'https://user:secret/part@host/mcp'\n[[mcp_servers]]\nlabel = 'ok'\ntransport = 'streamable_http'\nurl = 'https://mcp.example/mcp'\n",
     )
     .unwrap();
     let config = AppConfig::load(&path).unwrap();
     let reason = config.mcp_servers[0].unavailable.as_deref().unwrap();
     assert_eq!(reason, "url must start with http:// or https://");
     assert!(!reason.contains("secret"));
-    assert_eq!(config.mcp_servers[1].unavailable, None);
+    assert!(config.mcp_servers[1].unavailable.is_some());
+    assert_eq!(config.mcp_servers[2].unavailable, None);
 }
 
 #[test]

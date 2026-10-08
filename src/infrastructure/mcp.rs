@@ -41,27 +41,30 @@ const MAX_FAILURE_CHARS: usize = 300;
 /// without such URLs is returned unchanged.
 pub(crate) fn redact_urls(text: &str) -> std::borrow::Cow<'_, str> {
     static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^\s/@]*@)?(?P<rest>[^\s?#)]*)(?:[?#][^\s)]*)?").unwrap()
+        // A parenthesized group such as `(x)` belongs to the URL, so only an
+        // unpaired `)` ends it.
+        regex::Regex::new(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^\s/@]*@)?(?P<rest>(?:[^\s?#()]|\([^\s?#()]*\))*)(?:[?#](?:[^\s()]|\([^\s()]*\))*)?").unwrap()
     });
     URL.replace_all(text, "$scheme$rest")
 }
 
 /// `url` without its userinfo, query and fragment, for showing a configured
-/// URL. Unlike [`redact_urls`] it reads the URL's structure, so a `(` or `)`
-/// in the path or query cannot end the URL early.
+/// URL. It is parsed as a URL, so a `(` or `)` in the path or query cannot
+/// end it early. A value that does not parse is shown as a placeholder, since
+/// it may still carry a key.
 pub(crate) fn redact_url(url: &str) -> String {
-    let (scheme, rest) = match url.split_once("://") {
-        Some((scheme, rest)) => (format!("{scheme}://"), rest),
-        None => (String::new(), url),
-    };
-    let rest = rest.split(['?', '#']).next().unwrap_or_default();
-    let (authority, path) = rest
-        .find('/')
-        .map_or((rest, ""), |index| rest.split_at(index));
-    let host = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    format!("{scheme}{host}{path}")
+    match reqwest::Url::parse(url) {
+        Ok(mut url) => {
+            // Fails only for URLs that cannot carry credentials, such as
+            // `mailto:`, which have none to clear.
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            url.to_string()
+        }
+        Err(_) => "(invalid URL)".to_string(),
+    }
 }
 
 /// A connection error made safe to show: URLs lose their credentials and
@@ -760,7 +763,11 @@ mod tests {
         );
         assert_eq!(
             super::redact_url("https://mcp.example?apiKey=secret"),
-            "https://mcp.example"
+            "https://mcp.example/"
+        );
+        assert_eq!(
+            super::redact_url("https://user:secret/part@host/mcp?apiKey=query"),
+            "(invalid URL)"
         );
         assert_eq!(
             super::redact_url("http://127.0.0.1:8080/mcp/"),
@@ -780,6 +787,17 @@ mod tests {
         );
         let plain = "streamable_http: https://mcp.example/mcp/ (OAuth)";
         assert_eq!(super::redact_urls(plain), plain);
+        // Parentheses inside the URL must not let the key through.
+        assert_eq!(
+            super::redact_urls("https://mcp.example/mcp(foo)?apiKey=secret"),
+            "https://mcp.example/mcp(foo)"
+        );
+        assert_eq!(
+            super::redact_urls(
+                "error sending request for url (https://mcp.example/mcp?filter=(x)&apiKey=secret): refused"
+            ),
+            "error sending request for url (https://mcp.example/mcp): refused"
+        );
     }
 
     #[test]
