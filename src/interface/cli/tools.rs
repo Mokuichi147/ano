@@ -206,6 +206,18 @@ mod tests {
     }
 
     #[test]
+    fn mcp_targets_hide_urls_that_are_not_http() {
+        let opaque = server(
+            r#"
+            label = "bad"
+            transport = "streamable_http"
+            url = "mailto:user:secret@example.com?apiKey=query"
+            "#,
+        );
+        assert_eq!(mcp_target(&opaque), "streamable_http: (invalid URL)");
+    }
+
+    #[test]
     fn mcp_targets_keep_urls_without_query() {
         let direct = server(
             r#"

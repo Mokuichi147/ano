@@ -37,34 +37,31 @@ type McpClient = RunningService<RoleClient, ClientConfig>;
 const MAX_FAILURE_CHARS: usize = 300;
 
 /// `text` with every URL's credentials, query and fragment removed, since a
-/// configured URL may carry an API key there (`?apiKey=${VAR}`). Text
-/// without such URLs is returned unchanged.
+/// configured URL may carry an API key there (`?apiKey=${VAR}`). A URL runs to
+/// the next whitespace, and each one is shown as [`redact_url`] shows it.
+/// Text without URLs is returned unchanged.
 pub(crate) fn redact_urls(text: &str) -> std::borrow::Cow<'_, str> {
-    static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        // A parenthesized group such as `(x)` belongs to the URL, so only an
-        // unpaired `)` ends it.
-        regex::Regex::new(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^\s/@]*@)?(?P<rest>(?:[^\s?#()]|\([^\s?#()]*\))*)(?:[?#](?:[^\s()]|\([^\s()]*\))*)?").unwrap()
-    });
-    URL.replace_all(text, "$scheme$rest")
+    static URL: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S*").unwrap());
+    URL.replace_all(text, |captures: &regex::Captures| redact_url(&captures[0]))
 }
 
-/// `url` without its userinfo, query and fragment, for showing a configured
-/// URL. It is parsed as a URL, so a `(` or `)` in the path or query cannot
-/// end it early. A value that does not parse is shown as a placeholder, since
-/// it may still carry a key.
+/// `url` without its userinfo, query and fragment, for showing a URL. Only an
+/// absolute HTTP or HTTPS URL with a host is shown: anything else, and any
+/// value that does not parse, becomes a placeholder, since it may still carry
+/// a key.
 pub(crate) fn redact_url(url: &str) -> String {
-    match reqwest::Url::parse(url) {
-        Ok(mut url) => {
-            // Fails only for URLs that cannot carry credentials, such as
-            // `mailto:`, which have none to clear.
-            let _ = url.set_username("");
-            let _ = url.set_password(None);
-            url.set_query(None);
-            url.set_fragment(None);
-            url.to_string()
-        }
-        Err(_) => "(invalid URL)".to_string(),
+    const INVALID: &str = "(invalid URL)";
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return INVALID.to_string();
+    };
+    let is_http = matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some();
+    if !is_http || parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return INVALID.to_string();
     }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
 }
 
 /// A connection error made safe to show: URLs lose their credentials and
@@ -766,6 +763,10 @@ mod tests {
             "https://mcp.example/"
         );
         assert_eq!(
+            super::redact_url("mailto:user:secret@example.com?apiKey=query"),
+            "(invalid URL)"
+        );
+        assert_eq!(
             super::redact_url("https://user:secret/part@host/mcp?apiKey=query"),
             "(invalid URL)"
         );
@@ -793,10 +794,28 @@ mod tests {
             "https://mcp.example/mcp(foo)"
         );
         assert_eq!(
+            super::redact_urls("https://mcp.example/mcp?filter=((x))&apiKey=secret"),
+            "https://mcp.example/mcp"
+        );
+        assert_eq!(
+            super::redact_urls("https://mcp.example/mcp)?apiKey=secret"),
+            "https://mcp.example/mcp)"
+        );
+        // A URL with misplaced credentials cannot be shown safely.
+        assert_eq!(
+            super::redact_urls("https://user:secret/part@host/mcp?apiKey=query"),
+            "(invalid URL)"
+        );
+        assert_eq!(
+            super::redact_urls("https://public@SECRET@mcp.example/mcp?apiKey=query"),
+            "https://mcp.example/mcp"
+        );
+        // Wrapping parentheses end up in the output, but never a key.
+        assert_eq!(
             super::redact_urls(
                 "error sending request for url (https://mcp.example/mcp?filter=(x)&apiKey=secret): refused"
             ),
-            "error sending request for url (https://mcp.example/mcp): refused"
+            "error sending request for url (https://mcp.example/mcp refused"
         );
     }
 
@@ -806,7 +825,7 @@ mod tests {
         let redacted = super::redact_error(error);
         assert_eq!(
             redacted,
-            "error sending request for url (https://mcp.example.com/mcp/): refused"
+            "error sending request for url (https://mcp.example.com/mcp/ refused"
         );
         assert_eq!(
             super::redact_error(
