@@ -36,18 +36,43 @@ type McpClient = RunningService<RoleClient, ClientConfig>;
 /// Longest connection error kept for progress output and events.
 const MAX_FAILURE_CHARS: usize = 300;
 
+/// `text` with every URL's credentials, query and fragment removed, since a
+/// configured URL may carry an API key there (`?apiKey=${VAR}`). A URL runs to
+/// the next whitespace, and each one is shown as [`redact_url`] shows it.
+/// Text without URLs is returned unchanged.
+pub(crate) fn redact_urls(text: &str) -> std::borrow::Cow<'_, str> {
+    static URL: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"[a-zA-Z][a-zA-Z0-9+.-]*://\S*").unwrap());
+    URL.replace_all(text, |captures: &regex::Captures| redact_url(&captures[0]))
+}
+
+/// `url` without its userinfo, query and fragment, for showing a URL. Only an
+/// absolute HTTP or HTTPS URL with a host is shown: anything else, and any
+/// value that does not parse, becomes a placeholder, since it may still carry
+/// a key.
+pub(crate) fn redact_url(url: &str) -> String {
+    const INVALID: &str = "(invalid URL)";
+    let Ok(mut parsed) = reqwest::Url::parse(url) else {
+        return INVALID.to_string();
+    };
+    let is_http = matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some();
+    if !is_http || parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        return INVALID.to_string();
+    }
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    parsed.to_string()
+}
+
 /// A connection error made safe to show: URLs lose their credentials and
 /// query (where API keys are often passed), and long text is cut, since the
 /// error may carry text the server sent.
 fn redact_error(error: &str) -> String {
-    static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
-        regex::Regex::new(r"(?P<scheme>[a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^\s/@]*@)?(?P<rest>[^\s?#)]*)(?:[?#][^\s)]*)?").unwrap()
-    });
     // Credentials a library may print in other forms, such as headers.
     static SECRET: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
         regex::Regex::new(r"(?i)\b((?:[a-z0-9]+[_-])*(?:bearer|basic|authorization|token|api[_-]?key|secret|password))(\s*[:=]\s*|\s+)(?:(?:bearer|basic)\s+)?[^\s,;)\]}]+").unwrap()
     });
-    let redacted = URL.replace_all(error, "$scheme$rest");
+    let redacted = redact_urls(error);
     let redacted = SECRET.replace_all(&redacted, "$1$2[redacted]");
     let mut text: String = redacted.chars().take(MAX_FAILURE_CHARS).collect();
     if redacted.chars().count() > MAX_FAILURE_CHARS {
@@ -723,12 +748,84 @@ mod tests {
     }
 
     #[test]
+    fn configured_urls_lose_credentials_query_and_fragment() {
+        assert_eq!(
+            super::redact_url("https://user:pw@mcp.example/mcp?apiKey=tvly-secret#frag"),
+            "https://mcp.example/mcp"
+        );
+        // Parentheses in the query must not let the key through.
+        assert_eq!(
+            super::redact_url("https://mcp.example/mcp(foo)?filter=(x)&apiKey=secret"),
+            "https://mcp.example/mcp(foo)"
+        );
+        assert_eq!(
+            super::redact_url("https://mcp.example?apiKey=secret"),
+            "https://mcp.example/"
+        );
+        assert_eq!(
+            super::redact_url("mailto:user:secret@example.com?apiKey=query"),
+            "(invalid URL)"
+        );
+        assert_eq!(
+            super::redact_url("https://user:secret/part@host/mcp?apiKey=query"),
+            "(invalid URL)"
+        );
+        assert_eq!(
+            super::redact_url("http://127.0.0.1:8080/mcp/"),
+            "http://127.0.0.1:8080/mcp/"
+        );
+    }
+
+    #[test]
+    fn urls_lose_credentials_query_and_fragment() {
+        assert_eq!(
+            super::redact_urls("https://user:pw@mcp.example/mcp?apiKey=tvly-secret#frag"),
+            "https://mcp.example/mcp"
+        );
+        assert_eq!(
+            super::redact_urls("streamable_http: http://localhost:8080/mcp?token=t (OAuth)"),
+            "streamable_http: http://localhost:8080/mcp (OAuth)"
+        );
+        let plain = "streamable_http: https://mcp.example/mcp/ (OAuth)";
+        assert_eq!(super::redact_urls(plain), plain);
+        // Parentheses inside the URL must not let the key through.
+        assert_eq!(
+            super::redact_urls("https://mcp.example/mcp(foo)?apiKey=secret"),
+            "https://mcp.example/mcp(foo)"
+        );
+        assert_eq!(
+            super::redact_urls("https://mcp.example/mcp?filter=((x))&apiKey=secret"),
+            "https://mcp.example/mcp"
+        );
+        assert_eq!(
+            super::redact_urls("https://mcp.example/mcp)?apiKey=secret"),
+            "https://mcp.example/mcp)"
+        );
+        // A URL with misplaced credentials cannot be shown safely.
+        assert_eq!(
+            super::redact_urls("https://user:secret/part@host/mcp?apiKey=query"),
+            "(invalid URL)"
+        );
+        assert_eq!(
+            super::redact_urls("https://public@SECRET@mcp.example/mcp?apiKey=query"),
+            "https://mcp.example/mcp"
+        );
+        // Wrapping parentheses end up in the output, but never a key.
+        assert_eq!(
+            super::redact_urls(
+                "error sending request for url (https://mcp.example/mcp?filter=(x)&apiKey=secret): refused"
+            ),
+            "error sending request for url (https://mcp.example/mcp refused"
+        );
+    }
+
+    #[test]
     fn connection_errors_lose_credentials_and_length() {
         let error = "error sending request for url (https://user:secret@mcp.example.com/mcp/?apiKey=tvly-secret#frag): refused";
         let redacted = super::redact_error(error);
         assert_eq!(
             redacted,
-            "error sending request for url (https://mcp.example.com/mcp/): refused"
+            "error sending request for url (https://mcp.example.com/mcp/ refused"
         );
         assert_eq!(
             super::redact_error(
