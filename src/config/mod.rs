@@ -113,7 +113,12 @@ impl AppConfig {
         for server in &mut config.mcp_servers {
             if let Some(url) = &mut server.url {
                 match expand_environment_variables(url.as_str(), |name| std::env::var(name).ok()) {
-                    Ok(expanded) => *url = expanded,
+                    Ok(expanded) if is_http_url(&expanded) => *url = expanded,
+                    // The message leaves out the URL, which may carry a key.
+                    Ok(_) => {
+                        server.unavailable =
+                            Some("url must start with http:// or https://".to_string())
+                    }
                     Err(error) => server.unavailable = Some(format!("invalid url: {error:#}")),
                 }
             }
@@ -432,6 +437,12 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
     }
     let home = home.context("cannot expand '~': the home directory is unknown")?;
     Ok(Some(home.join(components.as_path())))
+}
+
+/// Whether `url` parses as an absolute HTTP or HTTPS URL with a host.
+fn is_http_url(url: &str) -> bool {
+    reqwest::Url::parse(url)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
 }
 
 /// Replace environment-variable references in `text` with each variable's

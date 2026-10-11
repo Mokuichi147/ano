@@ -23,10 +23,14 @@ use crate::{
     config::{default_config_path, user_env_path, AppConfig},
     domain::approval::ApprovalMode,
     harness::{models::connect_provider, Harness},
-    infrastructure::{mcp::McpPool, session_store::Session, tools::register_builtin_tools},
+    infrastructure::{
+        mcp::{redact_urls, McpPool},
+        session_store::Session,
+        tools::register_builtin_tools,
+    },
     interface::{web, webhook},
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use std::{path::PathBuf, sync::Arc};
 
@@ -363,7 +367,11 @@ pub async fn run() -> Result<()> {
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
         Command::Web(args) => web(config, cli.user, args, registry).await,
-        Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args).await,
+        // A failed connection's error may show the server URL, with an API
+        // key expanded into its query.
+        Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args)
+            .await
+            .map_err(|error| anyhow!("{}", redact_urls(&format!("{error:#}")))),
         Command::Provider(args) => provider::run(&config, &config_path, args).await,
         Command::Preset(args) => preset::run(&config, &config_path, args).await,
         Command::Model(args) => model::run(&config, &config_path, args).await,
