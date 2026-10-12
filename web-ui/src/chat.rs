@@ -9,15 +9,21 @@ use crate::{
     timeline::{self, one_line, pretty},
 };
 use naui::{
-    Align, Button, Expander, GridCell, Label, Orientation, Padding, Scroll, ScrollPolicy, Sizing,
-    Stack, TextArea, TextColor, TextStyle, Track, Widget,
+    web::WebWidgetExt, Align, Button, EventResponse, Expander, GridCell, Key, KeyEvent, Label,
+    Orientation, Padding, Scroll, ScrollPolicy, Sizing, Stack, TextArea, TextColor, TextStyle,
+    Timer, Track, Widget,
 };
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
     collections::HashMap,
     rc::{Rc, Weak},
+    time::Duration,
 };
+
+/// Within this distance of the timeline's end, new content keeps the end in
+/// view.
+const FOLLOW_DISTANCE: f64 = 120.0;
 
 pub struct Chat {
     app: Weak<App>,
@@ -39,9 +45,11 @@ pub struct Chat {
     /// Approval requests that wait for an answer, by id.
     approvals: RefCell<HashMap<String, Approval>>,
     running: Cell<bool>,
+    /// A message was sent and its turn has not started yet.
+    sending: Cell<bool>,
+    /// Stopping the turn was asked and it has not finished yet.
+    cancelling: Cell<bool>,
     stream: RefCell<Option<EventStream>>,
-    /// Sends with Enter while the view lives.
-    enter: RefCell<Option<dom::Listener>>,
 }
 
 struct Live {
@@ -80,7 +88,7 @@ impl Chat {
         timeline.set_padding(Padding::symmetric(20.0, 24.0));
         timeline.set_sizing(Sizing::fill_width());
         timeline.set_align(Align::Fill);
-        dom::add_class(&timeline, "timeline");
+        timeline.add_class("timeline");
         let scroll = ui.scroll()?;
         scroll.set_policy(ScrollPolicy::Never, ScrollPolicy::Auto);
         scroll.set_sizing(Sizing::fill());
@@ -94,14 +102,14 @@ impl Chat {
         composer.set_spacing(10.0);
         composer.set_padding(Padding::symmetric(12.0, 24.0));
         composer.set_align(Align::End);
-        dom::add_class(&composer, "composer");
+        composer.add_class("composer");
         composer.append(&prompt);
         composer.append(&send);
 
         let main = ui.stack(Orientation::Vertical)?;
         main.set_sizing(Sizing::fill());
         main.set_align(Align::Fill);
-        dom::add_class(&main, "main");
+        main.add_class("main");
         main.append(&scroll);
         main.append(&composer);
 
@@ -110,6 +118,7 @@ impl Chat {
         plan.set_align(Align::Fill);
         let usage = ui.label("—")?;
         usage.set_wrap(true);
+        usage.set_selectable(true);
         let side = ui.stack(Orientation::Vertical)?;
         side.set_spacing(8.0);
         side.set_padding(Padding::symmetric(14.0, 16.0));
@@ -125,11 +134,11 @@ impl Chat {
         side_scroll.set_policy(ScrollPolicy::Never, ScrollPolicy::Auto);
         side_scroll.set_sizing(Sizing::fill_height().width(naui::Length::Fixed(300.0)));
         side_scroll.set_child(&side);
-        dom::add_class(&side_scroll, "side");
+        side_scroll.add_class("side");
 
         let view = ui.stack(Orientation::Horizontal)?;
         view.set_sizing(Sizing::fill());
-        dom::add_class(&view, "chat");
+        view.add_class("chat");
         view.append(&main);
         view.append(&side_scroll);
 
@@ -148,8 +157,9 @@ impl Chat {
             thought: RefCell::new(None),
             approvals: RefCell::new(HashMap::new()),
             running: Cell::new(false),
+            sending: Cell::new(false),
+            cancelling: Cell::new(false),
             stream: RefCell::new(None),
-            enter: RefCell::new(None),
         });
         chat.render_plan(&status["plan"]);
         chat.usage.set_text(&timeline::usage(&status["usage"]));
@@ -164,12 +174,21 @@ impl Chat {
                 }
             }
         });
-        *chat.enter.borrow_mut() = dom::on_enter(&prompt, {
+        // Enter sends and Shift+Enter breaks the line; Esc stops the turn.
+        // naui does not pass on the keys of an IME conversion, so Enter that
+        // confirms one stays with the IME.
+        prompt.on_key_down({
             let weak = weak.clone();
-            move || {
-                if let Some(chat) = weak.upgrade() {
-                    chat.submit();
+            move |event: &KeyEvent| {
+                let Some(chat) = weak.upgrade() else {
+                    return EventResponse::Continue;
+                };
+                match event.key {
+                    Key::Enter if !event.modifiers.shift => chat.submit(),
+                    Key::Escape if chat.running.get() => chat.cancel(),
+                    _ => return EventResponse::Continue,
                 }
+                EventResponse::Handled
             }
         });
         let stream = EventStream::open(
@@ -194,12 +213,16 @@ impl Chat {
             },
         );
         *chat.stream.borrow_mut() = stream;
-        dom::focus(&prompt);
         Ok(chat)
     }
 
     pub fn view(&self) -> &Stack {
         &self.view
+    }
+
+    /// Put the cursor in the composer, once the view is in the page.
+    pub fn focus(&self) {
+        self.prompt.request_focus();
     }
 
     pub fn id(&self) -> &str {
@@ -212,6 +235,10 @@ impl Chat {
 
     fn set_running(&self, running: bool) {
         self.running.set(running);
+        self.sending.set(false);
+        if !running {
+            self.cancelling.set(false);
+        }
         self.send.set_enabled(!running);
         if let Some(app) = self.app.upgrade() {
             app.set_running(running);
@@ -221,12 +248,14 @@ impl Chat {
     /// Send the composer's text as the next turn.
     fn submit(self: &Rc<Self>) {
         let text = self.prompt.text();
-        if text.trim().is_empty() || self.running.get() {
+        if text.trim().is_empty() || self.running.get() || self.sending.get() {
             return;
         }
         let Some(app) = self.app.upgrade() else {
             return;
         };
+        // Until the turn starts (`turn_started`) or the request fails.
+        self.sending.set(true);
         self.send.set_enabled(false);
         let chat = Rc::clone(self);
         app.spawn(async move {
@@ -237,38 +266,62 @@ impl Chat {
                 Ok(_) => {}
                 Err(error) => {
                     chat.notice(&format!("送信できませんでした: {error}"), TextColor::Danger);
+                    chat.sending.set(false);
                     chat.send.set_enabled(!chat.running.get());
                 }
             }
         });
     }
 
+    /// Stop the running turn, unless it is not running or already stopping.
     pub fn cancel(self: &Rc<Self>) {
+        if !self.running.get() || self.cancelling.get() {
+            return;
+        }
         let Some(app) = self.app.upgrade() else {
             return;
         };
+        self.cancelling.set(true);
         let chat = Rc::clone(self);
         app.spawn(async move {
             let path = format!("/api/sessions/{}/cancel", chat.id);
-            if let Err(error) = api::post(&path, &Value::Null).await {
-                chat.notice(&format!("停止できませんでした: {error}"), TextColor::Danger);
+            match api::post(&path, &Value::Null).await {
+                Ok(reply) if reply["cancelled"] == true => {}
+                // The turn had already ended, and its `turn_finished` may
+                // not have come yet: take the state from the server.
+                Ok(_) => {
+                    chat.cancelling.set(false);
+                    if let Ok(status) = api::get(&format!("/api/sessions/{}", chat.id)).await {
+                        chat.set_running(status["running"] == true);
+                    }
+                }
+                Err(error) => {
+                    chat.cancelling.set(false);
+                    chat.notice(&format!("停止できませんでした: {error}"), TextColor::Danger);
+                }
             }
         });
+    }
+
+    /// Whether the reader is at (or near) the end of the timeline, so new
+    /// content should keep it there.
+    fn following(&self) -> bool {
+        self.scroll.metrics().distance_to_end() < FOLLOW_DISTANCE
     }
 
     /// Add `widget` to the timeline, keeping the end in view when the reader
     /// was there.
     fn append(&self, widget: &dyn Widget) {
-        let following = dom::near_end(&self.scroll);
+        let following = self.following();
         self.timeline.append(widget);
         if following {
-            dom::scroll_to_end(&self.scroll);
+            self.scroll.scroll_to_end();
         }
     }
 
     /// Add `widget` to the work log, which starts after the last message.
     fn add_work(&self, app: &App, widget: &dyn Widget) {
-        let following = dom::near_end(&self.scroll);
+        let following = self.following();
         let mut work = self.work.borrow_mut();
         if work.is_none() {
             let (Ok(expander), Ok(body)) = (
@@ -282,7 +335,7 @@ impl Chat {
             body.set_sizing(Sizing::fill_width());
             expander.set_child(&body);
             expander.set_sizing(Sizing::fill_width());
-            dom::add_class(&expander, "work");
+            expander.add_class("work");
             self.timeline.append(&expander);
             *work = Some(Work {
                 expander,
@@ -296,7 +349,7 @@ impl Chat {
         work.expander
             .set_text(&format!("作業ログ（{}件）", work.entries));
         if following {
-            dom::scroll_to_end(&self.scroll);
+            self.scroll.scroll_to_end();
         }
     }
 
@@ -308,10 +361,7 @@ impl Chat {
 
     /// A line of text in the work log.
     fn work_notice(&self, app: &App, text: &str, color: TextColor) {
-        if let Ok(label) = app.ui.label(text) {
-            label.set_wrap(true);
-            label.set_color(color);
-            dom::add_class(&label, "line");
+        if let Ok(label) = line(app, text, color) {
             self.add_work(app, &label);
         }
     }
@@ -324,10 +374,11 @@ impl Chat {
                 return;
             };
             label.set_wrap(true);
-            dom::add_class(&label, "thought");
+            label.set_selectable(true);
+            label.add_class("thought");
             expander.set_child(&label);
             expander.set_sizing(Sizing::fill_width());
-            dom::add_class(&expander, "event");
+            expander.add_class("event");
             self.add_work(app, &expander);
             *self.thought.borrow_mut() = Some(Thought {
                 expander,
@@ -343,7 +394,11 @@ impl Chat {
             thought.text.clear();
         }
         thought.text.push_str(text);
+        let following = self.following();
         thought.label.set_text(&thought.text);
+        if following {
+            self.scroll.scroll_to_end();
+        }
     }
 
     /// The thinking as kept: it completes the streamed one, if any.
@@ -362,10 +417,7 @@ impl Chat {
         let Some(app) = self.app.upgrade() else {
             return;
         };
-        if let Ok(label) = app.ui.label(text) {
-            label.set_wrap(true);
-            label.set_color(color);
-            dom::add_class(&label, "line");
+        if let Ok(label) = line(&app, text, color) {
             self.append(&label);
         }
     }
@@ -379,9 +431,10 @@ impl Chat {
             "user_message" => {
                 self.live.borrow_mut().take();
                 self.end_work();
-                if let Ok(bubble) = bubble(&app, "user") {
+                if let Ok(bubble) = bubble(&app, &["user"]) {
                     if let Ok(label) = app.ui.label(text) {
                         label.set_wrap(true);
+                        label.set_selectable(true);
                         bubble.append(&label);
                     }
                     self.append(&bubble);
@@ -394,6 +447,11 @@ impl Chat {
                 self.live.borrow_mut().take();
                 self.end_work();
                 self.approvals.borrow_mut().clear();
+                // The events that would settle a sent message or a stop
+                // may be among those dropped.
+                self.sending.set(false);
+                self.cancelling.set(false);
+                self.send.set_enabled(!self.running.get());
                 if event["truncated"] == true {
                     self.notice(
                         "古いイベントは保持の上限を超えたため表示されません。",
@@ -412,7 +470,7 @@ impl Chat {
             }
             "reasoning_partial" => self.stream_thought(&app, text, false),
             "thinking" => self.show_thought(&app, text),
-            "message" => self.show_message(&app, event["html"].as_str().unwrap_or_default()),
+            "message" => self.show_message(&app, event["html"].as_str().unwrap_or_default(), text),
             "agent" => self.agent_event(&app, &event["event"]),
             "approval_requested" => self.ask_approval(&app, event),
             "approval_resolved" => self.resolve_approval(
@@ -438,11 +496,13 @@ impl Chat {
         let mut live = self.live.borrow_mut();
         if live.is_none() {
             self.end_work();
-            let (Ok(bubble), Ok(label)) = (bubble(app, "assistant streaming"), app.ui.label(""))
+            let (Ok(bubble), Ok(label)) =
+                (bubble(app, &["assistant", "streaming"]), app.ui.label(""))
             else {
                 return;
             };
             label.set_wrap(true);
+            label.set_selectable(true);
             bubble.append(&label);
             self.append(&bubble);
             *live = Some(Live {
@@ -456,35 +516,47 @@ impl Chat {
             live.text.clear();
         }
         live.text.push_str(text);
-        let following = dom::near_end(&self.scroll);
+        let following = self.following();
         live.label.set_text(&live.text);
         if following {
-            dom::scroll_to_end(&self.scroll);
+            self.scroll.scroll_to_end();
         }
     }
 
-    /// A complete message, as HTML; it takes the place of the streamed text.
-    fn show_message(&self, app: &App, html: &str) {
+    /// A complete message, as HTML, with a button that copies its Markdown
+    /// `text`; it takes the place of the streamed text.
+    fn show_message(&self, app: &App, html: &str, text: &str) {
         self.end_work();
-        let following = dom::near_end(&self.scroll);
+        let following = self.following();
         let bubble = match self.live.borrow_mut().take() {
             Some(live) => {
                 live.bubble.clear();
-                dom::remove_class(&live.bubble, "streaming");
+                live.bubble.remove_class("streaming");
                 live.bubble
             }
             None => {
-                let Ok(bubble) = bubble(app, "assistant") else {
+                let Ok(bubble) = bubble(app, &["assistant"]) else {
                     return;
                 };
                 self.timeline.append(&bubble);
                 bubble
             }
         };
-        dom::add_class(&bubble, "markdown");
-        dom::set_html(&bubble, html);
+        if let Ok(body) = app.ui.stack(Orientation::Vertical) {
+            body.set_sizing(Sizing::fill_width());
+            body.add_class("markdown");
+            dom::set_html(&body, html);
+            bubble.append(&body);
+        }
+        // The browser allows the clipboard only on https and this computer;
+        // elsewhere the reader selects the text.
+        if dom::secure_context() {
+            if let Ok(copy) = copy_button(app, text) {
+                bubble.append(&copy);
+            }
+        }
         if following {
-            dom::scroll_to_end(&self.scroll);
+            self.scroll.scroll_to_end();
         }
     }
 
@@ -494,10 +566,8 @@ impl Chat {
             return;
         };
         expander.set_sizing(Sizing::fill_width());
-        dom::add_class(&expander, "event");
-        if let Ok(label) = app.ui.label(body) {
-            label.set_wrap(true);
-            dom::add_class(&label, "code");
+        expander.add_class("event");
+        if let Ok(label) = code(app, body) {
             expander.set_child(&label);
         }
         self.add_work(app, &expander);
@@ -611,7 +681,7 @@ impl Chat {
             card.set_padding(Padding::symmetric(10.0, 14.0));
             card.set_sizing(Sizing::fill_width());
             card.set_align(Align::Start);
-            dom::add_class(&card, "approval");
+            card.add_class("approval");
             let heading = app.ui.label(if event["mcp"] == true {
                 "MCP の呼び出しの承認"
             } else {
@@ -619,19 +689,19 @@ impl Chat {
             })?;
             heading.set_style(TextStyle::Heading);
             card.append(&heading);
-            card.append(&app.ui.label(&format!(
+            let target = app.ui.label(&format!(
                 "対象: {}",
                 event["target"].as_str().unwrap_or_default()
-            ))?);
+            ))?;
+            target.set_wrap(true);
+            target.set_selectable(true);
+            card.append(&target);
             if event["arguments"]["truncated"] == true {
                 let label = app.ui.label("引数が長いため、先頭だけを表示しています。")?;
                 label.set_color(TextColor::Warning);
                 card.append(&label);
             }
-            let arguments = app.ui.label(&pretty(&event["arguments"]))?;
-            arguments.set_wrap(true);
-            dom::add_class(&arguments, "code");
-            card.append(&arguments);
+            card.append(&code(app, &pretty(&event["arguments"]))?);
             let buttons = app.ui.stack(Orientation::Horizontal)?;
             buttons.set_spacing(8.0);
             let allow = app.ui.button("許可")?;
@@ -650,7 +720,6 @@ impl Chat {
             buttons.append(&allow);
             buttons.append(&deny);
             card.append(&buttons);
-            dom::focus(&allow);
             Ok(Approval {
                 card,
                 buttons,
@@ -660,6 +729,8 @@ impl Chat {
         };
         if let Ok(approval) = build() {
             self.append(&approval.card);
+            // Once the card is in the page, where it can take the focus.
+            approval.allow.request_focus();
             self.approvals.borrow_mut().insert(id, approval);
         }
     }
@@ -690,7 +761,7 @@ impl Chat {
         let Some(approval) = self.approvals.borrow_mut().remove(id) else {
             return;
         };
-        dom::add_class(&approval.card, "resolved");
+        approval.card.add_class("resolved");
         let card = &approval.card;
         if let Some(index) = (0..card.len()).last() {
             card.remove(index);
@@ -714,7 +785,7 @@ impl Chat {
     fn finish_turn(self: &Rc<Self>, event: &Value) {
         self.end_work();
         if let Some(live) = self.live.borrow_mut().take() {
-            dom::remove_class(&live.bubble, "streaming");
+            live.bubble.remove_class("streaming");
         }
         self.set_running(false);
         self.usage.set_text(&timeline::usage(&event["usage"]));
@@ -803,6 +874,7 @@ impl Chat {
                 continue;
             };
             label.set_wrap(true);
+            label.set_selectable(true);
             match status {
                 "" => label.set_style(TextStyle::Heading),
                 "in_progress" => label.set_color(TextColor::Accent),
@@ -822,12 +894,77 @@ fn heading(app: &App, text: &str) -> naui::Result<Label> {
     Ok(label)
 }
 
-fn bubble(app: &App, classes: &str) -> naui::Result<Stack> {
+fn bubble(app: &App, classes: &[&str]) -> naui::Result<Stack> {
     let bubble = app.ui.stack(Orientation::Vertical)?;
+    bubble.set_spacing(6.0);
     bubble.set_padding(Padding::symmetric(10.0, 14.0));
     bubble.set_align(Align::Start);
-    dom::add_class(&bubble, &format!("bubble {classes}"));
+    bubble.add_class("bubble");
+    for class in classes {
+        bubble.add_class(class);
+    }
     Ok(bubble)
+}
+
+/// A line of text in the timeline or the work log, which the reader can
+/// copy (an error, for one).
+fn line(app: &App, text: &str, color: TextColor) -> naui::Result<Label> {
+    let label = app.ui.label(text)?;
+    label.set_wrap(true);
+    label.set_selectable(true);
+    label.set_color(color);
+    label.add_class("line");
+    Ok(label)
+}
+
+/// `text` in a monospaced block: a tool's arguments or output.
+fn code(app: &App, text: &str) -> naui::Result<Label> {
+    let label = app.ui.label(text)?;
+    label.set_wrap(true);
+    label.set_selectable(true);
+    label.add_class("code");
+    Ok(label)
+}
+
+/// How long the copy button says how copying went.
+const COPY_FEEDBACK: Duration = Duration::from_secs(2);
+const COPY_TOOLTIP: &str = "回答を Markdown でコピーします";
+
+/// A button that copies `text` and says for a moment whether it could.
+fn copy_button(app: &App, text: &str) -> naui::Result<Button> {
+    let button = app.ui.button("コピー")?;
+    button.set_tooltip(Some(COPY_TOOLTIP));
+    button.add_class("copy");
+    let clipboard = app.ui.clipboard();
+    let tasks = app.ui.tasks();
+    let text = text.to_string();
+    // Puts the label back; a later click replaces it.
+    let reset: Rc<RefCell<Option<Timer>>> = Rc::default();
+    button.on_click({
+        let button = button.clone();
+        move || {
+            let button = button.clone();
+            let tasks = tasks.clone();
+            let reset = Rc::clone(&reset);
+            clipboard.set_text(&text, move |result| {
+                let (label, tooltip) = match result {
+                    Ok(()) => ("コピーしました", COPY_TOOLTIP.to_string()),
+                    Err(error) => ("コピーできません", error.to_string()),
+                };
+                button.set_text(label);
+                button.set_tooltip(Some(&tooltip));
+                if let Some(timer) = reset.borrow_mut().take() {
+                    timer.cancel();
+                }
+                let restored = button.clone();
+                *reset.borrow_mut() = Some(tasks.after(COPY_FEEDBACK, move || {
+                    restored.set_text("コピー");
+                    restored.set_tooltip(Some(COPY_TOOLTIP));
+                }));
+            });
+        }
+    });
+    Ok(button)
 }
 
 /// The session's settings as name and value rows.
@@ -860,7 +997,7 @@ fn info(app: &App, status: &Value) -> naui::Result<naui::Grid> {
     ];
     let grid = app.ui.grid()?;
     grid.set_spacing(10.0, 4.0);
-    dom::add_class(&grid, "info");
+    grid.add_class("info");
     grid.set_column_track(1, Track::FILL);
     grid.set_sizing(Sizing::fill_width());
     for (row, (name, value)) in rows.into_iter().enumerate() {
@@ -868,7 +1005,8 @@ fn info(app: &App, status: &Value) -> naui::Result<naui::Grid> {
         name.set_color(TextColor::Secondary);
         let value = app.ui.label(&value)?;
         value.set_wrap(true);
-        dom::add_class(&value, "value");
+        value.set_selectable(true);
+        value.add_class("value");
         grid.attach(&name, GridCell::new(0, row));
         grid.attach(&value, GridCell::new(1, row));
     }

@@ -1,10 +1,10 @@
 //! The page: a header with the session's state and controls, and below it
 //! either the form that starts a session or the session itself.
 
-use crate::{api, chat::Chat, dom, setup};
+use crate::{api, chat::Chat, setup};
 use naui::{
-    Align, Button, DialogButtons, DialogResponse, Label, Orientation, Padding, Sizing, Stack,
-    Tasks, TextColor, TextStyle, Ui,
+    web::WebWidgetExt, Align, Button, DialogButtons, DialogResponse, Label, Length, Orientation,
+    Padding, ProgressBar, Sizing, Stack, Tasks, TextColor, TextStyle, Ui,
 };
 use serde_json::Value;
 use std::{
@@ -18,6 +18,8 @@ pub struct App {
     tasks: Tasks,
     summary: Label,
     status: Label,
+    /// Moves while a turn runs.
+    busy: ProgressBar,
     stop: Button,
     end: Button,
     /// Holds the form or the session.
@@ -36,34 +38,43 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
     let root = ui.stack(Orientation::Vertical)?;
     root.set_sizing(Sizing::fill());
     root.set_align(Align::Fill);
-    dom::add_class(&root, "app");
+    root.add_class("app");
 
     let header = ui.stack(Orientation::Horizontal)?;
     header.set_spacing(12.0);
     header.set_padding(Padding::symmetric(8.0, 16.0));
     header.set_align(Align::Center);
-    dom::add_class(&header, "topbar");
+    header.add_class("topbar");
     let brand = ui.label("ano")?;
     brand.set_style(TextStyle::Heading);
     let summary = ui.label("")?;
     summary.set_color(TextColor::Secondary);
     summary.set_sizing(Sizing::fill_width());
-    dom::add_class(&summary, "summary");
+    summary.add_class("summary");
     let status = ui.label("")?;
     status.set_color(TextColor::Secondary);
-    dom::add_class(&status, "status");
+    status.add_class("status");
+    let busy = ui.progress_bar()?;
+    busy.set_indeterminate(true);
+    busy.set_sizing(Sizing::new().width(Length::Fixed(64.0)));
+    busy.set_accessible_label(Some("実行中"));
+    busy.add_class("busy");
     let stop = ui.button("停止")?;
+    stop.set_tooltip(Some(
+        "実行中のターンを止めます（入力欄で Esc でも止まります）",
+    ));
     let end = ui.button("セッションを終了")?;
     header.append(&brand);
     header.append(&summary);
     header.append(&status);
+    header.append(&busy);
     header.append(&stop);
     header.append(&end);
 
     let content = ui.stack(Orientation::Vertical)?;
     content.set_sizing(Sizing::fill());
     content.set_align(Align::Fill);
-    dom::add_class(&content, "content");
+    content.add_class("content");
     root.append(&header);
     root.append(&content);
     window.set_child(&root);
@@ -74,6 +85,7 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
         tasks: ui.tasks(),
         summary,
         status,
+        busy,
         stop: stop.clone(),
         end: end.clone(),
         content,
@@ -137,13 +149,18 @@ impl App {
                 Err(error) => {
                     if let Ok(label) = app.ui.label(&error) {
                         label.set_color(TextColor::Danger);
+                        label.set_selectable(true);
                         app.content.append(&label);
                     }
                     return;
                 }
             };
             match setup::build(&app, &options, message) {
-                Ok(form) => app.content.append(&form),
+                Ok(form) => {
+                    app.content.append(&form);
+                    // The first field: the working folder.
+                    form.request_focus();
+                }
                 Err(error) => web_sys::console::error_1(&error.to_string().into()),
             }
         });
@@ -170,6 +187,7 @@ impl App {
         match Chat::open(self, status) {
             Ok(chat) => {
                 self.content.append(chat.view());
+                chat.focus();
                 self.show_header(Some(status));
                 *self.chat.borrow_mut() = Some(chat);
             }
@@ -185,16 +203,17 @@ impl App {
                 let model = status["model"].as_str().unwrap_or_default();
                 let folder = workspace.map_or("（作業フォルダなし）", folder_name);
                 self.summary.set_text(&format!("{folder}  ·  {model}"));
-                dom::set_title(&self.summary, workspace.unwrap_or_default());
+                self.summary.set_tooltip(workspace);
                 self.set_running(status["running"].as_bool().unwrap_or(false));
-                dom::set_visible(&self.end, true);
+                self.end.set_visible(true);
             }
             None => {
                 self.summary.set_text("");
-                dom::set_title(&self.summary, "");
+                self.summary.set_tooltip(None);
                 self.status.set_text("");
-                dom::set_visible(&self.stop, false);
-                dom::set_visible(&self.end, false);
+                self.busy.set_visible(false);
+                self.stop.set_visible(false);
+                self.end.set_visible(false);
             }
         }
     }
@@ -202,7 +221,8 @@ impl App {
     pub fn set_running(&self, running: bool) {
         self.status
             .set_text(if running { "実行中…" } else { "待機中" });
-        dom::set_visible(&self.stop, running);
+        self.busy.set_visible(running);
+        self.stop.set_visible(running);
     }
 
     /// Show what the model is doing while a turn runs.
