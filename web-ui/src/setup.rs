@@ -4,11 +4,11 @@
 use crate::{
     api,
     app::{App, Message},
-    dom,
 };
 use naui::{
-    Align, Button, Checkbox, ComboBox, DialogButtons, DialogResponse, GridCell, Label, Orientation,
-    Padding, Sizing, Stack, TextColor, TextInput, TextStyle, Track,
+    web::WebWidgetExt, Align, Button, Checkbox, ComboBox, DialogButtons, DialogResponse,
+    EventResponse, GridCell, Key, KeyEvent, Label, Orientation, Padding, Sizing, Stack, TextColor,
+    TextInput, TextStyle, Track,
 };
 use serde_json::{json, Map, Value};
 use std::{cell::Cell, rc::Rc};
@@ -52,6 +52,9 @@ struct Form {
     exec: Checkbox,
     approval: ComboBox,
     error: Label,
+    start: Button,
+    /// A request to start a session is under way.
+    starting: Cell<bool>,
 }
 
 pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> naui::Result<Stack> {
@@ -61,7 +64,7 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
     card.set_padding(Padding::all(24.0));
     card.set_sizing(Sizing::fill_width().max_width(640.0));
     card.set_align(Align::Fill);
-    dom::add_class(&card, "card");
+    card.add_class("card");
 
     let title = ui.label("新しいセッション")?;
     title.set_style(TextStyle::Title);
@@ -130,8 +133,10 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
 
     let error = ui.label("")?;
     error.set_wrap(true);
+    error.set_selectable(true);
     card.append(&error);
     let start = ui.button("開始")?;
+    start.set_tooltip(Some("作業フォルダの欄で Enter を押しても開始します"));
     card.append(&start);
 
     let form = Rc::new(Form {
@@ -145,6 +150,8 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
         exec,
         approval,
         error,
+        start: start.clone(),
+        starting: Cell::new(false),
     });
     form.select_approval(options["default_approval_mode"].as_str().unwrap_or("ask"));
     form.show_message(message);
@@ -154,15 +161,18 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
     });
     start.on_click({
         let app = Rc::clone(app);
-        let start = start.clone();
-        move || {
-            start.set_enabled(false);
-            start_session(
-                Rc::clone(&app),
-                Rc::clone(&form),
-                start.clone(),
-                form.request(),
-            );
+        let form = Rc::clone(&form);
+        move || form.submit(&app)
+    });
+    form.workspace.on_key_down({
+        let app = Rc::clone(app);
+        let form = Rc::clone(&form);
+        move |event: &KeyEvent| {
+            if event.key != Key::Enter {
+                return EventResponse::Continue;
+            }
+            form.submit(&app);
+            EventResponse::Handled
         }
     });
 
@@ -171,48 +181,48 @@ pub fn build(app: &Rc<App>, options: &Rc<Value>, message: Option<Message>) -> na
     page.set_align(Align::Center);
     page.set_padding(Padding::all(32.0));
     page.set_sizing(Sizing::fill());
-    dom::add_class(&page, "setup");
+    page.add_class("setup");
     page.append(&card);
     Ok(page)
 }
 
 /// Ask the server for a session with `body`. A folder that does not exist is
 /// created once the user agrees.
-fn start_session(app: Rc<App>, form: Rc<Form>, start: Button, body: Value) {
+fn start_session(app: Rc<App>, form: Rc<Form>, body: Value) {
+    form.set_starting(true);
     app.clone().spawn(async move {
         match api::post_detailed("/api/sessions", &body).await {
             Ok(status) => app.open_session(&status),
+            // Still starting while the user decides.
             Err((_, details)) if details["missing_workspace"].is_string() => {
-                start.set_enabled(true);
-                confirm_new_folder(app, form, start, body);
+                let folder = details["missing_workspace"].as_str().unwrap_or_default();
+                confirm_new_folder(app, form, folder, body);
             }
             Err((error, _)) => {
                 form.show_message(Some(Message::error(error)));
-                start.set_enabled(true);
+                form.set_starting(false);
             }
         }
     });
 }
 
-fn confirm_new_folder(app: Rc<App>, form: Rc<Form>, start: Button, mut body: Value) {
+/// Ask whether to create `folder` (as the server resolved the request's
+/// workspace) and start there.
+fn confirm_new_folder(app: Rc<App>, form: Rc<Form>, folder: &str, mut body: Value) {
     let Ok(dialog) = app.ui.dialog("フォルダを作成しますか？") else {
+        form.set_starting(false);
         return;
     };
     dialog.set_message(&format!(
-        "「{}」はありません。作成して、このフォルダで始めますか？",
-        form.workspace.text().trim()
+        "「{folder}」はありません。作成して、このフォルダで始めますか？"
     ));
     dialog.set_buttons(DialogButtons::new().primary("作成").cancel("キャンセル"));
     dialog.on_response(move |response| {
         if response == DialogResponse::Primary {
             body["create_workspace"] = json!(true);
-            start.set_enabled(false);
-            start_session(
-                Rc::clone(&app),
-                Rc::clone(&form),
-                start.clone(),
-                body.clone(),
-            );
+            start_session(Rc::clone(&app), Rc::clone(&form), body.clone());
+        } else {
+            form.set_starting(false);
         }
     });
     dialog.open();
@@ -234,6 +244,18 @@ fn names<'a>(options: &'a Value, field: &str) -> impl Iterator<Item = &'a str> {
 }
 
 impl Form {
+    /// Start a session with what the form says, unless one is starting.
+    fn submit(self: &Rc<Self>, app: &Rc<App>) {
+        if !self.starting.get() {
+            start_session(Rc::clone(app), Rc::clone(self), self.request());
+        }
+    }
+
+    fn set_starting(&self, starting: bool) {
+        self.starting.set(starting);
+        self.start.set_enabled(!starting);
+    }
+
     /// The chosen environment, or `None` for permissions chosen here.
     fn environment(&self) -> Option<&Value> {
         let index = self.environment.selected().filter(|index| *index > 0)?;

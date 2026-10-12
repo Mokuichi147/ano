@@ -5,9 +5,9 @@
 //! starts one when none is open, and otherwise the timeline of the session's
 //! events with its plan, usage, and settings beside it.
 //!
-//! What naui's common API has no word for (Markdown as HTML, Enter to send,
-//! keeping the timeline scrolled to its end, and the CSS classes the page's
-//! stylesheet uses) goes through the DOM elements naui exposes (`dom`).
+//! The CSS classes the page's stylesheet uses are set with naui's
+//! `WebWidgetExt`. What naui has no word for (Markdown as HTML) goes through
+//! the DOM elements naui exposes (`dom`).
 
 #![cfg(target_arch = "wasm32")]
 
