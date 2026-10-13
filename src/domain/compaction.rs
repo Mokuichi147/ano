@@ -313,14 +313,42 @@ fn last_user_request(history: &[Value]) -> Option<(usize, Vec<Value>)> {
         };
         let own = parts
             .into_iter()
-            .filter(|part| {
-                !part["text"]
-                    .as_str()
-                    .is_some_and(|text| text.starts_with("Runtime notice"))
-            })
+            .filter(|part| !part["text"].as_str().is_some_and(is_runtime_text))
             .collect::<Vec<_>>();
         (!own.is_empty()).then_some((index, own))
     })
+}
+
+/// Text the runtime adds to the history as a user message: notices, earlier
+/// summaries, and the reports of stopped runs.
+fn is_runtime_text(text: &str) -> bool {
+    [
+        "Runtime notice",
+        "Agent execution stopped:",
+        "Execution stopped ",
+    ]
+    .iter()
+    .any(|prefix| text.starts_with(prefix))
+}
+
+/// The text of the user's latest `count` own messages in `history`, newest
+/// first, without runtime text, each shortened to about `limit` characters.
+pub fn recent_user_requests(history: &[Value], count: usize, limit: usize) -> Vec<String> {
+    history
+        .iter()
+        .rev()
+        .filter(|item| item["role"] == "user")
+        .filter_map(|item| {
+            let text = message_parts(item)
+                .into_iter()
+                .filter(|part| !is_runtime_text(part))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let text = text.trim();
+            (!text.is_empty()).then(|| shorten(text, limit))
+        })
+        .take(count)
+        .collect()
 }
 
 /// The readable parts of a message; images, audio, and files are named.
@@ -509,5 +537,34 @@ mod tests {
         assert!(transcript.contains("earlier item(s) omitted"));
         assert!(transcript.contains("result 49"));
         assert!(!transcript.contains("result 0 "));
+    }
+
+    #[test]
+    fn recent_user_requests_skip_runtime_text() {
+        let history = vec![
+            json!({"role":"user","content":"x".repeat(100)}),
+            user("PRを発行して"),
+            json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"了解"}]}),
+            user("Runtime notice: your recorded task plan still has pending steps."),
+            user("Agent execution stopped: OpenAI responses stream failed"),
+            user("Execution stopped at the configured token budget."),
+            json!({"role":"user","content":[
+                {"type":"input_text","text":"続けて"},
+                {"type":"input_text","text":format!("{SUMMARY_NOTICE} 要約")},
+            ]}),
+        ];
+        let requests = recent_user_requests(&history, 3, 20);
+        assert_eq!(requests[..2], ["続けて", "PRを発行して"]);
+        assert!(
+            requests[2].contains("characters omitted"),
+            "{}",
+            requests[2]
+        );
+        assert_eq!(requests.len(), 3);
+        assert_eq!(recent_user_requests(&history, 1, 20), ["続けて"]);
+
+        // The report of a failed turn is not taken for the latest request.
+        let (index, _) = last_user_request(&history[..6]).unwrap();
+        assert_eq!(index, 1);
     }
 }
