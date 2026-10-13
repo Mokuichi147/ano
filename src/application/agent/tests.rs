@@ -1,4 +1,5 @@
 use super::{
+    approval_context,
     discovery::{responses_mcp_tool, ActiveTools},
     dispatch::RoundScope,
     events::{AgentEvent, EventLog},
@@ -929,9 +930,9 @@ impl ApprovalHandler for ExplainingApproval {
     }
 }
 
-#[tokio::test]
-async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
-    let server = McpServerConfig {
+/// A Responses MCP server whose `close_issue` tool always needs approval.
+fn close_issue_server() -> McpServerConfig {
+    McpServerConfig {
         label: "github".into(),
         transport: McpTransport::Responses,
         url: Some("https://example.test/mcp".into()),
@@ -953,7 +954,12 @@ async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
         unavailable: None,
-    };
+    }
+}
+
+#[tokio::test]
+async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
+    let server = close_issue_server();
     let server_mock = mock_responses(vec![
         search_response("r1", "close issue"),
         json!({"id": "r2", "status": "completed", "output": [{
@@ -993,6 +999,63 @@ async fn approval_handlers_see_the_request_and_their_reasons_are_reported() {
     )));
     let requests = server_mock.requests.lock().unwrap();
     assert_eq!(requests[2]["input"][0]["approve"], false);
+}
+
+#[tokio::test]
+async fn approval_handlers_see_the_earlier_requests_of_the_conversation() {
+    let server_mock = mock_responses(vec![
+        text_response("r0", "Paused."),
+        search_response("r1", "close issue"),
+        json!({"id": "r2", "status": "completed", "output": [{
+            "type": "mcp_approval_request", "id": "approval_1", "server_label": "github",
+            "name": "close_issue", "arguments": "{\"number\":7}"
+        }]}),
+        text_response("r3", "Not closed."),
+    ])
+    .await;
+    let handler = Arc::new(ExplainingApproval {
+        seen: Mutex::new(Vec::new()),
+    });
+    let agent = Agent::new(
+        OpenAiClient::new("test", &server_mock.url),
+        AgentSettings::default(),
+        Arc::new(McpPool::new(vec![close_issue_server()])),
+        ToolRegistry::new(),
+        UserPolicy::default(),
+        handler.clone(),
+    );
+    let binding = SessionBinding::new(&ToolContext::default(), &server_mock.url).unwrap();
+    let mut store = crate::infrastructure::memory_store::MemoryConversation::new(binding);
+    let say = |text: &str| RunRequest::new(vec![InputPart::Text(text.into())]);
+
+    agent
+        .run_in_session(say("Close issue 7"), &mut store)
+        .await
+        .unwrap();
+    agent
+        .run_in_session(say("Continue"), &mut store)
+        .await
+        .unwrap();
+
+    let seen = handler.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen[0].user_request,
+        "Latest request:\nContinue\n\nEarlier requests in this conversation, newest first:\n- Close issue 7"
+    );
+}
+
+#[test]
+fn approval_context_puts_the_latest_request_first() {
+    assert_eq!(approval_context("Fix it", &[]), "Fix it");
+    let earlier = ["request 2".to_string(), "request 1".to_string()];
+    let text = approval_context("Continue", &earlier);
+    assert_eq!(
+        text,
+        "Latest request:\nContinue\n\nEarlier requests in this conversation, newest first:\n- request 2\n- request 1"
+    );
+    // Lines of a request stay inside its list item.
+    assert!(approval_context("Go", &["a\nb".into()]).ends_with("- a\n  b"));
 }
 
 #[tokio::test]

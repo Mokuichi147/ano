@@ -26,8 +26,8 @@ use crate::{
     },
     domain::{
         compaction::{
-            compacted_history, compaction_due, summarized_history, summary_split,
-            summary_transcript, CompactionMethod, CompactionRecord,
+            compacted_history, compaction_due, recent_user_requests, summarized_history,
+            summary_split, summary_transcript, CompactionMethod, CompactionRecord,
         },
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
@@ -635,14 +635,25 @@ impl Agent {
         let user_input = build_user_input(&input).await?;
         // Shown to approval handlers to judge whether a call fits the request.
         let user_request = origin.user_request.clone().unwrap_or_else(|| {
-            input
+            let latest = input
                 .iter()
                 .filter_map(|part| match part {
                     InputPart::Text(text) => Some(text.as_str()),
                     _ => None,
                 })
                 .collect::<Vec<_>>()
-                .join("\n")
+                .join("\n");
+            let earlier = session
+                .as_deref()
+                .map(|session| {
+                    recent_user_requests(
+                        &session.data().history,
+                        EARLIER_REQUESTS,
+                        EARLIER_REQUEST_CHARS,
+                    )
+                })
+                .unwrap_or_default();
+            approval_context(&latest, &earlier)
         });
         let mut base_instructions = self.role_instructions(&origin);
         let token_limit = origin.token_limit;
@@ -1160,6 +1171,29 @@ fn goal_notice(goal: &TaskGoal) -> String {
         "Goal set by the user. It is recorded in task_plan and replaces any earlier plan; the objective cannot be changed, so send objective=null when you update the goal.\nObjective: {}\nFirst define concrete, checkable acceptance criteria for it in task_plan, including every condition the objective states. Then work until every criterion is verified as met, and record each verification with its evidence in task_plan. If a criterion cannot be met, mark it blocked with the reason.",
         goal.objective
     )
+}
+
+/// How many of the user's earlier requests approval handlers see, and the
+/// characters each is shortened to.
+const EARLIER_REQUESTS: usize = 5;
+const EARLIER_REQUEST_CHARS: usize = 600;
+
+/// The request that approval handlers judge calls against: the latest
+/// request, then the user's `earlier` requests of the conversation, newest
+/// first, so that a request such as "continue" keeps what it continues.
+/// The latest request comes first because handlers may cut long text.
+fn approval_context(latest: &str, earlier: &[String]) -> String {
+    if earlier.is_empty() {
+        return latest.to_string();
+    }
+    let mut text = format!(
+        "Latest request:\n{latest}\n\nEarlier requests in this conversation, newest first:"
+    );
+    for request in earlier {
+        text.push_str("\n- ");
+        text.push_str(&request.replace('\n', "\n  "));
+    }
+    text
 }
 
 /// Ask the model to go on when it answered with the work unfinished.
