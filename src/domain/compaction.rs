@@ -354,7 +354,7 @@ fn value_text(value: &Value) -> String {
 }
 
 /// `text` cut to its first and last characters when longer than `limit`.
-fn shorten(text: &str, limit: usize) -> String {
+pub(crate) fn shorten(text: &str, limit: usize) -> String {
     let count = text.chars().count();
     if count <= limit {
         return text.to_string();
