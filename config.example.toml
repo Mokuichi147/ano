@@ -1,7 +1,10 @@
-# ano の設定ファイルの例。OS 標準の設定ディレクトリの config.toml（macOS は
-# ~/Library/Application Support/ano、Linux は $XDG_CONFIG_HOME/ano（既定 ~/.config/ano）、
-# Windows は %APPDATA%\ano\config）に置きます。カレントディレクトリの config.toml があれば
-# そちらを優先します。API キーなどの環境変数は、同じディレクトリの .env にも書けます
+# ano の設定ファイルの例。--config を省略すると、カレントディレクトリの
+# ./.ano/config.toml、OS 標準の設定ディレクトリの config.toml の順に探します。
+# OS 標準の設定ディレクトリは macOS は ~/Library/Application Support/ano、
+# Linux は $XDG_CONFIG_HOME/ano（既定 ~/.config/ano）、Windows は %APPDATA%\ano\config。
+# どちらも無ければ組み込みの既定値を使います。./config.toml は自動では読みませんが、
+# --config config.toml で明示すれば使えます。API キーなどの環境変数は、
+# OS 標準の設定ディレクトリの .env にも書けます
 # （カレントディレクトリの .env とシェルの環境変数が優先）。
 
 [api]
@@ -181,6 +184,9 @@ base_url = "http://127.0.0.1:7878"
 # （既定 ~/.local/share/ano/history）、Windows は %APPDATA%\ano\data\history）。
 # 相対パスは設定ファイルのあるディレクトリが基準です。
 # 以前の既定の保存先（設定ファイルの隣の .ano/history）が残っていれば、そちらを使い続けます。
+# プロジェクト設定を .ano/config.toml へ移した場合も、既存のプロジェクトの .ano/history を検出します。
+# .ano/.ano/history も存在する場合はそちらが優先されます（docs/configuration.md 参照）。
+# data_dir を明示した場合、設定ファイル移動時にはその相対パスも調整してください。
 # data_dir = "~/ano-history"
 principal = "ano"
 # token_env = "CHRONOTOPE_TOKEN"

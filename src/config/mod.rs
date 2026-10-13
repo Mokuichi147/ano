@@ -35,9 +35,12 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-/// The file name of the config file, both in the current directory and in
-/// the OS config directory.
+/// The file name of the config file in the OS config directory.
 pub const CONFIG_FILE_NAME: &str = "config.toml";
+
+/// The project config path, namespaced to avoid reading another application's
+/// `config.toml` when ano is started in an arbitrary project.
+const PROJECT_CONFIG_PATH: &str = ".ano/config.toml";
 
 /// The default `history.data_dir` before it moved to the OS data directory,
 /// relative to the config file.
@@ -62,17 +65,46 @@ pub fn user_env_path() -> Option<PathBuf> {
 }
 
 /// The config file to read and edit when `--config` is not given:
-/// `config.toml` in the current directory when it exists, otherwise the one in
-/// the OS config directory, which the editing commands create when missing.
+/// `.ano/config.toml` in the current directory when it exists, otherwise
+/// `config.toml` in the OS config directory, which the editing commands create
+/// when missing. A bare `config.toml` must be selected explicitly with --config.
 pub fn default_config_path() -> PathBuf {
-    choose_config_path(PathBuf::from(CONFIG_FILE_NAME), user_config_path())
+    choose_config_path(Path::new("."), user_config_path())
 }
 
-fn choose_config_path(local: PathBuf, user: Option<PathBuf>) -> PathBuf {
+fn choose_config_path(directory: &Path, user: Option<PathBuf>) -> PathBuf {
+    let local = directory.join(PROJECT_CONFIG_PATH);
     match user {
-        Some(user) if !local.exists() => user,
+        Some(user) if config_path_is_missing(&local) => user,
         _ => local,
     }
+}
+
+/// Only a confirmed absence permits fallback. A dangling symlink or a
+/// metadata/permission error must be reported by loading the selected path.
+fn config_path_is_missing(path: &Path) -> bool {
+    if !matches!(std::fs::symlink_metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+    {
+        return false;
+    }
+    // NotFound can also mean that a parent (such as `.ano`) is a dangling
+    // symlink. Check every ancestor before considering the file absent.
+    for parent in path
+        .ancestors()
+        .skip(1)
+        .filter(|p| !p.as_os_str().is_empty())
+    {
+        match std::fs::symlink_metadata(parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                if std::fs::metadata(parent).is_err() {
+                    return false;
+                }
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => return false,
+            _ => {}
+        }
+    }
+    true
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -124,6 +156,16 @@ impl AppConfig {
             }
         }
         config.resolve_paths(directory, std::env::home_dir().as_deref())?;
+        // Check the original project namespace as well: `.ano` may
+        // be a symlink to a directory with a different name.
+        if config.history.data_dir.is_none()
+            && path.parent().and_then(Path::file_name) == Some(".ano".as_ref())
+        {
+            let migrated_legacy = directory.join("history");
+            if migrated_legacy.is_dir() {
+                config.history.data_dir = Some(migrated_legacy);
+            }
+        }
         Ok(config)
     }
 
@@ -147,6 +189,13 @@ impl AppConfig {
                 let legacy = directory.join(LEGACY_HISTORY_DIR);
                 if legacy.is_dir() {
                     self.history.data_dir = Some(legacy);
+                } else if directory.file_name() == Some(".ano".as_ref()) {
+                    // Moving project/config.toml into project/.ano must not
+                    // hide the queue at project/.ano/history.
+                    let migrated_legacy = directory.join("history");
+                    if migrated_legacy.is_dir() {
+                        self.history.data_dir = Some(migrated_legacy);
+                    }
                 }
             }
         }
@@ -176,13 +225,13 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Load `path` when it exists, otherwise use the built-in defaults.
+    /// Load `path`, using built-in defaults only when it is confirmed absent.
     pub fn load_or_default(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
-        if path.exists() {
-            Self::load(path)
-        } else {
+        if config_path_is_missing(path) {
             Ok(Self::default())
+        } else {
+            Self::load(path)
         }
     }
 

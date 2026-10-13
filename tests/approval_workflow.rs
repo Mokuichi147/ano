@@ -53,8 +53,9 @@ async fn auto_mode_reviews_mcp_calls_and_denies_uncertain_ones_without_asking() 
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
     let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join(".ano")).unwrap();
     std::fs::write(
-        directory.path().join("config.toml"),
+        directory.path().join(".ano/config.toml"),
         "[agent]\napproval_model = 'reviewer-model'\n[[mcp_servers]]\nlabel = 'github'\nurl = 'https://mcp.example.test/mcp'\n[[mcp_servers.tool_catalog]]\nname = 'list_issues'\ndescription = 'List issues'\n[[mcp_servers.tool_catalog]]\nname = 'delete_issue'\ndescription = 'Delete an issue'\n",
     )
     .unwrap();

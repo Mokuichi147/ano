@@ -2,8 +2,10 @@
 
 `--config` を省略すると、次の順に最初に見つかった `config.toml` を読みます。どちらも無ければ組み込みの既定値で動きます。全項目の例は [config.example.toml](../config.example.toml) を参照してください。
 
-1. カレントディレクトリの `config.toml`（プロジェクトごとの設定）
+1. カレントディレクトリの `./.ano/config.toml`（プロジェクトごとの設定）
 2. OS 標準の設定ディレクトリの `config.toml`
+
+無関係な `./config.toml` を ano の設定と誤認しないよう、カレントディレクトリ直下の `config.toml` は自動では読みません。`--config config.toml` で明示したファイルは引き続き読み込めます。
 
 | OS | 設定ディレクトリ |
 | --- | --- |
@@ -31,6 +33,16 @@
 - `--config` で明示したファイルが存在しない（ポリシーなしの既定値へ黙って切り替えないため）
 - 未知のキーがある（`disable_tools` のような綴り間違いで制限が無効になることを防ぐため）
 - `--user` に未定義の名前を指定した（別ユーザーの設定へ切り替えないため）
+
+## 既存のプロジェクト設定の移行
+
+これまでプロジェクト直下の `config.toml` を使っていた場合は、`ano --config config.toml ...` で明示するか、`.ano/config.toml` に移動してください。明示したファイルが無い場合や未知のキーがある場合などの厳密な検証は変わりません。自動探索で選ばれる ano の設定が不正・読み取り不可・リンク切れの場合もエラーにし、別の設定や既定値へ黙って切り替えません。
+
+`environments.*.workspace`、MCP の `cwd`、`history.data_dir`、`skills.dir`、API・provider の `chatgpt_auth_file` の相対パスは設定ファイルのあるディレクトリを基準に解決するため、移動時にはパスを調整してください。たとえば、プロジェクト直下の設定で `workspace = "."` としていた場合、`.ano/config.toml` では `workspace = ".."` とすると同じプロジェクトを指します。MCP の `cwd = "./mcp-servers/files"` も `cwd = "../mcp-servers/files"` に変更します。
+
+CLI の `--workspace` は引き続き起動ディレクトリが基準です。`agent.project_instructions` は workspace 基準なので、workspace を維持する場合は変更しません。MCP の `command` は先頭の `~` だけを展開し、`args` はそのまま子プロセスに渡します。workspace 内で実行する検証コマンドのパスも、設定ファイルの移動だけでは変更する必要はありません。
+
+`history.data_dir` を省略していた場合は、旧保存先のプロジェクト直下の `.ano/history` を移動せずに残してください。設定を `.ano/config.toml` へ移しても、そのキューを引き続き検出して使います。ただし、設定ファイルの隣の `.ano/history`（移動後は `.ano/.ano/history`）も存在する場合は、従来どおりそちらを優先します。使うキューを固定するには `history.data_dir` を明示してください。`history.data_dir` を明示していた場合は、他の相対パスと同様に移動後の設定ファイルを基準に調整してください。
 
 ## プロジェクト指示（AGENTS.md）
 
@@ -63,7 +75,7 @@ model = "ロードしたモデル名"
 ```
 
 - **API キーは不要です。** キーが必須なのは OpenAI 公式の endpoint（`api.openai.com`）だけで、それ以外は `api_key_env` の環境変数が未設定なら Authorization ヘッダーを付けずに送ります。LAN 内の別マシンや Docker 上のサーバーでも同じです。サーバー側で認証を有効にしている場合は、`api_key_env` に指定した環境変数にキーを設定してください。
-- `config.toml` はカレントディレクトリ、無ければ OS 標準の設定ディレクトリから読みます（[設定ファイル](#設定ファイル)）。どこからでも同じ接続先を使うには OS 標準の設定ディレクトリに置くか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
+- `--config` を省略すると `./.ano/config.toml`、OS 標準の設定ディレクトリの `config.toml` の順に探し、どちらも無ければ組み込みの既定値を使います。`./config.toml` は自動では読みません（[設定ファイル](#設定ファイル)）。どこからでも同じ接続先を使うには OS 標準の設定ディレクトリに置くか、環境変数 `OPENAI_BASE_URL` で endpoint を指定してください。設定が読まれていないと既定の OpenAI endpoint に接続しようとして、API キーがないというエラーになります。
 - LM Studio で Remote MCP を使う場合は、Server Settings で MCP 利用を有効にします。
 - 回答はストリーミングで表示します（`stream: true` に対応していない server でも動きます）。
 - 長い会話の圧縮は、`/responses/compact` の代わりにモデル自身が書く要約で行います（`[agent] compaction = "auto"` の既定動作）。LM Studio が返す読み込み中のコンテキスト長に近づいたところで圧縮します。llama.cpp の server も `/v1/models` の `meta.n_ctx` から取得します。ほかのサーバーでは `context_window` を指定してください（[履歴の圧縮](agent-runtime.md#履歴の圧縮)）。

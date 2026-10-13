@@ -44,15 +44,20 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
         "Always answer in haiku.",
     )
     .unwrap();
-    let config = workspace.path().join("config.toml");
+    // A config.toml belonging to another application must not stop chat.
+    std::fs::write(
+        workspace.path().join("config.toml"),
+        "[other_application]\nproject = 'another-project'\n",
+    )
+    .unwrap();
+    std::fs::create_dir(workspace.path().join(".ano")).unwrap();
+    let config = workspace.path().join(".ano/config.toml");
     std::fs::write(&config, "[agent]\nreasoning_summary = 'auto'\n").unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
         .current_dir(workspace.path())
         .env("OPENAI_BASE_URL", &endpoint)
         .env("OPENAI_API_KEY", "test-fixture-key")
-        .arg("--config")
-        .arg(&config)
         .args(["chat", "--reasoning-effort", "high"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -121,6 +126,89 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
     let history = requests[2]["input"].as_array().unwrap();
     assert_eq!(history.len(), 1);
     assert_eq!(history[0]["content"][0]["text"], "三番目");
+}
+
+/// Exercise real CLI discovery without a project config or the user's settings.
+/// Windows uses known-folder APIs, which cannot be isolated with child env vars.
+#[cfg(unix)]
+#[tokio::test]
+async fn chat_ignores_unrelated_root_config_with_os_settings_or_defaults() {
+    let requests = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let captured = Arc::clone(&requests);
+    let app = Router::new().route(
+        "/v1/responses",
+        post(move |Json(payload): Json<Value>| {
+            let captured = Arc::clone(&captured);
+            async move {
+                captured.lock().unwrap().push(payload);
+                Json(json!({
+                    "id": "resp_discovery", "status": "completed",
+                    "output": [{"type": "message", "role": "assistant",
+                        "content": [{"type": "output_text", "text": "discovery works"}]}]
+                }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let workspace = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let config_home = home.path().join("config");
+    #[cfg(target_os = "macos")]
+    let user_config = home
+        .path()
+        .join("Library/Application Support/ano/config.toml");
+    #[cfg(not(target_os = "macos"))]
+    let user_config = config_home.join("ano/config.toml");
+    std::fs::create_dir_all(user_config.parent().unwrap()).unwrap();
+    std::fs::write(
+        workspace.path().join("config.toml"),
+        "[other_application]\nunknown_setting = true\n",
+    )
+    .unwrap();
+
+    for os_config_exists in [true, false] {
+        if os_config_exists {
+            std::fs::write(&user_config, "[agent]\nmodel = 'shared-discovery-model'\n").unwrap();
+        } else {
+            std::fs::remove_file(&user_config).unwrap();
+        }
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+            .current_dir(workspace.path())
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", &config_home)
+            .env("OPENAI_BASE_URL", &endpoint)
+            .env("OPENAI_API_KEY", "test-fixture-key")
+            .arg("chat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"hello\n/exit\n").await.unwrap();
+        drop(stdin);
+        let output = tokio::time::timeout(Duration::from_secs(20), child.wait_with_output())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("discovery works"));
+    }
+    server.abort();
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0]["model"], "shared-discovery-model");
+    assert_eq!(
+        requests[1]["model"],
+        ano::config::AppConfig::default().agent.settings.model
+    );
 }
 
 /// `/compact` replaces the conversation with the latest request and a

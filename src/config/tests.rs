@@ -423,16 +423,156 @@ fn missing_explicit_config_file_is_an_error() {
 }
 
 #[test]
-fn a_config_file_in_the_current_directory_comes_before_the_os_one() {
+fn a_namespaced_project_config_comes_before_the_os_one() {
     let directory = tempfile::tempdir().unwrap();
-    let local = directory.path().join("config.toml");
+    let local = directory.path().join(".ano/config.toml");
     let user = PathBuf::from("/home/alice/.config/ano/config.toml");
-    // Without a local file, the OS one is used even before it exists, so the
+    // Without a project file, the OS one is used even before it exists, so
     // editing commands create it there.
-    assert_eq!(choose_config_path(local.clone(), Some(user.clone())), user);
-    assert_eq!(choose_config_path(local.clone(), None), local);
+    assert_eq!(
+        choose_config_path(directory.path(), Some(user.clone())),
+        user
+    );
+    assert_eq!(choose_config_path(directory.path(), None), local);
+    std::fs::create_dir(local.parent().unwrap()).unwrap();
     std::fs::write(&local, "").unwrap();
-    assert_eq!(choose_config_path(local.clone(), Some(user)), local);
+    assert_eq!(choose_config_path(directory.path(), Some(user)), local);
+}
+
+#[test]
+fn unrelated_config_toml_is_not_loaded_implicitly() {
+    let directory = tempfile::tempdir().unwrap();
+    let unrelated = directory.path().join("config.toml");
+    std::fs::write(&unrelated, "[other_application]\nproject = 'elsewhere'\n").unwrap();
+    let user = directory.path().join("user/ano/config.toml");
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    std::fs::write(&user, "[agent]\nmodel = 'shared-model'\n").unwrap();
+
+    let chosen = choose_config_path(directory.path(), Some(user.clone()));
+    assert_eq!(chosen, user);
+    assert_eq!(
+        AppConfig::load_or_default(chosen)
+            .unwrap()
+            .agent
+            .settings
+            .model,
+        "shared-model"
+    );
+
+    // With no OS config, unrelated TOML still does not prevent defaults.
+    let chosen = choose_config_path(directory.path(), None);
+    assert!(!chosen.exists());
+    assert!(AppConfig::load_or_default(chosen).is_ok());
+    // Explicitly selecting invalid settings remains an error.
+    assert!(AppConfig::load(&unrelated).is_err());
+    // Existing ano configs at the old location still work when selected.
+    std::fs::write(&unrelated, "[agent]\nmodel = 'explicit-model'\n").unwrap();
+    assert_eq!(
+        AppConfig::load(&unrelated).unwrap().agent.settings.model,
+        "explicit-model"
+    );
+}
+
+#[test]
+fn an_invalid_project_config_does_not_fall_back_to_the_os_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join(".ano/config.toml");
+    std::fs::create_dir(local.parent().unwrap()).unwrap();
+    std::fs::write(&local, "[agent]\nunknown_setting = true\n").unwrap();
+    let user = directory.path().join("user/config.toml");
+    std::fs::create_dir(user.parent().unwrap()).unwrap();
+    std::fs::write(&user, "").unwrap();
+    let chosen = choose_config_path(directory.path(), Some(user));
+    assert_eq!(chosen, local);
+    assert!(AppConfig::load_or_default(chosen).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_config_links_do_not_silently_fall_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let local = directory.path().join(".ano/config.toml");
+    let user = directory.path().join("user.toml");
+    std::fs::create_dir(local.parent().unwrap()).unwrap();
+    std::fs::write(&user, "").unwrap();
+    std::os::unix::fs::symlink("missing.toml", &local).unwrap();
+    assert_eq!(
+        choose_config_path(directory.path(), Some(user.clone())),
+        local
+    );
+    assert!(AppConfig::load_or_default(&local).is_err());
+
+    std::fs::remove_file(&local).unwrap();
+    std::fs::remove_file(&user).unwrap();
+    std::os::unix::fs::symlink("missing.toml", &user).unwrap();
+    assert_eq!(
+        choose_config_path(directory.path(), Some(user.clone())),
+        user
+    );
+    assert!(AppConfig::load_or_default(&user).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_config_parent_links_do_not_silently_fall_back() {
+    let directory = tempfile::tempdir().unwrap();
+    let local_dir = directory.path().join(".ano");
+    let local = local_dir.join("config.toml");
+    let user_dir = directory.path().join("user");
+    let user = user_dir.join("ano/config.toml");
+    std::fs::create_dir_all(user.parent().unwrap()).unwrap();
+    std::fs::write(&user, "").unwrap();
+    std::os::unix::fs::symlink("missing-directory", &local_dir).unwrap();
+    assert_eq!(
+        choose_config_path(directory.path(), Some(user.clone())),
+        local
+    );
+    assert!(AppConfig::load_or_default(&local).is_err());
+
+    std::fs::remove_file(&local_dir).unwrap();
+    std::fs::remove_dir_all(&user_dir).unwrap();
+    std::os::unix::fs::symlink("missing-directory", &user_dir).unwrap();
+    assert_eq!(
+        choose_config_path(directory.path(), Some(user.clone())),
+        user
+    );
+    assert!(AppConfig::load_or_default(&user).is_err());
+
+    // A valid parent symlink with no config file still permits defaults.
+    std::fs::remove_file(&user_dir).unwrap();
+    let target = directory.path().join("valid-directory");
+    std::fs::create_dir_all(target.join("ano")).unwrap();
+    std::os::unix::fs::symlink(&target, &user_dir).unwrap();
+    assert!(AppConfig::load_or_default(&user).is_ok());
+    std::os::unix::fs::symlink(&target, &local_dir).unwrap();
+    assert_eq!(
+        choose_config_path(directory.path(), Some(user.clone())),
+        user
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn inaccessible_project_config_does_not_silently_fall_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join(".ano");
+    let local = config_dir.join("config.toml");
+    let user = directory.path().join("user.toml");
+    std::fs::create_dir(&config_dir).unwrap();
+    std::fs::write(&local, "").unwrap();
+    std::fs::write(&user, "").unwrap();
+    std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let inaccessible = std::fs::symlink_metadata(&local).is_err();
+    let chosen = choose_config_path(directory.path(), Some(user));
+    let result = AppConfig::load_or_default(&chosen);
+    // Restore permissions before assertions so tempdir cleanup always works.
+    std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert_eq!(chosen, local);
+    // Elevated processes may still read the file despite the permission bits.
+    if inaccessible {
+        assert!(result.is_err());
+    }
 }
 
 #[test]
@@ -452,6 +592,90 @@ fn history_keeps_a_queue_left_in_the_former_default_directory() {
     assert_eq!(
         config.history.data_dir,
         Some(directory.path().join("queue"))
+    );
+}
+
+#[test]
+fn moving_project_config_into_ano_keeps_the_legacy_history_queue() {
+    let directory = tempfile::tempdir().unwrap();
+    let project_config_dir = directory.path().join(".ano");
+    let legacy = project_config_dir.join("history");
+    std::fs::create_dir_all(&legacy).unwrap();
+    let config_path = project_config_dir.join("config.toml");
+    std::fs::write(&config_path, "[history]\nenabled = true\n").unwrap();
+    let config = AppConfig::load(&config_path).unwrap();
+    assert_eq!(
+        config.history.data_dir,
+        Some(std::fs::canonicalize(&legacy).unwrap())
+    );
+
+    // An explicit queue remains authoritative after moving the config.
+    std::fs::write(&config_path, "[history]\ndata_dir = 'other-queue'\n").unwrap();
+    let config = AppConfig::load(&config_path).unwrap();
+    assert_eq!(
+        config.history.data_dir,
+        Some(
+            std::fs::canonicalize(&project_config_dir)
+                .unwrap()
+                .join("other-queue")
+        )
+    );
+
+    // An unrelated history directory next to an OS or explicit config is
+    // not a project queue.
+    let other = directory.path().join("other");
+    std::fs::create_dir_all(other.join("history")).unwrap();
+    let mut config = AppConfig::default();
+    config.resolve_paths(&other, None).unwrap();
+    assert_eq!(config.history.data_dir, None);
+}
+
+#[test]
+fn config_relative_history_queue_takes_precedence_over_migrated_queue() {
+    let directory = tempfile::tempdir().unwrap();
+    let config_dir = directory.path().join(".ano");
+    let old_default = config_dir.join(".ano/history");
+    std::fs::create_dir_all(&old_default).unwrap();
+    std::fs::create_dir(config_dir.join("history")).unwrap();
+    let path = config_dir.join("config.toml");
+    std::fs::write(&path, "[history]\nenabled = true\n").unwrap();
+    assert_eq!(
+        AppConfig::load(path).unwrap().history.data_dir,
+        Some(std::fs::canonicalize(old_default).unwrap())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn moving_config_into_a_symlinked_ano_keeps_the_legacy_history_queue() {
+    let project = tempfile::tempdir().unwrap();
+    let storage = tempfile::tempdir().unwrap();
+    let legacy = storage.path().join("history");
+    std::fs::create_dir(&legacy).unwrap();
+    std::os::unix::fs::symlink(storage.path(), project.path().join(".ano")).unwrap();
+    let old_config = project.path().join("config.toml");
+    let new_config = project.path().join(".ano/config.toml");
+    std::fs::write(&old_config, "[history]\nenabled = true\n").unwrap();
+    let previous = AppConfig::load(&old_config)
+        .unwrap()
+        .history
+        .data_dir
+        .unwrap();
+    std::fs::rename(&old_config, &new_config).unwrap();
+    let config = AppConfig::load(&new_config).unwrap();
+    assert_eq!(
+        config.history.data_dir,
+        Some(std::fs::canonicalize(previous).unwrap())
+    );
+
+    std::fs::write(&new_config, "[history]\ndata_dir = 'other-queue'\n").unwrap();
+    assert_eq!(
+        AppConfig::load(&new_config).unwrap().history.data_dir,
+        Some(
+            std::fs::canonicalize(storage.path())
+                .unwrap()
+                .join("other-queue")
+        )
     );
 }
 

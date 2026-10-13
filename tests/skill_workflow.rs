@@ -84,6 +84,7 @@ async fn runs_read_listed_skills_and_save_approved_improvements() {
             .current_dir(directory.path())
             .env("OPENAI_BASE_URL", &endpoint)
             .env("OPENAI_API_KEY", "test-fixture-key")
+            .args(["--config", "config.toml"])
             .args([
                 "run",
                 "--approval-mode",
@@ -149,7 +150,7 @@ async fn runs_read_listed_skills_and_save_approved_improvements() {
 
     let listed = Command::new(env!("CARGO_BIN_EXE_ano"))
         .current_dir(directory.path())
-        .arg("skills")
+        .args(["--config", "config.toml", "skills"])
         .output()
         .await
         .unwrap();
@@ -178,7 +179,7 @@ async fn chat_skill_command_asks_the_model_to_save_what_worked() {
         .current_dir(directory.path())
         .env("OPENAI_BASE_URL", &endpoint)
         .env("OPENAI_API_KEY", "test-fixture-key")
-        .arg("chat")
+        .args(["--config", "config.toml", "chat"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
