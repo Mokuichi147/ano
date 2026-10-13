@@ -41,10 +41,11 @@ use std::{path::PathBuf, sync::Arc};
     about = "Autonomous Rust agent powered by the OpenAI Responses API"
 )]
 struct Cli {
-    /// Config file. Defaults to ./config.toml when present, otherwise
+    /// Config file. Defaults to ./.ano/config.toml when present, otherwise
     /// config.toml in the OS config directory (macOS: ~/Library/Application
-    /// Support/ano, Linux: ~/.config/ano, Windows: %APPDATA%\ano\config); an
-    /// explicitly given path must exist.
+    /// Support/ano, Linux: $XDG_CONFIG_HOME/ano or ~/.config/ano, Windows:
+    /// %APPDATA%\ano\config). Uses built-in defaults when neither exists;
+    /// an explicitly given path must exist.
     #[arg(long, global = true, value_name = "PATH")]
     config: Option<PathBuf>,
 

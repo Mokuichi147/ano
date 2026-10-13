@@ -54,7 +54,7 @@ ano run --json --quiet "実装の概要を説明して" | jq .outcome
 
 ## 設定
 
-設定ファイル `config.toml` は、カレントディレクトリ、無ければ OS 標準の設定ディレクトリ（macOS は `~/Library/Application Support/ano`、Linux は `~/.config/ano`、Windows は `%APPDATA%\ano\config`）から読みます。全項目の例は [config.example.toml](config.example.toml)、読み込み順と各セクションは [docs/configuration.md](docs/configuration.md) を参照してください。API キーは設定ファイルに書かず、環境変数か `.env` から読み込みます。
+`--config` を省略すると、カレントディレクトリの `./.ano/config.toml`、OS 標準の設定ディレクトリ（macOS は `~/Library/Application Support/ano`、Linux は `$XDG_CONFIG_HOME/ano`（既定 `~/.config/ano`）、Windows は `%APPDATA%\ano\config`）の `config.toml` の順に探し、どちらも無ければ組み込みの既定値で動きます。無関係な `./config.toml` は自動では読みませんが、`--config config.toml` で明示すれば使えます。全項目の例は [config.example.toml](config.example.toml)、読み込み順と各セクションは [docs/configuration.md](docs/configuration.md) を参照してください。API キーは設定ファイルに書かず、環境変数か `.env` から読み込みます。
 
 ローカル AI は `[api]` の `base_url` を差し替えるだけで使えます。
 

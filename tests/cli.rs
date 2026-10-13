@@ -100,6 +100,82 @@ async fn cli_runs_profile_reads_workspace_and_emits_json() {
 }
 
 #[tokio::test]
+async fn cli_explicit_config_overrides_discovery_and_remains_strict() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::create_dir(directory.path().join(".ano")).unwrap();
+    std::fs::write(directory.path().join(".ano/config.toml"), "").unwrap();
+    std::fs::write(
+        directory.path().join("config.toml"),
+        "[presets.explicit]\nmodel = 'explicit-model'\n",
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .current_dir(directory.path())
+        .args(["--config", "config.toml", "preset", "list"])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("explicit") && stdout.contains("explicit-model"),
+        "{stdout}"
+    );
+
+    for (path, expected) in [
+        ("missing.toml", "failed to read config file"),
+        ("config.toml", "invalid config file"),
+    ] {
+        std::fs::write(
+            directory.path().join("config.toml"),
+            "[other_application]\nunknown = true\n",
+        )
+        .unwrap();
+        let output = Command::new(env!("CARGO_BIN_EXE_ano"))
+            .current_dir(directory.path())
+            .args(["--config", path, "preset", "list"])
+            .output()
+            .await
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+    }
+}
+
+#[tokio::test]
+async fn cli_config_edits_target_namespaced_project_config() {
+    let directory = tempfile::tempdir().unwrap();
+    let unrelated = directory.path().join("config.toml");
+    let unrelated_text = "[other_application]\nunknown = true\n";
+    std::fs::write(&unrelated, unrelated_text).unwrap();
+    let project = directory.path().join(".ano/config.toml");
+    std::fs::create_dir(project.parent().unwrap()).unwrap();
+    std::fs::write(&project, "# project settings\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .current_dir(directory.path())
+        .args(["preset", "add", "project", "--model", "project-model"])
+        .output()
+        .await
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read_to_string(unrelated).unwrap(), unrelated_text);
+    assert_eq!(
+        ano::config::AppConfig::load(project).unwrap().presets["project"]
+            .model
+            .as_deref(),
+        Some("project-model")
+    );
+}
+
+#[tokio::test]
 async fn cli_rejects_unknown_user_before_connecting() {
     let directory = tempfile::tempdir().unwrap();
     let config = directory.path().join("config.toml");

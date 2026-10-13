@@ -18,18 +18,28 @@ chronotope は、原文・取得時刻・出典内の位置・変更履歴を保
 
 ## 使い始める
 
-chronotope の HTTP サーバーを起動し、`config.toml` で `[history] enabled = true` を設定する。
+chronotope の HTTP サーバーを起動し、プロジェクトの `.ano/config.toml` または OS 標準の設定ディレクトリの `config.toml` で `[history] enabled = true` を設定する。プロジェクト直下の `config.toml` は自動では読み込まないため、そのファイルを使う場合は以下の各 `ano` コマンドに `--config ./config.toml` を指定する。探索順と既存設定の移行方法は [設定ファイル](configuration.md#既存のプロジェクト設定の移行) を参照。
 `data_dir` は ano が先に書き込む未送信キューなので、プロセスや chronotope の再起動後も削除しない。
 省略時は OS 標準のデータディレクトリの `history`（macOS は `~/Library/Application Support/ano/history`、
 Linux は `$XDG_DATA_HOME/ano/history`、既定 `~/.local/share/ano/history`）に置く。以前の既定の保存先（設定ファイルの隣の `.ano/history`）が
-残っていれば、未送信分を失わないようそちらを使い続ける。設定ファイルを OS 標準の設定ディレクトリへ移す場合は、
+残っていれば、未送信分を失わないようそちらを使い続ける。プロジェクト設定を `.ano/config.toml` に移しても、プロジェクトの `.ano/history` を検出する（他の旧キューもある場合の優先順位は [設定の移行方法](configuration.md#既存のプロジェクト設定の移行) を参照）。設定ファイルを OS 標準の設定ディレクトリへ移す場合は、
 先に `ano history sync` で未送信分を送るか、`data_dir` に以前の `.ano/history` の絶対パスを指定する。
+
+`.ano/config.toml` または OS 共通設定を使う場合:
 
 ```sh
 chronotope serve --data .ano/chronotope --addr 127.0.0.1:7878
 ano run --environment default "前回の依頼を確認して"
 ano history status
 ano history sync
+```
+
+旧 `./config.toml` を移動せず使う場合、ano のコマンドは次のように明示する:
+
+```sh
+ano --config ./config.toml run --environment default "前回の依頼を確認して"
+ano --config ./config.toml history status
+ano --config ./config.toml history sync
 ```
 
 `token_env` を設定する場合は、指定した環境変数に HTTP Bearer token を入れる。公開環境では、
