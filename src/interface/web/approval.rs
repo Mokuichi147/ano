@@ -102,6 +102,7 @@ mod tests {
     fn request() -> McpApprovalRequest {
         McpApprovalRequest {
             approval_request_id: "call".into(),
+            call_id: None,
             source: ApprovalSource::LocalTool,
             server_label: String::new(),
             tool_name: "workspace_exec".into(),

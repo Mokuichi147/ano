@@ -14,6 +14,7 @@ repository = "https://github.com/mokuichi147/ano"
 readme = "README.md"
 
 [dependencies]
+agent-client-protocol = { version = "3.4", features = ["stdio"] }
 anyhow = "1.0"
 axum = "0.8"
 async-trait = "0.1"

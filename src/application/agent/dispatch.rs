@@ -215,6 +215,7 @@ impl Agent {
         if name == TASK_PLAN_NAME {
             if self.policy.is_disabled(TASK_PLAN_NAME) {
                 events.push(AgentEvent::LocalToolBlocked {
+                    call_id: scope.call_id.map(str::to_string),
                     round,
                     name: name.into(),
                 });
@@ -254,6 +255,7 @@ impl Agent {
         if name == TOOL_SEARCH_NAME {
             if self.policy.is_disabled(TOOL_SEARCH_NAME) {
                 events.push(AgentEvent::LocalToolBlocked {
+                    call_id: scope.call_id.map(str::to_string),
                     round,
                     name: name.to_string(),
                 });
@@ -308,12 +310,14 @@ impl Agent {
         }
 
         events.push(AgentEvent::LocalToolCall {
+            call_id: scope.call_id.map(str::to_string),
             round,
             name: name.to_string(),
             arguments: arguments.clone(),
         });
         if self.policy.is_disabled(name) || !self.policy.is_allowed(name) {
             events.push(AgentEvent::LocalToolBlocked {
+                call_id: scope.call_id.map(str::to_string),
                 round,
                 name: name.to_string(),
             });
@@ -327,18 +331,23 @@ impl Agent {
             ));
         }
         let Some(definition) = self.registry.definition(name) else {
-            return Ok((
-                json!({
-                    "error": "tool_not_registered",
-                    "tool": name,
-                    "message": "The requested local tool is not registered. Use tool_search to find available tools."
-                }),
-                None,
-            ));
+            let output = json!({
+                "error": "tool_not_registered",
+                "tool": name,
+                "message": "The requested local tool is not registered. Use tool_search to find available tools."
+            });
+            events.push(AgentEvent::LocalToolResult {
+                round,
+                call_id: scope.call_id.map(str::to_string),
+                name: name.to_string(),
+                output: output.clone(),
+            });
+            return Ok((output, None));
         };
         let arguments = definition.declared_arguments(arguments);
         if !definition.always_offered && !active.local.contains(name) {
             events.push(AgentEvent::LocalToolBlocked {
+                call_id: scope.call_id.map(str::to_string),
                 round,
                 name: name.to_string(),
             });
@@ -354,6 +363,7 @@ impl Agent {
 
         if !definition.can_run(tool_context) {
             events.push(AgentEvent::LocalToolBlocked {
+                call_id: scope.call_id.map(str::to_string),
                 round,
                 name: name.to_string(),
             });
@@ -374,6 +384,7 @@ impl Agent {
         for extension in &self.extensions {
             if let Some(refusal) = extension.check_call(name, &arguments, &run).await {
                 events.push(AgentEvent::LocalToolResult {
+                    call_id: scope.call_id.map(str::to_string),
                     round,
                     name: name.to_string(),
                     output: refusal.clone(),
@@ -386,6 +397,7 @@ impl Agent {
                 .request_approval(
                     scope.deny_approvals,
                     McpApprovalRequest {
+                        call_id: scope.call_id.map(str::to_string),
                         approval_request_id: uuid::Uuid::new_v4().to_string(),
                         source: ApprovalSource::LocalTool,
                         tool_name: name.to_string(),
@@ -397,6 +409,7 @@ impl Agent {
                 )
                 .await?;
             events.push(AgentEvent::LocalToolApproval {
+                call_id: scope.call_id.map(str::to_string),
                 round,
                 name: name.to_string(),
                 approved: decision.approved,
@@ -409,6 +422,7 @@ impl Agent {
                     "message": denial_message(decision.reason.as_deref(), "call"),
                 });
                 events.push(AgentEvent::LocalToolResult {
+                    call_id: scope.call_id.map(str::to_string),
                     round,
                     name: name.to_string(),
                     output: output.clone(),
@@ -444,6 +458,7 @@ impl Agent {
             }),
         };
         events.push(AgentEvent::LocalToolResult {
+            call_id: scope.call_id.map(str::to_string),
             round,
             name: name.to_string(),
             output: output.clone(),
@@ -541,6 +556,7 @@ impl Agent {
             || !definition.can_run(scope.tool_context)
         {
             scope.events.push(AgentEvent::LocalToolBlocked {
+                call_id: scope.call_id.map(str::to_string),
                 round: scope.round,
                 name: name.into(),
             });
@@ -561,6 +577,7 @@ impl Agent {
                 .request_approval(
                     scope.deny_approvals,
                     McpApprovalRequest {
+                        call_id: scope.call_id.map(str::to_string),
                         approval_request_id: uuid::Uuid::new_v4().to_string(),
                         source: ApprovalSource::LocalTool,
                         tool_name: name.to_string(),
@@ -572,6 +589,7 @@ impl Agent {
                 )
                 .await?;
             scope.events.push(AgentEvent::LocalToolApproval {
+                call_id: scope.call_id.map(str::to_string),
                 round: scope.round,
                 name: name.to_string(),
                 approved: decision.approved,
@@ -609,6 +627,7 @@ impl Agent {
             return None;
         }
         scope.events.push(AgentEvent::LocalToolBlocked {
+            call_id: scope.call_id.map(str::to_string),
             round: scope.round,
             name: name.into(),
         });
@@ -672,6 +691,7 @@ impl Agent {
             usage_sink: Some(&spent),
         };
         events.push(AgentEvent::SubagentStarted {
+            call_id: scope.call_id.map(str::to_string),
             round,
             task: spec.task,
             model: self.target(&origin).model.to_string(),
@@ -686,6 +706,7 @@ impl Agent {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .add(&spent);
         events.push(AgentEvent::SubagentFinished {
+            call_id: scope.call_id.map(str::to_string),
             round,
             outcome: result.as_ref().ok().map(|result| result.outcome),
             usage: spent,
@@ -759,6 +780,7 @@ impl Agent {
             self.request_approval(scope.deny_approvals, request).await?
         } else {
             events.push(AgentEvent::McpToolBlocked {
+                call_id: scope.call_id.map(str::to_string),
                 round,
                 server_label: request.server_label.clone(),
                 tool_name: request.tool_name.clone(),
@@ -769,6 +791,7 @@ impl Agent {
             }
         };
         events.push(AgentEvent::McpApproval {
+            call_id: scope.call_id.map(str::to_string),
             round,
             server_label: request.server_label.clone(),
             tool_name: request.tool_name.clone(),
@@ -799,6 +822,7 @@ impl Agent {
             || !server.config().is_tool_allowed(&self.policy, &tool.name)
         {
             events.push(AgentEvent::McpToolBlocked {
+                call_id: scope.call_id.map(str::to_string),
                 round,
                 server_label,
                 tool_name,
@@ -810,6 +834,7 @@ impl Agent {
         }
 
         events.push(AgentEvent::McpToolCall {
+            call_id: scope.call_id.map(str::to_string),
             round,
             server_label: server_label.clone(),
             tool_name: tool_name.clone(),
@@ -818,6 +843,7 @@ impl Agent {
 
         if server.config().requires_approval() {
             let approval_request = McpApprovalRequest {
+                call_id: scope.call_id.map(str::to_string),
                 approval_request_id: uuid::Uuid::new_v4().to_string(),
                 source: ApprovalSource::Mcp,
                 server_label: server_label.clone(),
@@ -830,6 +856,7 @@ impl Agent {
                 .request_approval(scope.deny_approvals, approval_request)
                 .await?;
             events.push(AgentEvent::McpApproval {
+                call_id: scope.call_id.map(str::to_string),
                 round,
                 server_label: server_label.clone(),
                 tool_name: tool_name.clone(),
@@ -842,6 +869,7 @@ impl Agent {
                     "message": denial_message(decision.reason.as_deref(), "MCP tool call")
                 });
                 events.push(AgentEvent::McpToolResult {
+                    call_id: scope.call_id.map(str::to_string),
                     round,
                     server_label,
                     tool_name,
@@ -865,6 +893,7 @@ impl Agent {
             }),
         };
         events.push(AgentEvent::McpToolResult {
+            call_id: scope.call_id.map(str::to_string),
             round,
             server_label,
             tool_name,

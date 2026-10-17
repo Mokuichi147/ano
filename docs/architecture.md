@@ -7,6 +7,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 │ interface                                                        │
 │  cli（コマンドと端末での表示・承認）  webhook（axum・自動化）     │
 │  web（ブラウザの UI のサーバー。画面は web-ui/ の wasm）          │
+│  acp（エディタと Agent Client Protocol で話す stdio のサーバー）   │
 └──────────────────────────────┬───────────────────────────────────┘
                                │ Agent を組み立てさせる
                                ▼
@@ -78,7 +79,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
   - スキーマで追加の引数を禁じた登録済みの tool と拡張の tool（`additionalProperties: false`）では、宣言にない最上位の引数を実行前に捨てます。MCP tool の引数の検証はサーバーに任せます。`git_commit_push` のレビュー済みのファイル（`reviewed`）のように実行時に加える引数は、モデルからは渡せず、拡張の `prepare_call` だけが加えられます。
 - **サブエージェントのロール。** `SubagentModels` はロール名（`delegate`、ハーネスの `review` など）ごとのモデルを持ちます。
 - **instructions と設定。** 実行ループの `AgentSettings` は、ループ自身の tool（`task_plan`・`tool_search`・`delegate_task`）だけを前提にした既定の instructions を持ちます。`[agent]` を受けるハーネスの `AgentConfig` は、instructions を書かなければ workspace・git・web の tool の使い方を含むハーネスの既定（`DEFAULT_INSTRUCTIONS`）を使います。AGENTS.md とスキルの一覧もハーネスが instructions に加えます。
-- **組み立て（`Harness`）。** 組み込み tool・原文履歴・スキルの登録と、実行ごとの `Agent` の組み立て（instructions の追記、ロールのモデル、承認モードに応じた承認ハンドラー、`ReviewGate`、原文履歴）を1か所で行います。CLI（`run`・`chat`）と Webhook は、実行設定（`ExecutionProfile`）とモデルを解決して `Harness` に渡し、進捗の表示や記録のリスナーだけを自分で付けます。
+- **組み立て（`Harness`）。** 組み込み tool・原文履歴・スキルの登録と、実行ごとの `Agent` の組み立て（instructions の追記、ロールのモデル、承認モードに応じた承認ハンドラー、`ReviewGate`、原文履歴）を1か所で行います。CLI（`run`・`chat`）・Web UI・ACP・Webhook は、実行設定（`ExecutionProfile`）とモデルを解決して `Harness` に渡し、進捗の表示や記録のリスナーだけを自分で付けます。
 
 ## ディレクトリ構成
 
@@ -157,6 +158,7 @@ src/
 │       └── process.rs      子プロセスの実行（期限・出力上限・プロセスグループの停止）
 └── interface/
     ├── cli/                clap による CLI（run・chat・tools・session・serve・web）、進捗表示、端末での承認
+    ├── acp/                ano acp（Agent Client Protocol のセッション・イベントの変換・エディタでの承認）
     ├── web/                ano web のサーバー（セッション・SSE のイベント・ブラウザでの承認・Markdown の HTML 化）と、埋め込む画面
     └── webhook/            署名付き Webhook、ジョブ管理、自動化（automation/: 登録された種類のソースを動かし、振り分け・通知する）
 

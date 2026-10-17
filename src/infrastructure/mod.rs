@@ -9,6 +9,8 @@ pub mod chatgpt;
 pub mod chronotope;
 pub mod fallback;
 pub(crate) mod fs;
+#[cfg(unix)]
+pub mod login_shell;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod memory_store;

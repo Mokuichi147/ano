@@ -20,6 +20,8 @@ pub enum ApprovalMode {
 
 impl ApprovalMode {
     pub const NAMES: &'static [&'static str] = &["ask", "auto", "allow", "deny"];
+    /// Every mode, in the order of [`Self::NAMES`].
+    pub const ALL: [Self; 4] = [Self::Ask, Self::Auto, Self::Allow, Self::Deny];
 
     pub fn as_str(self) -> &'static str {
         match self {

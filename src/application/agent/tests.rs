@@ -954,6 +954,7 @@ fn close_issue_server() -> McpServerConfig {
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
         unavailable: None,
+        given: Default::default(),
     }
 }
 
@@ -1082,6 +1083,7 @@ async fn responses_mcp_servers_with_unresolved_settings_are_left_out() {
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
         unavailable: None,
+        given: Default::default(),
     };
     let mut unresolved_url = server("github");
     unresolved_url.url = Some("https://example.test/mcp?key=${ANO_TEST_UNSET_KEY}".into());
@@ -1174,6 +1176,7 @@ async fn responses_mcp_approval_requires_policy_and_selection() {
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
         unavailable: None,
+        given: Default::default(),
     };
     let agent = agent(ToolRegistry::new(), vec![server.clone()]);
     let request = |tool: &str| McpApprovalRequest {
@@ -1260,6 +1263,7 @@ fn remote_server(label: &str) -> McpServerConfig {
         require_approval: McpApprovalMode::Always,
         reuse_connection: true,
         unavailable: None,
+        given: Default::default(),
     }
 }
 
