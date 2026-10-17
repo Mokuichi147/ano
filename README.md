@@ -1,6 +1,6 @@
 # ano
 
-Rust 製の自律型 AI エージェントと、それを動かすハーネスです。エージェント（実行ループ）はモデルが返した function call を自動で実行し、結果を次のリクエストへ返して、ファイルの調査・編集・検証のような複数ステップの作業を進めます。ハーネスは、workspace で作業するための tool・権限・承認・指示をエージェントに加えます（[アーキテクチャ](docs/architecture.md#エージェントとハーネス)）。CLI・ブラウザの Web UI・Zed などのエディタ（ACP）・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
+Rust 製の自律型 AI エージェントと、それを動かすハーネスです。エージェント（実行ループ）はモデルが返した function call を自動で実行し、結果を次のリクエストへ返して、ファイルの調査・編集・検証のような複数ステップの作業を進めます。ハーネスは、workspace で作業するための tool・権限・承認・指示をエージェントに加えます（[アーキテクチャ](docs/architecture.md#エージェントとハーネス)）。CLI・ブラウザの Web UI・ACP に対応したエディタ・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
 
 ## 特長
 
@@ -11,7 +11,7 @@ Rust 製の自律型 AI エージェントと、それを動かすハーネス�
 - **接続先。** OpenAI、ChatGPT サブスクリプション（実験的）、LM Studio・Ollama などのローカル AI（`/v1/responses` と `/v1/chat/completions`）。名前付きの接続先・フォールバック・プリセットで切り替え
 - **長い作業への対応。** 保存・再開できる会話セッション、長い会話の自動圧縮、トークン上限、chronotope への履歴の保存、手順をスキル（`SKILL.md`）として保存
 - **入出力。** 対話モード（`ano chat`）、回答のストリーミング表示、画像・音声入力、JSON 出力、プロジェクト指示（`AGENTS.md`）の自動読み込み
-- **連携。** Web UI（`ano web`）、Agent Client Protocol による Zed などのエディタとの連携（`ano acp`）、署名付き Webhook と非同期ジョブ API（`ano serve`）、GitHub MCP と組み合わせた Issue の解決から Pull Request の作成まで
+- **連携。** Web UI（`ano web`）、Agent Client Protocol に対応したエディタとの連携（`ano acp`）、署名付き Webhook と非同期ジョブ API（`ano serve`）、GitHub MCP と組み合わせた Issue の解決から Pull Request の作成まで
 - **自動化と通知。** POST されたイベント（レポート・監視の結果・cron からの起動など）を受けて、判定用モデルが無視・通知・作業のどれにするかを決め、ntfy・Discord・Slack などへ通知（`[automation]`）
 
 ## クイックスタート
@@ -39,7 +39,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano run [PROMPT]` | タスクを実行します。PROMPT を省略すると stdin から読みます |
 | `ano chat` | 同じ会話で複数ターンのやり取りをします（`/model`・`/preset`・`/goal`・`/compact` などのコマンドあり） |
 | `ano web` | ブラウザで対話する Web UI を起動します（[docs/web.md](docs/web.md)） |
-| `ano acp` | Zed などのエディタから起動され、Agent Client Protocol で対話します（[docs/acp.md](docs/acp.md)） |
+| `ano acp` | ACP に対応したエディタから起動され、Agent Client Protocol で対話します（[docs/acp.md](docs/acp.md)） |
 | `ano serve` | Webhook サーバーを起動します。`[automation]` があれば、イベントへの反応と通知も行います（[docs/webhook.md](docs/webhook.md)、[docs/automation.md](docs/automation.md)） |
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano provider` / `ano model` / `ano preset` | 接続先・モデル・プリセットを、設定ファイルを直接編集せずに管理します（[docs/providers.md](docs/providers.md)） |

@@ -8,7 +8,7 @@
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
 | `ano web` | ブラウザで対話する Web UI を起動します。セッションごとに作業フォルダ・環境・プリセット・権限・承認モードを選べます（[docs/web.md](web.md)） |
-| `ano acp` | Zed などのエディタから起動され、Agent Client Protocol で対話します。エディタで開いたフォルダで作業し、承認はエディタで答えます（[docs/acp.md](acp.md)） |
+| `ano acp` | ACP に対応したエディタから起動され、Agent Client Protocol で対話します。エディタで開いたフォルダで作業し、承認はエディタで答えます（[docs/acp.md](acp.md)） |
 | `ano serve` | Webhook サーバーを起動します。`[automation]` があれば、送られたイベントへの反応と通知も行います（[docs/webhook.md](webhook.md)、[docs/automation.md](automation.md)） |
 | `ano automation list` / `ano automation notify NAME [MESSAGE]` | 自動化のソース・ルール・通知先を表示し、通知先へテストを送ります（[`ano automation`](automation.md#ano-automation)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](chronotope-history.md)） |

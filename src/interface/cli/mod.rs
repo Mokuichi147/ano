@@ -74,8 +74,8 @@ enum Command {
     /// Talk with the agent in the browser, in sessions with their own
     /// working folder, permissions, and model.
     Web(WebArgs),
-    /// Serve an editor (such as Zed) over the Agent Client Protocol on stdin
-    /// and stdout; each session works in the folder the editor opened.
+    /// Serve an editor over the Agent Client Protocol on stdin and stdout;
+    /// each session works in the folder the editor opened.
     Acp(AcpArgs),
     /// Inspect saved conversation state without contacting the model.
     Session(SessionArgs),
