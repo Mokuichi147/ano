@@ -1,7 +1,7 @@
-//! `ano acp`: the agent over the Agent Client Protocol. An editor such as
-//! Zed starts `ano acp` and talks JSON-RPC with it over stdin and stdout;
-//! each session works in the folder the editor gives, with the permissions
-//! of the command line or of a configured environment.
+//! `ano acp`: the agent over the Agent Client Protocol. An editor that
+//! speaks ACP starts `ano acp` and talks JSON-RPC with it over stdin and
+//! stdout; each session works in the folder the editor gives, with the
+//! permissions of the command line or of a configured environment.
 //!
 //! Only protocol messages go to stdout. Warnings go to stderr, which editors
 //! keep in their logs.

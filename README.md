@@ -1,18 +1,16 @@
 # ano
 
-Rust 製の自律型 AI エージェントと、それを動かすハーネスです。エージェント（実行ループ）はモデルが返した function call を自動で実行し、結果を次のリクエストへ返して、ファイルの調査・編集・検証のような複数ステップの作業を進めます。ハーネスは、workspace で作業するための tool・権限・承認・指示をエージェントに加えます（[アーキテクチャ](docs/architecture.md#エージェントとハーネス)）。CLI・ブラウザの Web UI・Zed などのエディタ（ACP）・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
+ターミナル・ブラウザ・エディタから使える AI エージェントです。依頼すると、ファイルを調べて編集し、コマンドで確かめるところまで自分で進めます。OpenAI、ChatGPT サブスクリプション、LM Studio・Ollama などのローカル AI で動き、Rust ライブラリとして組み込むこともできます。
 
 ## 特長
 
-- **自律的な作業。** 作業計画（`task_plan`）と完了判定、ゴール（`--goal` / `/goal`）の達成まで続ける実行、サブエージェント（`delegate_task`）、別の会話でのレビュー（`review_changes`）
-- **workspace に閉じた tool。** ファイルの一覧・検索・読み書き・競合検出付きの編集、検証コマンドの実行、承認付きのシェルコマンド実行（`workspace_exec`）と Web ページの取得（`web_fetch`）
-- **MCP。** リモート MCP（Responses API 経由）と直接接続（stdio / Streamable HTTP、OAuth 対応）、tool の遅延公開（`tool_search`）
-- **承認とポリシー。** ユーザー・実行環境ごとの tool の allowlist / denylist と、確認・判定用モデルによる自動審査・許可・拒否を選べる承認モード
-- **接続先。** OpenAI、ChatGPT サブスクリプション（実験的）、LM Studio・Ollama などのローカル AI（`/v1/responses` と `/v1/chat/completions`）。名前付きの接続先・フォールバック・プリセットで切り替え
-- **長い作業への対応。** 保存・再開できる会話セッション、長い会話の自動圧縮、トークン上限、chronotope への履歴の保存、手順をスキル（`SKILL.md`）として保存
-- **入出力。** 対話モード（`ano chat`）、回答のストリーミング表示、画像・音声入力、JSON 出力、プロジェクト指示（`AGENTS.md`）の自動読み込み
-- **連携。** Web UI（`ano web`）、Agent Client Protocol による Zed などのエディタとの連携（`ano acp`）、署名付き Webhook と非同期ジョブ API（`ano serve`）、GitHub MCP と組み合わせた Issue の解決から Pull Request の作成まで
-- **自動化と通知。** POST されたイベント（レポート・監視の結果・cron からの起動など）を受けて、判定用モデルが無視・通知・作業のどれにするかを決め、ntfy・Discord・Slack などへ通知（`[automation]`）
+- **最後まで任せられる。** 作業計画を立て、ゴール（`--goal`）を満たすまで作業を続けます。サブエージェントへの分担や、別の会話での変更のレビューもできます
+- **任せる範囲を決められる。** ファイルの読み書きは作業フォルダの中だけで行い、書き込みとコマンド実行は許可した場合にだけ行います。操作ごとに確認するか、判定用モデルに任せるかを選べます
+- **好きなモデルで。** OpenAI、ChatGPT サブスクリプション、LM Studio・Ollama などのローカル AI。接続先の切り替えやフォールバックもできます
+- **いろいろな使い方。** ターミナル（`ano run` / `ano chat`）、ブラウザ（`ano web`）、ACP に対応したエディタ（`ano acp`）、Webhook（`ano serve`）。画像・音声の入力と JSON 出力にも対応します
+- **MCP で拡張。** GitHub などの MCP server をつないで、できることを増やせます（OAuth 対応）
+- **長い作業にも。** 会話の保存と再開、長い会話の自動圧縮、よく使う手順のスキル化。プロジェクトの `AGENTS.md` も自動で読み込みます
+- **自動化と通知。** 届いたイベント（cron・監視・GitHub など）を見て、無視・通知・作業のどれにするかを判定用モデルが決め、ntfy・Discord・Slack などへ知らせます
 
 ## クイックスタート
 
@@ -36,15 +34,15 @@ ano run --environment default "README とソースを読み、実装の概要を
 
 | コマンド | 内容 |
 | --- | --- |
-| `ano run [PROMPT]` | タスクを実行します。PROMPT を省略すると stdin から読みます |
-| `ano chat` | 同じ会話で複数ターンのやり取りをします（`/model`・`/preset`・`/goal`・`/compact` などのコマンドあり） |
-| `ano web` | ブラウザで対話する Web UI を起動します（[docs/web.md](docs/web.md)） |
-| `ano acp` | Zed などのエディタから起動され、Agent Client Protocol で対話します（[docs/acp.md](docs/acp.md)） |
-| `ano serve` | Webhook サーバーを起動します。`[automation]` があれば、イベントへの反応と通知も行います（[docs/webhook.md](docs/webhook.md)、[docs/automation.md](docs/automation.md)） |
-| `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
-| `ano provider` / `ano model` / `ano preset` | 接続先・モデル・プリセットを、設定ファイルを直接編集せずに管理します（[docs/providers.md](docs/providers.md)） |
+| `ano run [PROMPT]` | 依頼を 1 回実行します。PROMPT を省略すると stdin から読みます |
+| `ano chat` | 対話しながら作業を続けます（`/model`・`/goal`・`/compact` などのコマンドあり） |
+| `ano web` | ブラウザで使う画面を起動します（[docs/web.md](docs/web.md)） |
+| `ano acp` | ACP に対応したエディタから使います（[docs/acp.md](docs/acp.md)） |
+| `ano serve` | Webhook を受けて作業や通知をするサーバーを起動します（[docs/webhook.md](docs/webhook.md)、[docs/automation.md](docs/automation.md)） |
+| `ano tools` | 使える tool と MCP server を表示します |
+| `ano provider` / `ano model` / `ano preset` | 接続先・モデル・プリセットを管理します（[docs/providers.md](docs/providers.md)） |
 | `ano mcp` | MCP server の tool の確認・有効化と OAuth 認可（[docs/mcp.md](docs/mcp.md)） |
-| `ano auth` / `ano session` / `ano history` / `ano skills` | ChatGPT へのログイン、保存済みセッション・履歴・スキルの確認 |
+| `ano auth` / `ano session` / `ano history` / `ano skills` | ChatGPT へのログイン、保存した会話・履歴・スキルの確認 |
 
 ```sh
 ano chat --environment coding --session .ano/review.json   # 会話を保存し、あとで再開
@@ -56,7 +54,7 @@ ano run --json --quiet "実装の概要を説明して" | jq .outcome
 
 ## 設定
 
-`--config` を省略すると、カレントディレクトリの `./.ano/config.toml`、OS 標準の設定ディレクトリ（macOS は `~/Library/Application Support/ano`、Linux は `$XDG_CONFIG_HOME/ano`（既定 `~/.config/ano`）、Windows は `%APPDATA%\ano\config`）の `config.toml` の順に探し、どちらも無ければ組み込みの既定値で動きます。無関係な `./config.toml` は自動では読みませんが、`--config config.toml` で明示すれば使えます。全項目の例は [config.example.toml](config.example.toml)、読み込み順と各セクションは [docs/configuration.md](docs/configuration.md) を参照してください。API キーは設定ファイルに書かず、環境変数か `.env` から読み込みます。
+設定は `./.ano/config.toml`、なければ OS の設定ディレクトリ（クイックスタートでコピーした場所）の `config.toml` から読み、どちらも無ければ既定値で動きます。全項目の例は [config.example.toml](config.example.toml)、詳しくは [docs/configuration.md](docs/configuration.md) を参照してください。API キーは設定ファイルに書かず、環境変数か `.env` で渡します。
 
 ローカル AI は `[api]` の `base_url` を差し替えるだけで使えます。
 
