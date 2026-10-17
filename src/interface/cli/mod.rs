@@ -356,6 +356,12 @@ struct AcpArgs {
 
     #[arg(long = "disable-tool", value_name = "NAME")]
     disabled_tools: Vec<String>,
+
+    #[arg(
+        long,
+        help = "Do not read the variables of the login shell ($SHELL) that the editor did not pass on"
+    )]
+    no_shell_env: bool,
 }
 
 /// Parse the process arguments and run the selected command.
@@ -369,6 +375,21 @@ pub async fn run() -> Result<()> {
         }
     }
     let cli = Cli::parse();
+    // An editor started from its GUI does not pass on what the shell's
+    // startup files export, such as the keys that MCP servers refer to.
+    #[cfg(unix)]
+    if matches!(&cli.command, Command::Acp(args) if !args.no_shell_env) {
+        match crate::infrastructure::login_shell::missing_variables().await {
+            Ok(variables) => {
+                for (name, value) in variables {
+                    std::env::set_var(name, value);
+                }
+            }
+            Err(error) => {
+                eprintln!("warning: could not read the login shell's environment: {error:#}")
+            }
+        }
+    }
     let config_path = cli.config.clone().unwrap_or_else(default_config_path);
     let config = match &cli.config {
         Some(path) => AppConfig::load(path)?,

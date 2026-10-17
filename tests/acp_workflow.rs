@@ -32,17 +32,36 @@ impl Editor {
 
     /// Start `ano acp` with `extra` added to its config.
     fn start_with(directory: &Path, endpoint: &str, extra: &str, args: &[&str]) -> Self {
+        Self::start_full(directory, endpoint, extra, args, None)
+    }
+
+    /// Start `ano acp` as an app would, outside any shell: with `shell` as
+    /// the user's login shell, whose environment it then reads. Without one,
+    /// the user's shell settings stay out of the test.
+    fn start_full(
+        directory: &Path,
+        endpoint: &str,
+        extra: &str,
+        args: &[&str],
+        shell: Option<&Path>,
+    ) -> Self {
         std::fs::create_dir_all(directory.join(".ano")).unwrap();
         std::fs::write(
             directory.join(".ano/config.toml"),
             format!("[agent]\nmodel = 'test-model'\n{extra}"),
         )
         .unwrap();
-        let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+        command
             .current_dir(directory)
             .env("OPENAI_BASE_URL", endpoint)
             .env("OPENAI_API_KEY", "test-fixture-key")
-            .arg("acp")
+            .arg("acp");
+        match shell {
+            Some(shell) => command.env("SHELL", shell),
+            None => command.arg("--no-shell-env"),
+        };
+        let mut child = command
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -305,6 +324,50 @@ async fn commands_ask_the_editor_and_follow_the_mode_it_chooses() {
         .unwrap()
         .unwrap();
     assert!(status.success());
+}
+
+/// Started outside any shell, `ano acp` reads what the user's login shell
+/// exports, so MCP servers whose settings refer to it stay usable.
+#[cfg(unix)]
+#[tokio::test]
+async fn variables_of_the_login_shell_reach_the_mcp_settings() {
+    let (endpoint, _) = responses(vec![message("Hi.")]).await;
+    let workspace = tempfile::tempdir().unwrap();
+    let workspace = std::fs::canonicalize(workspace.path()).unwrap();
+    let shell = workspace.join("login-shell");
+    // Like zsh with an .zshrc that exports a key: the command of `-c` runs
+    // after the startup files.
+    std::fs::write(
+        &shell,
+        "#!/bin/sh\necho 'Welcome!'\nexport ANO_TEST_MCP_HOST=127.0.0.1:9\nexec /bin/sh -c \"$4\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shell, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let config = "[[mcp_servers]]\nlabel = 'probe'\ntransport = 'streamable_http'\nurl = 'http://${ANO_TEST_MCP_HOST}/mcp'\n";
+
+    let notices = async |shell: Option<&Path>| {
+        let mut editor = Editor::start_full(&workspace, &endpoint, config, &[], shell);
+        let (session_id, _) = open_session(&mut editor, &workspace).await;
+        let prompt = editor
+            .request(
+                "session/prompt",
+                json!({"sessionId": session_id, "prompt": [{"type": "text", "text": "Hello"}]}),
+            )
+            .await;
+        let (messages, _) = editor.until_response(prompt).await;
+        updates(&messages)
+            .iter()
+            .filter(|update| update["sessionUpdate"] == "agent_thought_chunk")
+            .map(|update| update["content"]["text"].as_str().unwrap().to_string())
+            .collect::<String>()
+    };
+    let without = notices(None).await;
+    assert!(without.contains("ANO_TEST_MCP_HOST"), "{without}");
+    // With the shell's variable, the URL is complete; only the connection
+    // to the server, which does not exist, fails.
+    let with = notices(Some(&shell)).await;
+    assert!(with.contains("'probe'"), "{with}");
+    assert!(!with.contains("ANO_TEST_MCP_HOST"), "{with}");
 }
 
 /// An environment's approval mode stays when the editor switches presets.
