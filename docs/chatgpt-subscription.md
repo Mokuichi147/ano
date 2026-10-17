@@ -1,6 +1,6 @@
 # ChatGPT サブスクリプションでの接続
 
-ChatGPT の OAuth 認証を使い、Codex のサブスクリプション用接続先にリクエストを送信する実験的な機能です。ano 自身が会話管理とツール実行を行います。Codex CLI のインストールは不要です。
+ChatGPT の OAuth 認証を使い、Codex のサブスクリプション用接続先にリクエストを送信します。ano 自身が会話管理とツール実行を行います。Codex CLI のインストールは不要です。
 
 この方式は [OpenHands のサブスクリプション連携](https://docs.openhands.dev/sdk/guides/llm-subscriptions) を参考にしています。専用接続先の仕様変更に追従が必要になる場合があります。利用には Codex を使える ChatGPT アカウントが必要です。利用枠・モデルの提供範囲は契約プランとワークスペース設定に依存します。通常の OpenAI API の利用料金とは別の枠です。
 
@@ -83,6 +83,7 @@ ano auth logout
 | ツール | ano の function tool と直接接続 MCP（`stdio` / `streamable_http`）に対応 |
 | サーバー実行ツール | `transport = "responses"` の MCP などは未対応としてエラー |
 | 入力 | テキスト・画像。音声入力は未対応としてエラー |
+| 利用上限 | 上限に達したときに、利用枠が戻る時刻（リセット時刻）は取得できません |
 
 `previous_response_id` による履歴参照は使えません。ライブラリから直接呼ぶ場合も `input` に履歴全体を渡してください。既存の API 用セッションとは接続先が異なるため、新しいセッションを作成してください。
 
