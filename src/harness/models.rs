@@ -85,6 +85,8 @@ pub struct RunModels {
     pub main: ModelTarget,
     /// The reviewer of `approval_mode = "auto"`.
     pub approval: ModelTarget,
+    /// The triage of automation events.
+    pub triage: ModelTarget,
     pub subagents: SubagentModels,
 }
 
@@ -141,9 +143,15 @@ impl RunModels {
                 context_window: None,
             },
         };
+        // Without a preset, triage uses the approval reviewer's model.
+        let triage = match role("triage", roles.triage.as_ref())? {
+            Some(target) => target,
+            None => approval.clone(),
+        };
         Ok(Self {
             main,
             approval,
+            triage,
             subagents,
         })
     }

@@ -217,6 +217,9 @@ pub struct ModelRoles {
     /// The reviewer of `approval_mode = "auto"`; takes precedence over
     /// `approval_model`.
     pub approval: Option<String>,
+    /// The triage of automation events; the approval reviewer's model when
+    /// unset.
+    pub triage: Option<String>,
 }
 
 impl ModelRoles {
@@ -227,6 +230,7 @@ impl ModelRoles {
             ("delegate", self.delegate.as_deref()),
             ("review", self.review.as_deref()),
             ("approval", self.approval.as_deref()),
+            ("triage", self.triage.as_deref()),
         ]
         .into_iter()
     }
@@ -265,7 +269,7 @@ mod tests {
     #[test]
     fn every_key_reaches_its_setting() {
         let config = parse(
-            "model = 'm'\ninstructions = 'i'\nmax_tool_rounds = 2\ntool_discovery_limit = 3\nmax_output_tokens = 4\nparallel_tool_calls = false\nmax_parallel_tool_calls = 5\ntool_timeout_secs = 6\nmax_tool_output_bytes = 7000\ncompact_threshold_bytes = 8000\ncompaction = 'summary'\nmax_total_tokens = 9\nreasoning_effort = 'low'\nreasoning_summary = 'concise'\nproject_instructions = []\napproval_mode = 'deny'\napproval_model = 'a'\nprovider = 'p'\n[roles]\ndefault = 'r1'\ndelegate = 'r2'\nreview = 'r3'\napproval = 'r4'\n",
+            "model = 'm'\ninstructions = 'i'\nmax_tool_rounds = 2\ntool_discovery_limit = 3\nmax_output_tokens = 4\nparallel_tool_calls = false\nmax_parallel_tool_calls = 5\ntool_timeout_secs = 6\nmax_tool_output_bytes = 7000\ncompact_threshold_bytes = 8000\ncompaction = 'summary'\nmax_total_tokens = 9\nreasoning_effort = 'low'\nreasoning_summary = 'concise'\nproject_instructions = []\napproval_mode = 'deny'\napproval_model = 'a'\nprovider = 'p'\n[roles]\ndefault = 'r1'\ndelegate = 'r2'\nreview = 'r3'\napproval = 'r4'\ntriage = 'r5'\n",
         )
         .unwrap();
         let AgentSettings {
@@ -319,6 +323,7 @@ mod tests {
                 delegate: Some("r2".into()),
                 review: Some("r3".into()),
                 approval: Some("r4".into()),
+                triage: Some("r5".into()),
             }
         );
     }

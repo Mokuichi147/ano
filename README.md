@@ -12,6 +12,7 @@ Rust 製の自律型 AI エージェントと、それを動かすハーネス�
 - **長い作業への対応。** 保存・再開できる会話セッション、長い会話の自動圧縮、トークン上限、chronotope への履歴の保存、手順をスキル（`SKILL.md`）として保存
 - **入出力。** 対話モード（`ano chat`）、回答のストリーミング表示、画像・音声入力、JSON 出力、プロジェクト指示（`AGENTS.md`）の自動読み込み
 - **連携。** Web UI（`ano web`）、Agent Client Protocol による Zed などのエディタとの連携（`ano acp`）、署名付き Webhook と非同期ジョブ API（`ano serve`）、GitHub MCP と組み合わせた Issue の解決から Pull Request の作成まで
+- **自動化と通知。** POST されたイベント（レポート・監視の結果・cron からの起動など）を受けて、判定用モデルが無視・通知・作業のどれにするかを決め、ntfy・Discord・Slack などへ通知（`[automation]`）
 
 ## クイックスタート
 
@@ -39,7 +40,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano chat` | 同じ会話で複数ターンのやり取りをします（`/model`・`/preset`・`/goal`・`/compact` などのコマンドあり） |
 | `ano web` | ブラウザで対話する Web UI を起動します（[docs/web.md](docs/web.md)） |
 | `ano acp` | Zed などのエディタから起動され、Agent Client Protocol で対話します（[docs/acp.md](docs/acp.md)） |
-| `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
+| `ano serve` | Webhook サーバーを起動します。`[automation]` があれば、イベントへの反応と通知も行います（[docs/webhook.md](docs/webhook.md)、[docs/automation.md](docs/automation.md)） |
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano provider` / `ano model` / `ano preset` | 接続先・モデル・プリセットを、設定ファイルを直接編集せずに管理します（[docs/providers.md](docs/providers.md)） |
 | `ano mcp` | MCP server の tool の確認・有効化と OAuth 認可（[docs/mcp.md](docs/mcp.md)） |
@@ -82,6 +83,7 @@ model = "ロードしたモデル名"
 | [docs/web.md](docs/web.md) | Web UI の起動とトークン、セッション、API、naui による画面のビルド |
 | [docs/acp.md](docs/acp.md) | エディタとの連携（Agent Client Protocol）の設定、セッション、承認、表示、エディタから渡される MCP server |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
+| [docs/automation.md](docs/automation.md) | 定期実行・GitHub・レポートへの反応、ルールとトリアージ、`notify_user` と通知先、状態の保存 |
 | [docs/library.md](docs/library.md) | Rust ライブラリとしての使い方（tool の登録、拡張、`Harness`） |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |
 
@@ -99,6 +101,7 @@ cargo test
 
 - ano は起動したユーザーの OS 権限で動きます。`allow_writes`・`allow_exec`・検証コマンド・stdio MCP server は、信頼する workspace とコマンドにだけ設定してください。`workspace_exec` はサンドボックスではありません。
 - `approval_mode = "allow"` は確認なしにすべてを許可します。`allow_exec` との併用は、使い捨てのコンテナなど壊れても復元できる環境に限ってください。`auto` モードの判定は補助的な安全策で、完全ではありません。
+- 自動化（`[automation]`）で第三者の Issue やコメントに反応させる場合、作業の環境は `approval_mode = "auto"` か `deny` にし、書き込みとコマンド実行を必要な範囲に絞ってください（[docs/automation.md](docs/automation.md#セキュリティ)）。
 - リモート MCP server と `web_fetch` は外部へデータを送信できます。Web ページ・Issue・PR・コメントなど第三者が書いた文面に埋め込まれた指示でモデルが動く可能性があるため、公開リポジトリや信頼できない入力を扱う場合は `allow` を避け、tool を必要なものに絞ってください。
 - `AGENTS.md` とスキルはモデルへの指示として使われます。信頼できないリポジトリでは `project_instructions = []` にし、保存された `SKILL.md` は `ano skills` で確認してください。
 - `ano web` をループバック以外で待ち受けると、トークンと会話は暗号化されない HTTP で流れます（[docs/web.md](docs/web.md#セキュリティ)）。Webhook は必ず secret を設定して公開します（[docs/webhook.md](docs/webhook.md#セキュリティ)）。

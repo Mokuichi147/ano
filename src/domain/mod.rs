@@ -6,6 +6,7 @@
 //! history, compaction, and usage are expressed in that format.
 
 pub mod approval;
+pub mod automation;
 pub mod compaction;
 pub mod environment;
 pub mod github;

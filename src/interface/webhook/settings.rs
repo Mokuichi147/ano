@@ -66,8 +66,10 @@ impl WebhookSettings {
             || self.path == "/healthz"
             || self.path == "/jobs"
             || self.path.starts_with("/jobs/")
+            || self.path == "/events"
+            || self.path.starts_with("/events/")
         {
-            bail!("webhook.path must be a literal path outside the reserved /jobs and /healthz routes");
+            bail!("webhook.path must be a literal path outside the reserved /jobs, /events, and /healthz routes");
         }
         if self.max_concurrent_jobs == 0 || self.max_pending_jobs == 0 {
             bail!("webhook.max_concurrent_jobs and webhook.max_pending_jobs must be greater than zero");

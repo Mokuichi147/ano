@@ -83,6 +83,7 @@ async fn main() -> Result<()> {
             ..ToolContext::default()
         },
         goal: None,
+        approval_request: None,
     };
     let result = agent.run(request).await;
     mcp.shutdown().await;

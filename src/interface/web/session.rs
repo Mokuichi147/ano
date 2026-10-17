@@ -255,6 +255,7 @@ impl WebSession {
                 raw_input: None,
                 context: context.clone(),
                 goal: None,
+                approval_request: None,
             };
             // A dropped sender cancels as well. Cancellation comes first, so
             // a turn cancelled before it ran does not start.
