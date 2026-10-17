@@ -12,7 +12,7 @@ use crate::{
     domain::{approval::ApprovalMode, mcp::McpServerConfig, usage::StopReason as RunStopReason},
     harness::{
         approval::ApprovalFactory,
-        conversation::{Opening, TurnOutcome, Turns},
+        conversation::{Opening, TurnOutcome, TurnRefused, Turns},
         models::switch_model,
         profile::{ExecutionProfile, Permissions},
         Harness,
@@ -79,9 +79,6 @@ impl AcpSession {
         let (profile, selection, base) = resolve_profile(&bench, cwd)?;
         let opening =
             Opening::prepare(bench.harness, bench.config, profile, selection, &base).await?;
-        for problem in &opening.skipped_skills {
-            eprintln!("warning: skipped skill {problem}");
-        }
         let fixed_mode = opening.profile.approval_mode;
         let workspace = opening.profile.context.workspace.clone();
 
@@ -268,7 +265,10 @@ impl AcpSession {
         let mut conversation = self
             .turns
             .between_turns()
-            .map_err(|_| anyhow::anyhow!("the preset can change only between turns"))?;
+            .map_err(|refused| match refused {
+                TurnRefused::Busy => anyhow::anyhow!("the preset can change only between turns"),
+                TurnRefused::Closed => refused.into(),
+            })?;
         let conversation = &mut *conversation;
         conversation.selection = switch_model(
             config,

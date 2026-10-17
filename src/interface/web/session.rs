@@ -128,9 +128,6 @@ impl WebSession {
         let (profile, selection, base) = resolve_profile(&bench, &request)?;
         let opening =
             Opening::prepare(bench.harness, bench.config, profile, selection, &base).await?;
-        for problem in &opening.skipped_skills {
-            eprintln!("warning: skipped skill {problem}");
-        }
         let approval_mode = opening.profile.approval_mode;
         let endpoint = opening.endpoint.clone();
 

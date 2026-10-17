@@ -16,7 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Upper bound on the list of loadable tools appended to one run's
 /// instructions. Tools beyond it can still be found with `tool_search`.
 const MAX_TOOL_CATALOG_BYTES: usize = 8 * 1024;
-/// Tool descriptions in search results are cut to this many characters.
+/// Tool descriptions in search results are cut to this many characters,
+/// followed by '…'.
 const MAX_DESCRIPTION_CHARS: usize = 240;
 
 /// Tools loaded by the most recent `tool_search`.

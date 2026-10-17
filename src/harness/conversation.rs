@@ -41,8 +41,6 @@ pub struct Opening {
     pub profile: ExecutionProfile,
     pub models: RunModels,
     pub endpoint: String,
-    /// The problems of the skills that were left out.
-    pub skipped_skills: Vec<String>,
     selection: ModelSelection,
     connections: Connections,
     binding: SessionBinding,
@@ -51,8 +49,7 @@ pub struct Opening {
 impl Opening {
     /// Add the instructions to `profile`, off the async runtime, and connect
     /// the models of `selection`; `base` is what the roles' `default` preset
-    /// stands for. Skills that cannot be read are left out, in
-    /// `skipped_skills`.
+    /// stands for. Skills that cannot be read are left out with a warning.
     pub async fn prepare(
         harness: &Harness,
         config: &AppConfig,
@@ -61,10 +58,13 @@ impl Opening {
         base: &[ModelRequest],
     ) -> Result<Self> {
         let harness = harness.clone();
-        let (profile, skipped_skills) = tokio::task::spawn_blocking(move || {
-            harness
-                .add_instructions(&mut profile)
-                .map(|problems| (profile, problems))
+        let profile = tokio::task::spawn_blocking(move || {
+            harness.add_instructions(&mut profile).map(|problems| {
+                for problem in problems {
+                    eprintln!("warning: skipped skill {problem}");
+                }
+                profile
+            })
         })
         .await
         .context("instructions task failed")??;
@@ -76,7 +76,6 @@ impl Opening {
             profile,
             models,
             endpoint,
-            skipped_skills,
             selection,
             connections,
             binding,
@@ -148,7 +147,26 @@ struct TurnControl {
 pub struct Turn {
     conversation: OwnedMutexGuard<Conversation>,
     cancelled: oneshot::Receiver<()>,
-    control: Arc<Mutex<TurnControl>>,
+    _slot: CancelSlot,
+}
+
+/// Empties the cancellation slot of a turn once the turn is gone, also when
+/// it is dropped before or while it runs.
+struct CancelSlot(Arc<Mutex<TurnControl>>);
+
+impl Drop for CancelSlot {
+    fn drop(&mut self) {
+        let mut control = lock_control(&self.0);
+        // Only this turn's sender, whose receiver is gone by now: another
+        // turn may have started once the conversation was released.
+        if control
+            .cancel
+            .as_ref()
+            .is_some_and(oneshot::Sender::is_closed)
+        {
+            control.cancel = None;
+        }
+    }
 }
 
 /// How a turn ended.
@@ -186,13 +204,16 @@ impl Turns {
         Ok(Turn {
             conversation,
             cancelled,
-            control: Arc::clone(&self.control),
+            _slot: CancelSlot(Arc::clone(&self.control)),
         })
     }
 
     /// The conversation, while no turn runs and the session has not ended.
     pub fn between_turns(&self) -> Result<tokio::sync::MutexGuard<'_, Conversation>, TurnRefused> {
-        if lock_control(&self.control).closed {
+        // Under the control's lock, as in `start`, so the session cannot end
+        // in between.
+        let control = lock_control(&self.control);
+        if control.closed {
             return Err(TurnRefused::Closed);
         }
         self.conversation.try_lock().map_err(|_| TurnRefused::Busy)
@@ -241,7 +262,7 @@ impl Turn {
         let Self {
             mut conversation,
             cancelled,
-            control,
+            _slot,
         } = self;
         let Conversation {
             agent,
@@ -263,9 +284,6 @@ impl Turn {
             _ = cancelled => None,
             result = agent.run_in_session(request, store) => Some(result),
         };
-        // Nothing runs to cancel now; the next turn cannot start before the
-        // conversation is returned.
-        lock_control(&control).cancel = None;
         let outcome = match outcome {
             Some(Ok(result)) => TurnOutcome::Completed(Box::new(result)),
             Some(Err(error)) => TurnOutcome::Failed(error),
@@ -332,7 +350,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_turn_interrupted_while_running_is_recorded_as_failed() {
+    async fn a_cancelled_turn_records_an_unfinished_conversation_as_failed() {
         let turns = turns();
         turns
             .between_turns()
@@ -345,6 +363,18 @@ mod tests {
         let (conversation, outcome) = turn.run(Vec::new(), None).await;
         assert!(matches!(outcome, TurnOutcome::Cancelled(None)));
         assert_eq!(conversation.store.data().status, SessionStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn a_dropped_turn_leaves_nothing_to_cancel() {
+        let turns = turns();
+        drop(turns.start().unwrap());
+        assert!(!turns.cancel());
+
+        let turn = turns.start().unwrap();
+        assert!(turns.cancel());
+        drop(turn);
+        assert!(turns.start().is_ok());
     }
 
     #[tokio::test]
