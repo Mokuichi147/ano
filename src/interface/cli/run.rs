@@ -301,6 +301,8 @@ fn resolve_run_context(
                 }),
                 allow_writes: args.allow_writes,
                 allow_exec: args.allow_exec,
+                // Set below, as for an environment.
+                approval_mode: None,
             },
         ),
     };

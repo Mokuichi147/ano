@@ -79,6 +79,9 @@ impl AcpSession {
         let (profile, selection, base) = resolve_profile(&bench, cwd)?;
         let opening =
             Opening::prepare(bench.harness, bench.config, profile, selection, &base).await?;
+        for problem in &opening.skipped_skills {
+            eprintln!("warning: skipped skill {problem}");
+        }
         let fixed_mode = opening.profile.approval_mode;
         let workspace = opening.profile.context.workspace.clone();
 
@@ -415,8 +418,8 @@ fn resolve_profile(
             }
             (profile, vec![config.environment_request(name)?])
         }
-        None => {
-            let mut profile = config.ad_hoc_profile(
+        None => (
+            config.ad_hoc_profile(
                 &options.user,
                 ACP_ENVIRONMENT,
                 &options.disabled_tools,
@@ -424,13 +427,11 @@ fn resolve_profile(
                     workspace: Some(cwd),
                     allow_writes: options.allow_writes,
                     allow_exec: options.allow_exec,
+                    approval_mode: options.approval_mode,
                 },
-            );
-            if let Some(mode) = options.approval_mode {
-                profile.approval_mode = mode;
-            }
-            (profile, Vec::new())
-        }
+            ),
+            Vec::new(),
+        ),
     };
     let mut layers = base.clone();
     layers.extend(options.preset.as_deref().map(ModelRequest::preset));

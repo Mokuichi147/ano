@@ -3,7 +3,10 @@
 
 use super::{error_excerpt, secure_url};
 use crate::{
-    application::automation::{Notification, Notifier},
+    application::{
+        automation::{Notification, Notifier},
+        clock::unix_now,
+    },
     domain::{automation::Priority, text::cut_within},
 };
 use anyhow::{bail, Context, Result};
@@ -13,7 +16,7 @@ use reqwest::{redirect::Policy, Url};
 use serde::Deserialize;
 use serde_json::json;
 use sha2::Sha256;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const DISCORD_MAX_CHARS: usize = 2000;
 const SLACK_MAX_CHARS: usize = 3500;
@@ -209,11 +212,7 @@ impl Notifier for HttpNotifier {
             request = request.bearer_auth(token);
         }
         if let Some(secret) = &self.secret {
-            let timestamp = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_secs())
-                .unwrap_or_default()
-                .to_string();
+            let timestamp = unix_now().to_string();
             let mut mac =
                 Hmac::<Sha256>::new_from_slice(secret).context("invalid notifier secret")?;
             mac.update(timestamp.as_bytes());

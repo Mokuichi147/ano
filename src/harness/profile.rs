@@ -40,6 +40,8 @@ pub struct Permissions {
     pub workspace: Option<PathBuf>,
     pub allow_writes: bool,
     pub allow_exec: bool,
+    /// Defaults to `[agent].approval_mode`.
+    pub approval_mode: Option<ApprovalMode>,
 }
 
 impl ExecutionProfile {
@@ -65,7 +67,7 @@ impl ExecutionProfile {
                 allow_exec: permissions.allow_exec,
                 checks: Default::default(),
             },
-            approval_mode: base.approval_mode,
+            approval_mode: permissions.approval_mode.unwrap_or(base.approval_mode),
         }
     }
 

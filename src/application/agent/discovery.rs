@@ -6,6 +6,7 @@ use crate::domain::{
     mcp::{McpServerConfig, McpTransport},
     plan::TASK_PLAN_NAME,
     policy::UserPolicy,
+    text::cut,
     tool::{ToolContext, ToolDefinition, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
 };
 use anyhow::{bail, Context, Result};
@@ -15,6 +16,8 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Upper bound on the list of loadable tools appended to one run's
 /// instructions. Tools beyond it can still be found with `tool_search`.
 const MAX_TOOL_CATALOG_BYTES: usize = 8 * 1024;
+/// Tool descriptions in search results are cut to this many characters.
+const MAX_DESCRIPTION_CHARS: usize = 240;
 
 /// Tools loaded by the most recent `tool_search`.
 #[derive(Default)]
@@ -385,7 +388,7 @@ impl Agent {
             let mut result = json!({
                 "kind": candidate.kind,
                 "name": candidate.name,
-                "description": truncate_description(&candidate.description),
+                "description": cut(&candidate.description, MAX_DESCRIPTION_CHARS),
             });
             if let Some(server_label) = candidate.server_label {
                 result["server_label"] = json!(server_label.clone());
@@ -495,14 +498,6 @@ fn score_mcp_candidate(
         None if terms.iter().all(|term| server_matches(term) > 0) => Some(server_score),
         None => None,
     }
-}
-
-fn truncate_description(description: &str) -> String {
-    let mut result = description.chars().take(240).collect::<String>();
-    if description.chars().count() > 240 {
-        result.push('…');
-    }
-    result
 }
 
 pub fn delegate_task_definition() -> ToolDefinition {

@@ -4,16 +4,12 @@
 //! library user adds new kinds without changing the code that handles
 //! events.
 
+pub use super::clock::unix_now;
 use crate::domain::automation::{AutomationEvent, Priority, Trust};
 use anyhow::{bail, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::{
-    collections::BTreeMap,
-    fmt,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::{collections::BTreeMap, fmt, sync::Arc};
 
 /// What the user is told.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,14 +201,6 @@ impl AutomationRegistry {
             ),
         }
     }
-}
-
-/// The current Unix time in seconds.
-pub fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

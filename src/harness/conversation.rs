@@ -41,6 +41,8 @@ pub struct Opening {
     pub profile: ExecutionProfile,
     pub models: RunModels,
     pub endpoint: String,
+    /// The problems of the skills that were left out.
+    pub skipped_skills: Vec<String>,
     selection: ModelSelection,
     connections: Connections,
     binding: SessionBinding,
@@ -49,7 +51,8 @@ pub struct Opening {
 impl Opening {
     /// Add the instructions to `profile`, off the async runtime, and connect
     /// the models of `selection`; `base` is what the roles' `default` preset
-    /// stands for. Skills that cannot be read are left out with a warning.
+    /// stands for. Skills that cannot be read are left out, in
+    /// `skipped_skills`.
     pub async fn prepare(
         harness: &Harness,
         config: &AppConfig,
@@ -58,13 +61,10 @@ impl Opening {
         base: &[ModelRequest],
     ) -> Result<Self> {
         let harness = harness.clone();
-        let profile = tokio::task::spawn_blocking(move || {
-            harness.add_instructions(&mut profile).map(|problems| {
-                for problem in problems {
-                    eprintln!("warning: skipped skill {problem}");
-                }
-                profile
-            })
+        let (profile, skipped_skills) = tokio::task::spawn_blocking(move || {
+            harness
+                .add_instructions(&mut profile)
+                .map(|problems| (profile, problems))
         })
         .await
         .context("instructions task failed")??;
@@ -76,6 +76,7 @@ impl Opening {
             profile,
             models,
             endpoint,
+            skipped_skills,
             selection,
             connections,
             binding,
@@ -132,7 +133,7 @@ impl std::error::Error for TurnRefused {}
 /// A conversation with the turns that run in it.
 pub struct Turns {
     conversation: Arc<tokio::sync::Mutex<Conversation>>,
-    control: Mutex<TurnControl>,
+    control: Arc<Mutex<TurnControl>>,
 }
 
 /// Whether the session ended, and how to cancel its running turn. Kept
@@ -147,6 +148,7 @@ struct TurnControl {
 pub struct Turn {
     conversation: OwnedMutexGuard<Conversation>,
     cancelled: oneshot::Receiver<()>,
+    control: Arc<Mutex<TurnControl>>,
 }
 
 /// How a turn ended.
@@ -165,14 +167,14 @@ impl Turns {
     pub fn new(conversation: Conversation) -> Self {
         Self {
             conversation: Arc::new(tokio::sync::Mutex::new(conversation)),
-            control: Mutex::default(),
+            control: Arc::default(),
         }
     }
 
     /// Take the conversation for a turn. It can be cancelled from the moment
     /// this returns, before it runs.
     pub fn start(&self) -> Result<Turn, TurnRefused> {
-        let mut control = self.lock_control();
+        let mut control = lock_control(&self.control);
         if control.closed {
             return Err(TurnRefused::Closed);
         }
@@ -184,18 +186,22 @@ impl Turns {
         Ok(Turn {
             conversation,
             cancelled,
+            control: Arc::clone(&self.control),
         })
     }
 
-    /// The conversation, while no turn runs.
+    /// The conversation, while no turn runs and the session has not ended.
     pub fn between_turns(&self) -> Result<tokio::sync::MutexGuard<'_, Conversation>, TurnRefused> {
+        if lock_control(&self.control).closed {
+            return Err(TurnRefused::Closed);
+        }
         self.conversation.try_lock().map_err(|_| TurnRefused::Busy)
     }
 
     /// Cancel the running turn. Completed actions are not undone. False
     /// when no turn runs.
     pub fn cancel(&self) -> bool {
-        self.lock_control()
+        lock_control(&self.control)
             .cancel
             .take()
             .is_some_and(|cancel| cancel.send(()).is_ok())
@@ -203,7 +209,7 @@ impl Turns {
 
     /// Refuse further turns and cancel the running one.
     pub fn close(&self) {
-        let mut control = self.lock_control();
+        let mut control = lock_control(&self.control);
         control.closed = true;
         if let Some(cancel) = control.cancel.take() {
             cancel.send(()).ok();
@@ -215,12 +221,12 @@ impl Turns {
         self.close();
         drop(self.conversation.lock().await);
     }
+}
 
-    fn lock_control(&self) -> std::sync::MutexGuard<'_, TurnControl> {
-        self.control
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
+fn lock_control(control: &Mutex<TurnControl>) -> std::sync::MutexGuard<'_, TurnControl> {
+    control
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl Turn {
@@ -235,6 +241,7 @@ impl Turn {
         let Self {
             mut conversation,
             cancelled,
+            control,
         } = self;
         let Conversation {
             agent,
@@ -256,6 +263,9 @@ impl Turn {
             _ = cancelled => None,
             result = agent.run_in_session(request, store) => Some(result),
         };
+        // Nothing runs to cancel now; the next turn cannot start before the
+        // conversation is returned.
+        lock_control(&control).cancel = None;
         let outcome = match outcome {
             Some(Ok(result)) => TurnOutcome::Completed(Box::new(result)),
             Some(Err(error)) => TurnOutcome::Failed(error),
@@ -266,5 +276,82 @@ impl Turn {
             ),
         };
         (conversation, outcome)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        application::{approval::AlwaysApprove, registry::ToolRegistry},
+        domain::policy::UserPolicy,
+        infrastructure::{mcp::McpPool, openai::OpenAiClient},
+    };
+    use serde_json::json;
+
+    /// A conversation whose model is never reached: the turns of these
+    /// tests are cancelled before they run.
+    fn turns() -> Turns {
+        let config = AppConfig::parse("[api]\nbase_url = 'http://127.0.0.1:9/v1'").unwrap();
+        let agent = Agent::new(
+            OpenAiClient::new("", "http://127.0.0.1:9/v1"),
+            Default::default(),
+            Arc::new(McpPool::new(Vec::new())),
+            ToolRegistry::new(),
+            UserPolicy::default(),
+            Arc::new(AlwaysApprove),
+        );
+        let context = ToolContext::default();
+        let binding = SessionBinding::new(&context, "http://127.0.0.1:9/v1").unwrap();
+        Turns::new(Conversation {
+            agent,
+            store: MemoryConversation::new(binding),
+            context,
+            selection: config.select_model(&[]).unwrap(),
+            connections: Connections::default(),
+        })
+    }
+
+    #[tokio::test]
+    async fn one_turn_runs_at_a_time_and_cancellation_ends_with_the_turn() {
+        let turns = turns();
+        assert!(!turns.cancel());
+        let turn = turns.start().unwrap();
+        assert_eq!(turns.start().err(), Some(TurnRefused::Busy));
+        assert_eq!(turns.between_turns().err(), Some(TurnRefused::Busy));
+
+        // Cancelled before it ran, the turn does not start.
+        assert!(turns.cancel());
+        let (conversation, outcome) = turn.run(Vec::new(), None).await;
+        assert!(matches!(outcome, TurnOutcome::Cancelled(None)));
+        assert_eq!(conversation.store.data().status, SessionStatus::Ready);
+        drop(conversation);
+
+        assert!(!turns.cancel());
+        assert!(turns.between_turns().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_turn_interrupted_while_running_is_recorded_as_failed() {
+        let turns = turns();
+        turns
+            .between_turns()
+            .unwrap()
+            .store
+            .begin_turn(&json!([{"role": "user", "content": "hello"}]))
+            .unwrap();
+        let turn = turns.start().unwrap();
+        turns.cancel();
+        let (conversation, outcome) = turn.run(Vec::new(), None).await;
+        assert!(matches!(outcome, TurnOutcome::Cancelled(None)));
+        assert_eq!(conversation.store.data().status, SessionStatus::Failed);
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_refuses_turns_and_changes() {
+        let turns = turns();
+        turns.end().await;
+        assert_eq!(turns.start().err(), Some(TurnRefused::Closed));
+        assert_eq!(turns.between_turns().err(), Some(TurnRefused::Closed));
     }
 }

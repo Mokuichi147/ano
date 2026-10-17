@@ -19,9 +19,8 @@ use crate::{
     application::{
         agent::{AgentResult, RunRequest},
         approval::DenyApproval,
-        automation::{
-            unix_now, Admission, AutomationRegistry, PostAuthentication, PostedRequest, Rejection,
-        },
+        automation::{Admission, AutomationRegistry, PostAuthentication, PostedRequest, Rejection},
+        clock::unix_now,
         input::InputPart,
         ports::{McpGateway, ResponsesApi},
         registry::ToolRegistry,

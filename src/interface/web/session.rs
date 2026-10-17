@@ -8,7 +8,7 @@ use super::{
 pub(super) use crate::harness::conversation::TurnRefused;
 use crate::{
     application::{
-        automation::unix_now,
+        clock::unix_now,
         input::InputPart,
         ports::{ConversationStore, McpGateway},
     },
@@ -128,6 +128,9 @@ impl WebSession {
         let (profile, selection, base) = resolve_profile(&bench, &request)?;
         let opening =
             Opening::prepare(bench.harness, bench.config, profile, selection, &base).await?;
+        for problem in &opening.skipped_skills {
+            eprintln!("warning: skipped skill {problem}");
+        }
         let approval_mode = opening.profile.approval_mode;
         let endpoint = opening.endpoint.clone();
 
@@ -279,8 +282,8 @@ fn resolve_profile(
             }
             (profile, vec![config.environment_request(name)?])
         }
-        None => {
-            let mut profile = config.ad_hoc_profile(
+        None => (
+            config.ad_hoc_profile(
                 bench.user,
                 WEB_ENVIRONMENT,
                 &[],
@@ -290,13 +293,11 @@ fn resolve_profile(
                     ),
                     allow_writes: request.allow_writes,
                     allow_exec: request.allow_exec,
+                    approval_mode: request.approval_mode,
                 },
-            );
-            if let Some(mode) = request.approval_mode {
-                profile.approval_mode = mode;
-            }
-            (profile, Vec::new())
-        }
+            ),
+            Vec::new(),
+        ),
     };
     let mut layers = base.clone();
     layers.extend(request.preset.as_deref().map(ModelRequest::preset));

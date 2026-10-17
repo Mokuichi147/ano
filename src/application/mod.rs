@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod approval;
 pub mod automation;
+pub mod clock;
 pub mod input;
 pub mod ports;
 pub mod registry;

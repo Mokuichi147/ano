@@ -102,7 +102,7 @@ impl AutoApproval {
             "user_request": request.user_request,
             "server": server,
             "tool": request.tool_name,
-            "tool_description": request.tool_description.as_deref().map(truncate),
+            "tool_description": request.tool_description.as_deref().map(|text| cut(text, MAX_FIELD_CHARS)),
             "arguments": arguments,
         });
         let mut payload = json!({
@@ -287,15 +287,14 @@ fn verdict_from(decision: &str) -> Result<Verdict> {
 
 fn reason_from(reason: &str) -> String {
     let reason = reason.trim();
-    truncate(if reason.is_empty() {
-        "no reason given"
-    } else {
-        reason
-    })
-}
-
-fn truncate(text: &str) -> String {
-    cut(text, MAX_FIELD_CHARS)
+    cut(
+        if reason.is_empty() {
+            "no reason given"
+        } else {
+            reason
+        },
+        MAX_FIELD_CHARS,
+    )
 }
 
 #[cfg(test)]

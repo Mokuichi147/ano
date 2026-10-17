@@ -119,6 +119,7 @@ src/
 │   ├── settings.rs         実行ループの設定（AgentSettings）と、特定の tool を前提としない既定の instructions
 │   ├── approval.rs         非対話の承認ポリシー（AlwaysApprove・DenyApproval）
 │   ├── automation.rs       自動化のポート（EventSource・Notifier）と kind 名のレジストリ
+│   ├── clock.rs            現在時刻（Unix 秒）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── harness/
 │   ├── mod.rs              Harness（組み込み tool・原文履歴・スキルの登録と、実行ごとの Agent の組み立て）
