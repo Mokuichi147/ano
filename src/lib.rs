@@ -36,6 +36,10 @@ pub use application::{
         DELEGATE_ROLE,
     },
     approval::{AlwaysApprove, DenyApproval},
+    automation::{
+        Admission, AutomationRegistry, EventSource, KindSpec, NamedNotifier, Notification,
+        Notifier, PostAuthentication, PostedRequest, Rejection,
+    },
     input::{build_user_input, InputPart},
     ports::{
         ApprovalHandler, ApprovalSource, ConversationStore, DirectMcpServer, DirectMcpTool,
@@ -48,6 +52,7 @@ pub use config::{
     AppConfig, ModelRequest, ModelSelection, PresetSettings, API_PROVIDER, DEFAULT_PRESET,
 };
 pub use domain::{
+    automation::{AutomationEvent, Priority, Trust},
     compaction::CompactionRecord,
     environment::{CheckConfig, EnvironmentConfig},
     mcp::{McpApprovalMode, McpServerConfig, McpToolCatalog, McpTransport},
@@ -66,6 +71,7 @@ pub use harness::{
     Harness,
 };
 pub use infrastructure::{
+    automation::register_builtin_automation,
     chronotope::{Chronotope, HistorySettings},
     mcp::McpPool,
     openai::{create_client, ApiAuth, ApiSettings, OpenAiClient, ProviderSettings, WireApi},

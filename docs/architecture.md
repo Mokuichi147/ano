@@ -5,7 +5,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │ interface                                                        │
-│  cli（コマンドと端末での表示・承認）  webhook（axum サーバー）     │
+│  cli（コマンドと端末での表示・承認）  webhook（axum・自動化）     │
 │  web（ブラウザの UI のサーバー。画面は web-ui/ の wasm）          │
 └──────────────────────────────┬───────────────────────────────────┘
                                │ Agent を組み立てさせる
@@ -14,6 +14,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 │ harness（workspace で作業するエージェント）                        │
 │  Harness（組み立て）  settings（[agent]）  instructions  profile  │
 │  models（接続先・ロール）  approval  review（ReviewGate）         │
+│  triage（イベントの振り分け）  notify（notify_user）              │
 └──────────────┬──────────────────────────────────┬────────────────┘
                │ 使う                             │ 使う
                ▼                                  ▼
@@ -33,6 +34,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 ┌──────────────────────────────────────────────────────────────────┐
 │ domain                                                           │
 │  plan  usage  policy  session  compaction  tool  mcp  environment│
+│  automation（イベント・ルール・判断）                            │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -59,6 +61,7 @@ ano は、特定の tool を知らない汎用のエージェント（実行ル�
 | `ConversationStore` | 会話の保持（変更ごとに保存） | `infrastructure::session_store::Session`（ファイル）、`infrastructure::memory_store::MemoryConversation`（メモリ） |
 | `HistoryBackend` | 圧縮されない原文の記録と送信 | `infrastructure::chronotope::Chronotope` |
 | `ApprovalHandler` | MCP 呼び出しと、承認が必要なローカル tool（`workspace_exec` など）の承認 | `AlwaysApprove`・`DenyApproval`（application）、`AutoApproval`（harness）、`InteractiveApproval`・対話モードの確認（interface/cli） |
+| `EventSource` / `Notifier`（`application::automation`） | 自動化の入力元（POST された要求を読む）と通知先。`kind` の名前で `AutomationRegistry` に登録する | `infrastructure::automation`（webhook、ntfy・discord・slack・webhook） |
 
 テストや別の保存先・API を使う場合は、これらのトレイトを実装して `Agent` に渡せます。
 
@@ -89,6 +92,7 @@ src/
 │   └── edit.rs             ano provider / model / preset / mcp による設定ファイルの書き換え
 ├── domain/
 │   ├── approval.rs         承認モード（ask・auto・allow・deny）
+│   ├── automation.rs       自動化のイベント・ルールの照合・判断結果と、イベントから作業の依頼文と承認の審査用の依頼文を作る規則
 │   ├── plan.rs             作業計画と完了判定（RunOutcome）
 │   ├── usage.rs            トークン使用量と停止理由
 │   ├── policy.rs           ユーザー別の tool allowlist / denylist
@@ -112,6 +116,7 @@ src/
 │   ├── registry.rs         ローカル tool の登録と実行
 │   ├── settings.rs         実行ループの設定（AgentSettings）と、特定の tool を前提としない既定の instructions
 │   ├── approval.rs         非対話の承認ポリシー（AlwaysApprove・DenyApproval）
+│   ├── automation.rs       自動化のポート（EventSource・Notifier）と kind 名のレジストリ
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── harness/
 │   ├── mod.rs              Harness（組み込み tool・原文履歴・スキルの登録と、実行ごとの Agent の組み立て）
@@ -121,6 +126,9 @@ src/
 │   ├── models.rs           接続先のクライアントと、メインのエージェント・ロールのモデルの解決
 │   ├── approval.rs         承認モードから承認ハンドラーを作る（ApprovalFactory）
 │   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
+│   ├── answer.rs           判定用モデルの応答（JSON）の読み取り（自動承認とトリアージで共有）
+│   ├── triage.rs           判定用モデルによる自動化のイベントの振り分け（無視・通知・作業）
+│   ├── notify.rs           自動化で始めた作業の notify_user（拡張）
 │   └── review.rs           review_changes と git_commit_push のレビュー照合（ReviewGate）
 ├── infrastructure/
 │   ├── openai.rs           Responses API クライアント（リトライ・SSE ストリーミング）
@@ -131,6 +139,8 @@ src/
 │   ├── project.rs          AGENTS.md などプロジェクト指示の読み込み
 │   ├── skills.rs           SKILL.md の読み書きと skill_read・skill_save
 │   ├── fs.rs               原子的なファイル置き換え
+│   ├── automation/         組み込みの自動化の種類（ソース: webhook、通知先: ntfy・discord・slack・webhook）
+│   ├── automation_store.rs 自動化の処理済みイベントの保存
 │   └── tools/
 │       ├── mod.rs          組み込み tool の登録（echo・unix_time）
 │       ├── names.rs        ハーネスの規則が参照する組み込み tool の名前
@@ -148,7 +158,7 @@ src/
 └── interface/
     ├── cli/                clap による CLI（run・chat・tools・session・serve・web）、進捗表示、端末での承認
     ├── web/                ano web のサーバー（セッション・SSE のイベント・ブラウザでの承認・Markdown の HTML 化）と、埋め込む画面
-    └── webhook/            署名付き Webhook、ジョブ管理
+    └── webhook/            署名付き Webhook、ジョブ管理、自動化（automation/: 登録された種類のソースを動かし、振り分け・通知する）
 
 web-ui/                     ano web の画面。naui の DOM バックエンドで組み立てる wasm（build.sh で src/interface/web/assets/pkg/ へ出力）
 ```
@@ -167,5 +177,7 @@ web-ui/                     ano web の画面。naui の DOM バックエンド�
 - **セッションの状態遷移と保存を分ける。** 状態遷移（`domain::session::SessionData`）はメモリ上だけで完結し、保存・ロック・アーカイブは `Session` が担当します。別の保存先を使う場合も同じ遷移規則を再利用できます。
 - **組み立てはハーネスが担う。** `Harness` が組み込み tool・原文履歴・スキル・`ReviewGate` を含む `Agent` を組み立て、CLI と Webhook は実行設定とモデルを解決して渡します。プロセスごとに作る具象アダプター（`OpenAiClient`・`McpPool`）と `Session` は、バイナリのエントリポイント（CLI）が作ります。Webhook サーバーはクライアントと MCP ゲートウェイを受け取るだけで、自分では作りません。
 - **実行ループは tool の名前を知らない。** tool ごとの条件・期限・繰り返しの扱いは定義に、tool をまたぐ規則（レビューを受けた変更だけをコミットする、など）は拡張に置きます。別の用途のハーネスは、実行ループに手を入れずに自分の tool と規則を加えられます。
+- **自動化の入力元と通知先は種類で差し替える。** ソースと通知先はトレイトで表し、`kind` の名前で登録します。設定のうち `kind` と `trust` 以外は種類に渡して種類自身が検証するため、新しい入力元（チャットの Bot、監視サービス、外部サービスの Webhook など）を足しても、イベントの重複の除外・ルール・判断・作業・通知の処理と設定の型は変わりません。組み込みの種類も同じ登録で動きます。
+- **自動化の入力は受け取るだけにする。** ソースは POST された要求を読むだけで、自分では取りに行きません。取得先ごとの API・認証・続きの読み方を ano の内側に持たずに済むよう、定期的な取得は cron などから送ったイベントで作業を起動し、作業の中で MCP の tool を使います。
 - **Web UI の画面は別の crate にする。** 画面（`web-ui/`）は wasm32 でだけビルドし、ブラウザの `fetch` と `EventSource` で `ano web` の API と話すので、ano の型を参照しません。workspace のメンバーにして依存のロックを共有しますが、既定のビルド対象から外し、ビルドした JS と wasm をコミットして埋め込むことで、`ano` のビルドに wasm のツールチェーンを要求しません。
 - **crate は分けない。** エージェントとハーネスは同じ crate のモジュールとして分け、依存の向きはテストで守らせています。crate に分けるには、実行ループのテストが使っている OpenAI・MCP・セッションのアダプターをエージェント側へ含めるかテストダブルに置き換え、`ToolContext` が持つ検証コマンドの設定（`domain::environment::CheckConfig`）をエージェント側の型にする必要があります。エージェントだけを使う利用者が現れたときに見直します。

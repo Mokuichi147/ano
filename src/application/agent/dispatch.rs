@@ -656,6 +656,7 @@ impl Agent {
             raw_input: None,
             context,
             goal: None,
+            approval_request: None,
         };
         let origin = RunOrigin {
             parent_conversation: scope.conversation.map(str::to_string),

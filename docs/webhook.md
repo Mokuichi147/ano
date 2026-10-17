@@ -2,6 +2,8 @@
 
 `ano serve` は署名付きの HTTP リクエストでタスクを受け付け、設定済みの実行環境でエージェントを非同期ジョブとして実行します。呼び出し側は環境の名前だけを選べ、workspace のパスや tool の allowlist を外部から上書きすることはできません。ジョブは環境の `provider`・`model` で指定した接続先とモデルで実行します（[複数の接続先を切り替える](providers.md#複数の接続先を切り替える)）。環境が参照する接続先には起動時に接続を確認するため、ログインや API キーの不足は起動時のエラーになります。接続先に `fallback` があれば、使えないときは次の接続先でジョブを続けます。
 
+`[automation]` を設定すると、同じサーバーが `POST /events/<source>` に送られたイベント（レポート・監視の結果・cron からの起動など）にも反応し、通知したりジョブを始めたりします（[自動化](automation.md)）。
+
 - [起動](#起動)
 - [エンドポイント](#エンドポイント)
 - [署名](#署名)
@@ -36,7 +38,7 @@ ano serve                      # --bind / --path で設定を上書きできま�
 | 設定（`[webhook]`） | 既定値 | 内容 |
 | --- | --- | --- |
 | `bind` | `127.0.0.1:8080` | 待ち受けアドレス |
-| `path` | `/webhook/tasks` | タスク投入のパス。固定パスのみで、`/jobs` 以下と `/healthz` は使えません |
+| `path` | `/webhook/tasks` | タスク投入のパス。固定パスのみで、`/jobs` 以下・`/events` 以下と `/healthz` は使えません |
 | `secret_env` | `ANO_WEBHOOK_SECRET` | HMAC 秘密鍵を読む環境変数名 |
 | `max_body_bytes` | 1048576 | リクエスト body の上限 |
 | `signature_tolerance_secs` | 300 | タイムスタンプの許容誤差（リプレイ検出の期間） |
@@ -53,6 +55,7 @@ ano serve                      # --bind / --path で設定を上書きできま�
 | `POST <webhook.path>` | `<timestamp>.<body>` | タスクを投入し、`202` と `job_id` を返す |
 | `GET /jobs/<job_id>` | `<timestamp>.<job_id>` | ジョブの状態と結果を取得 |
 | `POST /jobs/<job_id>/cancel` | `<timestamp>.cancel:<job_id>` | ジョブを中止 |
+| `POST /events/<source>` | `<timestamp>.event:<source>:<body>` | 自動化の webhook ソースへイベントを送る（[自動化](automation.md#webhookレポートなどの受け取り)） |
 | `GET /healthz` | なし | 死活確認 |
 
 ## 署名
@@ -140,6 +143,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8080/webhook/tasks' `
 | `error` | 失敗・中止・タイムアウトの理由 |
 | `created_at_unix` / `started_at_unix` / `finished_at_unix` | 各時刻。開始前・終了前は `null` |
 | `cancellation_requested` | 中止が要求されたか |
+| `trigger` | 自動化で始めたジョブだけ。ルール名（`rule`）とイベントのソース・種類・key・URL |
 
 長いジョブは `GET /jobs/<job_id>` を定期的に呼ぶと、`plan` と `recent_events` で進み具合を確認できます。`blocked` と `incomplete` も終了状態です。`result` と `plan` から理由と残りの工程を確認してください（[作業計画と完了判定](agent-runtime.md#作業計画と完了判定)）。
 

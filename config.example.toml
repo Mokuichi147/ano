@@ -158,6 +158,7 @@ max_tool_output_bytes = 131072
 # delegate = "quick"    # sub-agents of delegate_task
 # review = "deep"       # the reviewer of review_changes
 # approval = "quick"    # the reviewer of approval_mode = "auto" (over approval_model)
+# triage = "quick"      # the triage of automation events (approval's model when unset)
 
 [webhook]
 bind = "127.0.0.1:8080"
@@ -174,6 +175,47 @@ max_pending_jobs = 64
 max_retained_jobs = 1000
 # Wall-clock limit per running job, excluding time spent in the queue.
 job_timeout_secs = 1800
+
+# 自動化（docs/automation.md）。ano serve が、POST /events/<name> に送られたイベント
+# （レポート・監視の結果・cron からの起動など）を受け、ルールに従って無視・通知・
+# 作業（ジョブ）のどれにするかを決めます。sources が無ければ無効です。
+# [automation]
+# state_file = "~/ano-automation.json"   # 省略時は OS 標準のデータディレクトリの automation/state.json
+#
+# [automation.notifiers.phone]
+# kind = "ntfy"                          # ntfy・discord・slack・webhook
+# url = "https://ntfy.sh/my-private-topic"
+# # token_env = "NTFY_TOKEN"
+#
+# [automation.notifiers.team]
+# kind = "discord"                       # Discord・Slack の Incoming Webhook の URL は url_env で渡す
+# url_env = "DISCORD_WEBHOOK_URL"
+#
+# [automation.sources.analytics]
+# kind = "webhook"                       # 署名付きの POST /events/analytics で受け取る
+# secret_env = "ANALYTICS_SECRET"        # このソース専用の秘密（省略するとサーバーの秘密）
+# trust = "trusted"                      # 自分のサービスのレポート（既定は untrusted）
+#
+# [automation.sources.cron]
+# kind = "webhook"                       # OS の cron などから定期的に POST して作業を起動する
+# secret_env = "CRON_SECRET"
+# trust = "trusted"
+#
+# [[automation.rules]]                   # 上から順に照合し、最初に一致したルールを使う
+# name = "active-users"
+# sources = ["analytics"]
+# notify = ["phone"]
+# guidance = "アクティブユーザー数が前週から 10% 以上減ったときだけ知らせて"
+#
+# [[automation.rules]]
+# name = "daily-issues"
+# sources = ["cron"]
+# kinds = ["daily"]
+# action = "run"
+# task = "GitHub MCP で owner/name の過去1日の新しい Issue を読み、対応が要るものだけ notify_user で知らせる"
+# environment = "coding"                 # 第三者の文面を読む作業は approval_mode = "auto" か "deny" の環境で
+# notify = ["phone"]
+# notify_on = ["failed", "timed_out"]
 
 [history]
 # chronotope への原文履歴保存。既定は無効です。

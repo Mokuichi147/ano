@@ -1,11 +1,17 @@
-//! Signed webhook server that queues tasks as jobs in named environments.
+//! Signed webhook server that queues tasks as jobs in named environments,
+//! and runs the automation of `[automation]`: posted events that become
+//! notifications or jobs.
 
+mod automation;
 mod jobs;
 mod settings;
 mod signature;
 #[cfg(test)]
 mod tests;
 
+pub use automation::{
+    AutomationParts, AutomationSettings, NotifierSettings, SourceSettings, TriggerInfo,
+};
 pub use jobs::{JobState, JobStatus};
 pub use settings::WebhookSettings;
 
@@ -13,6 +19,7 @@ use crate::{
     application::{
         agent::{AgentResult, RunRequest},
         approval::DenyApproval,
+        automation::{Admission, AutomationRegistry, PostAuthentication, PostedRequest, Rejection},
         input::InputPart,
         ports::{McpGateway, ResponsesApi},
         registry::ToolRegistry,
@@ -22,10 +29,12 @@ use crate::{
     harness::{
         approval::ApprovalFactory,
         models::{Connections, RunModels},
+        notify::{NotifyExtension, AUTOMATION_INSTRUCTIONS, NOTIFY_INSTRUCTIONS},
         Harness,
     },
 };
 use anyhow::{bail, Context, Result};
+use automation::{Automation, JobTrigger};
 use axum::{
     body::Bytes,
     extract::{DefaultBodyLimit, Path, State},
@@ -38,9 +47,9 @@ use futures::FutureExt;
 use jobs::{evict_finished_jobs, JobOutcome, JobProgress, JobRecord};
 use serde::Deserialize;
 use serde_json::json;
-use signature::{remember_signature, verify_signature};
+use signature::{forget_signature, remember_signature, verify_signature};
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -54,6 +63,12 @@ use uuid::Uuid;
 
 const MAX_TASK_BYTES: usize = 100_000;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long shutdown waits to tell of the jobs it cancelled.
+const SHUTDOWN_NOTIFY_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a posted event waits for a slot to be handled in.
+const EVENT_SLOT_WAIT: Duration = Duration::from_secs(10);
+/// The longest reason a source's refusal sends back.
+const MAX_REASON_CHARS: usize = 1000;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -86,6 +101,17 @@ struct WebhookAudio {
     format: String,
 }
 
+/// A job to run: from a signed task request or from automation.
+struct JobSpec {
+    user: String,
+    environment: String,
+    input: Vec<InputPart>,
+    goal: Option<String>,
+    /// What approvals are judged against, when not the input's text.
+    approval_request: Option<String>,
+    trigger: Option<Arc<JobTrigger>>,
+}
+
 fn default_user() -> String {
     "default".to_string()
 }
@@ -111,6 +137,8 @@ struct WebhookState {
     secret: Option<Vec<u8>>,
     /// Signatures of accepted task requests -> expiry, to reject replays.
     seen_signatures: Mutex<HashMap<Vec<u8>, u64>>,
+    /// The sources, rules, and notifiers of `[automation]`, when any.
+    automation: Option<Automation>,
 }
 
 /// Start the inbound webhook server and run until Ctrl+C.
@@ -120,12 +148,14 @@ struct WebhookState {
 /// caller to submit a raw filesystem path or tool allowlist.
 ///
 /// Every job shares `mcp`. The caller owns it and shuts it down after this
-/// returns.
+/// returns. `[automation]` can use the kinds of sources and notifiers in
+/// `automation`.
 pub async fn serve(
     config: AppConfig,
     client: impl ResponsesApi + 'static,
     mcp: Arc<dyn McpGateway>,
     registry: ToolRegistry,
+    automation: AutomationRegistry,
 ) -> Result<()> {
     config.validate()?;
     let webhook = config.webhook.clone();
@@ -171,6 +201,22 @@ pub async fn serve(
             .with_context(|| format!("failed to connect the providers of environment '{name}'"))?;
     }
     let harness = Harness::with_registry(registry, &config)?;
+    let automation_registry = automation;
+    let automation = if config.automation.is_enabled() {
+        let selection = config.select_model(&[])?;
+        let models = RunModels::resolve(&config, &[], &selection, &mut connections)
+            .context("failed to connect the provider of the triage model")?;
+        let automation = Automation::from_config(&config, &automation_registry, models.triage)?;
+        println!(
+            "ano automation: {} sources, {} rules; state in {}",
+            automation.settings.sources.len(),
+            automation.settings.rules.len(),
+            automation.store.path().display()
+        );
+        Some(automation)
+    } else {
+        None
+    };
     let state = Arc::new(WebhookState {
         harness,
         job_slots: Arc::new(Semaphore::new(webhook.max_concurrent_jobs)),
@@ -183,6 +229,7 @@ pub async fn serve(
         tasks: Mutex::new(JoinSet::new()),
         secret,
         seen_signatures: Mutex::new(HashMap::new()),
+        automation,
     });
     let app = router(Arc::clone(&state));
 
@@ -207,6 +254,7 @@ fn router(state: Arc<WebhookState>) -> Router {
         .route(&state.config.webhook.path, post(create_job))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
+        .route("/events/{source}", post(post_event))
         .route("/healthz", get(healthz))
         .layer(DefaultBodyLimit::max(state.config.webhook.max_body_bytes))
         .with_state(state)
@@ -244,103 +292,255 @@ async fn create_job(
         return error_response(StatusCode::BAD_REQUEST, &error.to_string());
     }
 
+    let mut input = vec![InputPart::Text(request.task)];
+    input.extend(
+        request
+            .images
+            .into_iter()
+            .map(|image| InputPart::ImageData {
+                data: image.data,
+                mime_type: image.mime_type,
+            }),
+    );
+    input.extend(request.audio.into_iter().map(|audio| InputPart::AudioData {
+        data: audio.data,
+        format: audio.format,
+    }));
+    let spec = JobSpec {
+        user: request.user,
+        environment: request.environment,
+        input,
+        goal: request.goal,
+        approval_request: None,
+        trigger: None,
+    };
+    match admit_job(&state, spec, signature).await {
+        Ok(id) => (
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "job_id": id,
+                "status": JobState::Queued,
+                "status_url": format!("/jobs/{id}"),
+                "cancel_url": format!("/jobs/{id}/cancel"),
+            })),
+        )
+            .into_response(),
+        Err((status, message)) => error_response(status, &message),
+    }
+}
+
+/// Queue `spec` as a job and return its id. A request's `signature` is
+/// consumed only when the job is accepted, so a refused request can be
+/// sent again.
+async fn admit_job(
+    state: &Arc<WebhookState>,
+    spec: JobSpec,
+    signature: Option<Vec<u8>>,
+) -> std::result::Result<String, (StatusCode, String)> {
+    let refuse = |status: StatusCode, message: &str| Err((status, message.to_string()));
     let id = Uuid::new_v4().to_string();
-    {
-        let mut jobs = state.jobs.write().await;
-        if *state.shutdown.borrow() {
-            return error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "webhook server is shutting down",
-            );
+    let mut jobs = state.jobs.write().await;
+    if *state.shutdown.borrow() {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "webhook server is shutting down",
+        );
+    }
+    // An already accepted request remains a replay even when capacity is
+    // exhausted. Inspect without consuming a new signature on overload.
+    if signature.as_ref().is_some_and(|signature| {
+        state
+            .seen_signatures
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(signature)
+            .is_some_and(|expiry| *expiry > unix_now())
+    }) {
+        return refuse(StatusCode::UNAUTHORIZED, "replayed webhook request");
+    }
+    let pending = jobs
+        .values()
+        .filter(|job| !job.snapshot.status.is_finished())
+        .count();
+    if pending >= state.config.webhook.max_pending_jobs {
+        return refuse(StatusCode::SERVICE_UNAVAILABLE, "too many pending jobs");
+    }
+    // Consume the signature only when the request can be accepted. Keep
+    // this check and insertion under the jobs lock so concurrent retries
+    // cannot both enqueue work, while a 503 remains safe to retry.
+    if let Some(signature) = signature {
+        if !remember_signature(state, signature) {
+            return refuse(StatusCode::UNAUTHORIZED, "replayed webhook request");
         }
-        // An already accepted request remains a replay even when capacity is
-        // exhausted. Inspect without consuming a new signature on overload.
-        if signature.as_ref().is_some_and(|signature| {
-            state
-                .seen_signatures
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .get(signature)
-                .is_some_and(|expiry| *expiry > unix_now())
-        }) {
+    }
+    evict_finished_jobs(&mut jobs, state.config.webhook.max_retained_jobs);
+    let (cancel, cancellation) = watch::channel(false);
+    jobs.insert(
+        id.clone(),
+        JobRecord {
+            snapshot: JobStatus {
+                id: id.clone(),
+                status: JobState::Queued,
+                user: spec.user.clone(),
+                environment: spec.environment.clone(),
+                created_at_unix: unix_now(),
+                started_at_unix: None,
+                finished_at_unix: None,
+                cancellation_requested: false,
+                result: None,
+                plan: None,
+                usage: None,
+                stop_reason: None,
+                error: None,
+                recent_events: Vec::new(),
+                trigger: spec.trigger.as_ref().map(|trigger| trigger.info()),
+            },
+            cancel,
+            finished_at: None,
+            progress: Default::default(),
+            trigger: spec.trigger.clone(),
+        },
+    );
+    // Register the task before releasing the admission lock. Shutdown
+    // takes the same lock, so no accepted task escapes supervision.
+    let task_state = Arc::clone(state);
+    let task_id = id.clone();
+    let mut tasks = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while tasks.try_join_next().is_some() {}
+    tasks.spawn(async move {
+        let run = run_job(Arc::clone(&task_state), task_id.clone(), spec, cancellation);
+        if AssertUnwindSafe(run).catch_unwind().await.is_err() {
+            finish(
+                &task_state,
+                &task_id,
+                JobOutcome::Failed("job execution panicked".into()),
+            )
+            .await;
+        }
+    });
+    Ok(id)
+}
+
+/// Receive an event posted for the source `source` of `[automation]`. The
+/// server checks ano's signature unless the source authenticates requests
+/// itself; the source reads the request.
+async fn post_event(
+    State(state): State<Arc<WebhookState>>,
+    headers: HeaderMap,
+    Path(source): Path<String>,
+    body: Bytes,
+) -> Response {
+    let target = state.automation.as_ref().and_then(|automation| {
+        let found = automation.source(&source)?;
+        Some((automation, found, found.authentication()))
+    });
+    let signature = match target {
+        Some((_, _, PostAuthentication::Source)) => None,
+        // Unknown sources are told apart only for requests signed with
+        // ano's secret.
+        _ => {
+            // Domain-separate events from task requests and from other
+            // sources.
+            let mut payload = format!("event:{source}:").into_bytes();
+            payload.extend_from_slice(&body);
+            match verify_signature(&state, &headers, &payload, unix_now()) {
+                Ok(signature) => signature,
+                Err(message) => return error_response(StatusCode::UNAUTHORIZED, message),
+            }
+        }
+    };
+    let Some((automation, found, _)) = target else {
+        return error_response(StatusCode::NOT_FOUND, "unknown event source");
+    };
+    let header_values: BTreeMap<String, String> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((name.as_str().to_string(), value.to_str().ok()?.to_string()))
+        })
+        .collect();
+    let received = found.receive(&PostedRequest {
+        source: &source,
+        headers: &header_values,
+        body: &body,
+    });
+    let mut event = match received {
+        Ok(event) => event,
+        // A source's reason is cut, so a long one is not sent back whole.
+        Err(Rejection::Unauthorized(message)) => {
+            return error_response(StatusCode::UNAUTHORIZED, &cut_reason(&message))
+        }
+        Err(Rejection::Invalid(message)) => {
+            return error_response(StatusCode::BAD_REQUEST, &cut_reason(&message))
+        }
+    };
+    // A source speaks only for itself.
+    event.source.clone_from(&source);
+    if let Err(error) = event.check() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("invalid event: {error:#}"),
+        );
+    }
+    if *state.shutdown.borrow() {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "webhook server is shutting down",
+        );
+    }
+    // A full queue is refused before the signature is used, so the same
+    // request can be sent again later.
+    let Ok(queued) = Arc::clone(&automation.queued_events).try_acquire_owned() else {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "too many pending events");
+    };
+    // The event is recorded only once a slot to handle it is held, so an
+    // accepted event never waits recorded but unhandled.
+    let Some(slot) = automation.slot(EVENT_SLOT_WAIT).await else {
+        return error_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "busy with other events; send it again later",
+        );
+    };
+    if let Some(signature) = &signature {
+        if !remember_signature(&state, signature.clone()) {
             return error_response(StatusCode::UNAUTHORIZED, "replayed webhook request");
         }
-        let pending = jobs
-            .values()
-            .filter(|job| !job.snapshot.status.is_finished())
-            .count();
-        if pending >= state.config.webhook.max_pending_jobs {
-            return error_response(StatusCode::SERVICE_UNAVAILABLE, "too many pending jobs");
-        }
-        // Consume the signature only when the request can be accepted. Keep
-        // this check and insertion under the jobs lock so concurrent retries
-        // cannot both enqueue work, while a 503 remains safe to retry.
-        if let Some(signature) = signature {
-            if !remember_signature(&state, signature) {
-                return error_response(StatusCode::UNAUTHORIZED, "replayed webhook request");
-            }
-        }
-        evict_finished_jobs(&mut jobs, state.config.webhook.max_retained_jobs);
-        let (cancel, cancellation) = watch::channel(false);
-        jobs.insert(
-            id.clone(),
-            JobRecord {
-                snapshot: JobStatus {
-                    id: id.clone(),
-                    status: JobState::Queued,
-                    user: request.user.clone(),
-                    environment: request.environment.clone(),
-                    created_at_unix: unix_now(),
-                    started_at_unix: None,
-                    finished_at_unix: None,
-                    cancellation_requested: false,
-                    result: None,
-                    plan: None,
-                    usage: None,
-                    stop_reason: None,
-                    error: None,
-                    recent_events: Vec::new(),
-                },
-                cancel,
-                finished_at: None,
-                progress: Default::default(),
-            },
-        );
-        // Register the task before releasing the admission lock. Shutdown
-        // takes the same lock, so no accepted task escapes supervision.
-        let task_state = Arc::clone(&state);
-        let task_id = id.clone();
-        let mut tasks = state
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        while tasks.try_join_next().is_some() {}
-        tasks.spawn(async move {
-            let run = run_job(
-                Arc::clone(&task_state),
-                task_id.clone(),
-                request,
-                cancellation,
-            );
-            if AssertUnwindSafe(run).catch_unwind().await.is_err() {
-                finish(
-                    &task_state,
-                    &task_id,
-                    JobOutcome::Failed("job execution panicked".into()),
-                )
-                .await;
-            }
-        });
     }
-
+    let key = event.key.clone();
+    match automation::accept(&state, &event) {
+        Admission::New => {}
+        Admission::Duplicate => {
+            return (StatusCode::OK, Json(json!({"key": key, "duplicate": true}))).into_response()
+        }
+        Admission::Failed(error) => {
+            eprintln!("automation: could not record {source}/{key}: {error}");
+            // Nothing was done, so the same request may be sent again.
+            if let Some(signature) = &signature {
+                forget_signature(&state, signature);
+            }
+            return error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the event could not be recorded; send it again later",
+            );
+        }
+    }
+    // Triage can take a while; the poster only learns that it arrived.
+    let task_state = Arc::clone(&state);
+    let mut tasks = state
+        .tasks
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    while tasks.try_join_next().is_some() {}
+    tasks.spawn(async move {
+        automation::process_in(&task_state, event, slot).await;
+        drop(queued);
+    });
+    drop(tasks);
     (
         StatusCode::ACCEPTED,
-        Json(json!({
-            "job_id": id,
-            "status": JobState::Queued,
-            "status_url": format!("/jobs/{id}"),
-            "cancel_url": format!("/jobs/{id}/cancel"),
-        })),
+        Json(json!({"key": key, "duplicate": false})),
     )
         .into_response()
 }
@@ -392,7 +592,7 @@ async fn cancellation_requested(mut signal: watch::Receiver<bool>) {
 async fn run_job(
     state: Arc<WebhookState>,
     id: String,
-    request: WebhookTaskRequest,
+    spec: JobSpec,
     cancellation: watch::Receiver<bool>,
 ) {
     let shutdown = state.shutdown.subscribe();
@@ -422,7 +622,7 @@ async fn run_job(
         _ = cancellation_requested(shutdown) => JobOutcome::Cancelled,
         outcome = tokio::time::timeout(
             Duration::from_secs(state.config.webhook.job_timeout_secs),
-            execute_job(&state, request, progress),
+            execute_job(&state, spec, progress),
         ) => match outcome {
             Ok(Ok(result)) => JobOutcome::Completed(Box::new(result)),
             Ok(Err(error)) => JobOutcome::Failed(format!("{error:#}")),
@@ -447,21 +647,33 @@ async fn signal_shutdown(state: &WebhookState) {
 
 async fn shutdown_jobs(state: &WebhookState) {
     signal_shutdown(state).await;
-    let mut tasks = std::mem::take(
-        &mut *state
-            .tasks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()),
-    );
+    let take = || {
+        std::mem::take(
+            &mut *state
+                .tasks
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    };
+    // Finishing jobs add the tasks that send their notifications, so wait
+    // until no task is left.
     if tokio::time::timeout(SHUTDOWN_TIMEOUT, async {
-        while tasks.join_next().await.is_some() {}
+        loop {
+            let mut tasks = take();
+            if tasks.is_empty() {
+                break;
+            }
+            while tasks.join_next().await.is_some() {}
+        }
     })
     .await
     .is_err()
     {
-        tasks.abort_all();
+        // Dropping the timed out wait aborted the tasks it held.
+        take().abort_all();
         // Do not await non-cooperative application code indefinitely.
         let mut jobs = state.jobs.write().await;
+        let mut notifications = Vec::new();
         for job in jobs
             .values_mut()
             .filter(|job| !job.snapshot.status.is_finished())
@@ -469,21 +681,46 @@ async fn shutdown_jobs(state: &WebhookState) {
             job.snapshot.status = JobState::Cancelled;
             job.snapshot.finished_at_unix = Some(unix_now());
             job.finished_at = Some(Instant::now());
-            job.snapshot.error = Some("job cancelled during server shutdown".into());
+            let error = "job cancelled during server shutdown";
+            job.snapshot.error = Some(error.into());
+            if let Some(trigger) = &job.trigger {
+                if trigger.rule.notifies(JobState::Cancelled.name()) {
+                    let notifiers = trigger.notifiers.clone();
+                    let notification = trigger.finished(JobState::Cancelled.name(), error);
+                    notifications
+                        .push(async move { automation::send_all(&notifiers, &notification).await });
+                }
+            }
         }
         evict_finished_jobs(&mut jobs, state.config.webhook.max_retained_jobs);
+        drop(jobs);
+        // The rules asked to hear of cancelled jobs; the wait stays short.
+        let _ = tokio::time::timeout(
+            SHUTDOWN_NOTIFY_TIMEOUT,
+            futures::future::join_all(notifications),
+        )
+        .await;
     }
 }
 
 async fn execute_job(
     state: &WebhookState,
-    request: WebhookTaskRequest,
+    spec: JobSpec,
     progress: Arc<Mutex<JobProgress>>,
 ) -> Result<AgentResult> {
     let mut profile = state
         .config
-        .execution_profile(&request.user, &request.environment, &[])?;
-    let base = [state.config.environment_request(&request.environment)?];
+        .execution_profile(&spec.user, &spec.environment, &[])?;
+    if let Some(trigger) = &spec.trigger {
+        let instructions = &mut profile.settings.instructions;
+        instructions.push_str("\n\n");
+        instructions.push_str(AUTOMATION_INSTRUCTIONS);
+        if trigger.rule.allows_notify_user(&trigger.event) {
+            instructions.push(' ');
+            instructions.push_str(NOTIFY_INSTRUCTIONS);
+        }
+    }
+    let base = [state.config.environment_request(&spec.environment)?];
     let selection = state.config.select_model(&base)?;
     selection.apply_to(&mut profile.settings);
     let mut connections = state.connections.clone();
@@ -503,7 +740,7 @@ async fn execute_job(
         mode: profile.approval_mode,
         ask_user: Arc::new(DenyApproval),
     };
-    let agent = state
+    let mut agent = state
         .harness
         .agent(&profile, models, Arc::clone(&state.mcp), &approval)
         .with_event_listener(Arc::new(move |event| {
@@ -512,22 +749,19 @@ async fn execute_job(
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .record(event)
         }));
-    let mut input = vec![InputPart::Text(request.task)];
-    input.extend(
-        request
-            .images
-            .into_iter()
-            .map(|image| InputPart::ImageData {
-                data: image.data,
-                mime_type: image.mime_type,
-            }),
-    );
-    input.extend(request.audio.into_iter().map(|audio| InputPart::AudioData {
-        data: audio.data,
-        format: audio.format,
-    }));
-
-    let raw_input = request.goal.as_ref().map(|goal| {
+    if let Some(trigger) = spec
+        .trigger
+        .as_ref()
+        .filter(|trigger| trigger.rule.allows_notify_user(&trigger.event))
+    {
+        agent = agent.with_extension(Arc::new(NotifyExtension::new(
+            trigger.notifiers.clone(),
+            &trigger.rule.name,
+            trigger.event.url.clone(),
+        )));
+    }
+    let input = spec.input;
+    let raw_input = spec.goal.as_ref().map(|goal| {
         let mut original = input.clone();
         original.push(InputPart::Text(goal.clone()));
         original
@@ -537,17 +771,15 @@ async fn execute_job(
             input,
             raw_input,
             context: profile.context,
-            goal: request
-                .goal
-                .as_deref()
-                .map(TaskGoal::from_user)
-                .transpose()?,
+            goal: spec.goal.as_deref().map(TaskGoal::from_user).transpose()?,
+            approval_request: spec.approval_request,
         })
         .await
 }
 
 async fn finish(state: &WebhookState, id: &str, outcome: JobOutcome) {
     let mut jobs = state.jobs.write().await;
+    let mut notification = None;
     if let Some(job) = jobs.get_mut(id) {
         let status = &mut job.snapshot;
         if status.status.is_finished() {
@@ -592,8 +824,29 @@ async fn finish(state: &WebhookState, id: &str, outcome: JobOutcome) {
                 ));
             }
         }
+        if let Some(trigger) = &job.trigger {
+            let name = status.status.name();
+            if trigger.rule.notifies(name) {
+                let text = status
+                    .result
+                    .as_deref()
+                    .or(status.error.as_deref())
+                    .unwrap_or("");
+                notification = Some((trigger.notifiers.clone(), trigger.finished(name, text)));
+            }
+        }
     }
     evict_finished_jobs(&mut jobs, state.config.webhook.max_retained_jobs);
+    drop(jobs);
+    if let Some((notifiers, notification)) = notification {
+        // Sending can be slow; the job's slot is not held for it. Shutdown
+        // waits for it like for the jobs.
+        state
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .spawn(async move { automation::send_all(&notifiers, &notification).await });
+    }
 }
 
 fn unix_now() -> u64 {
@@ -601,6 +854,15 @@ fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
+}
+
+/// A reason a source gave, cut to `MAX_REASON_CHARS`.
+fn cut_reason(message: &str) -> String {
+    let mut reason: String = message.chars().take(MAX_REASON_CHARS).collect();
+    if message.chars().count() > MAX_REASON_CHARS {
+        reason.push('…');
+    }
+    reason
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {

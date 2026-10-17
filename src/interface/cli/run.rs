@@ -256,6 +256,7 @@ pub(super) async fn run_agent(
         raw_input,
         context,
         goal,
+        approval_request: None,
     };
     let result = match &mut session {
         Some(session) => agent.run_in_session(request, session).await,

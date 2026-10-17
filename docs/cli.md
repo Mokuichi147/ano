@@ -8,7 +8,8 @@
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
 | `ano web` | ブラウザで対話する Web UI を起動します。セッションごとに作業フォルダ・環境・プリセット・権限・承認モードを選べます（[docs/web.md](web.md)） |
-| `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](webhook.md)） |
+| `ano serve` | Webhook サーバーを起動します。`[automation]` があれば、送られたイベントへの反応と通知も行います（[docs/webhook.md](webhook.md)、[docs/automation.md](automation.md)） |
+| `ano automation list` / `ano automation notify NAME [MESSAGE]` | 自動化のソース・ルール・通知先を表示し、通知先へテストを送ります（[`ano automation`](automation.md#ano-automation)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](chronotope-history.md)） |
 | `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](agent-runtime.md#スキルskill_read--skill_save)） |
 | `ano mcp tools [LABEL]` | MCP server に接続して提供される tool をすべて表示し、設定で有効なものに印を付けます（[tool の確認と有効化](mcp.md#tool-の確認と有効化)） |
@@ -17,7 +18,7 @@
 | `ano provider add/set/remove/enable/disable NAME` | 設定ファイルを直接編集せずに、接続先を追加・変更・削除・有効化・無効化します |
 | `ano preset list/add/set/remove NAME` | 接続先・モデル・推論の強さの組（プリセット）を管理します（[プリセット](providers.md#プリセットとロール)） |
 | `ano preset edit [NAME]` | プリセットの接続先・モデル・推論の強さを一覧から選んで変更し、設定ファイルに保存します |
-| `ano preset role ROLE NAME` | メインのエージェントの既定（`default`）・サブエージェント（`delegate`）・レビュー担当（`review`）・承認の判定（`approval`）に使うプリセットを選びます |
+| `ano preset role ROLE NAME` | メインのエージェントの既定（`default`）・サブエージェント（`delegate`）・レビュー担当（`review`）・承認の判定（`approval`）・自動化のトリアージ（`triage`）に使うプリセットを選びます |
 | `ano model list [--provider NAME]` | 接続先に接続して提供されるモデル（と登録したモデル）をすべて表示し、設定で有効なものに印を付けます（[モデルの有効化](providers.md#接続先の管理)） |
 | `ano model add/remove MODEL... [--provider NAME]` | モデル一覧を返さない接続先（ChatGPT サブスクリプションなど）に、使うモデル名を登録・削除します |
 | `ano model edit [--provider NAME]` | 接続先のモデルをチェックリストで有効化・無効化し、設定ファイルに保存します（`ano model enable/disable MODEL... [--provider NAME]` でも可） |

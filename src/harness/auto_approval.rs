@@ -4,10 +4,11 @@
 //! the reason passed back to the agent. Nobody is asked, so a run in this
 //! mode never waits for the user.
 
+use super::answer::{json_object, response_text, unreadable};
 use crate::application::ports::{
     ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest, ResponsesApi,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use regex::Regex;
 use serde_json::{json, Value};
@@ -208,43 +209,17 @@ impl ApprovalHandler for AutoApproval {
 }
 
 fn parse_review(response: &Value) -> Result<(Verdict, String)> {
-    if let Some(error) = response["error"]["message"].as_str() {
-        bail!("reviewer returned an error: {error}");
-    }
-    let text = response["output_text"]
-        .as_str()
-        .map(str::to_string)
-        .unwrap_or_else(|| {
-            response["output"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter(|item| item["type"] == "message")
-                .flat_map(|item| item["content"].as_array().into_iter().flatten())
-                .filter_map(|part| part["text"].as_str())
-                .collect::<Vec<_>>()
-                .join("")
-        });
+    let text = response_text(response).map_err(|error| anyhow!("reviewer: {error:#}"))?;
     // Endpoints without structured output may wrap the object in prose or a
     // code fence; take the outermost JSON object. Some local servers ignore
     // the requested format entirely and answer "**allow** — reason".
-    if let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) {
-        if let Ok(value) = serde_json::from_str::<Value>(&text[start..=end.max(start)]) {
-            return review_from_json(&value);
-        }
+    if let Some(value) = json_object(&text) {
+        return review_from_json(&value);
     }
     if let Some(review) = review_from_fields(&text) {
         return Ok(review);
     }
-    review_from_prose(&text).with_context(|| {
-        let answer = text.trim();
-        if answer.is_empty() {
-            "reviewer gave an empty answer".to_string()
-        } else {
-            let excerpt: String = answer.chars().take(200).collect();
-            format!("could not read the reviewer answer {excerpt:?}")
-        }
-    })
+    review_from_prose(&text).with_context(|| unreadable(&text, "reviewer"))
 }
 
 /// Read the fields of a JSON object that is malformed, such as one missing
