@@ -1,6 +1,7 @@
 //! ChatGPT のデバイス認証と、ano 専用の認証情報保存。
 
 use super::super::fs::atomic_write;
+use crate::application::clock::unix_now;
 use anyhow::{bail, Context, Result};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use reqwest::{Client, StatusCode};
@@ -10,7 +11,7 @@ use std::{
     fs::{File, OpenOptions, TryLockError},
     io::ErrorKind,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::Duration,
 };
 
 const ISSUER: &str = "https://auth.openai.com";
@@ -93,7 +94,7 @@ impl ChatGptAuth {
         let credentials = self.load()?;
         Ok(AuthStatus {
             logged_in: credentials.is_some(),
-            needs_refresh: credentials.is_some_and(|c| c.expires_at <= now() + REFRESH_MARGIN),
+            needs_refresh: credentials.is_some_and(|c| c.expires_at <= unix_now() + REFRESH_MARGIN),
         })
     }
 
@@ -200,7 +201,7 @@ impl ChatGptAuth {
         let current = self
             .load()?
             .context("ChatGPT にログインしていません。ano auth login を実行してください")?;
-        let needs_refresh = current.expires_at <= now() + REFRESH_MARGIN
+        let needs_refresh = current.expires_at <= unix_now() + REFRESH_MARGIN
             || rejected == Some(current.access_token.as_str());
         if !needs_refresh {
             return Ok(current);
@@ -393,9 +394,9 @@ fn credentials_from_tokens(tokens: &Value, previous: Option<&Credentials>) -> Re
         .to_string();
     let expires_at = tokens["expires_in"]
         .as_u64()
-        .map(|seconds| now().saturating_add(seconds))
+        .map(|seconds| unix_now().saturating_add(seconds))
         .or_else(|| claims["exp"].as_u64())
-        .unwrap_or_else(|| now() + 3600);
+        .unwrap_or_else(|| unix_now() + 3600);
     Ok(Credentials {
         access_token,
         refresh_token,
@@ -411,13 +412,6 @@ fn token_claims(token: &str) -> Value {
         .and_then(|part| URL_SAFE_NO_PAD.decode(part).ok())
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or(Value::Null)
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

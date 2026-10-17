@@ -5,8 +5,11 @@
 //! mode never waits for the user.
 
 use super::answer::{json_object, response_text, unreadable};
-use crate::application::ports::{
-    ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest, ResponsesApi,
+use crate::{
+    application::ports::{
+        ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest, ResponsesApi,
+    },
+    domain::text::cut,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -99,7 +102,7 @@ impl AutoApproval {
             "user_request": request.user_request,
             "server": server,
             "tool": request.tool_name,
-            "tool_description": request.tool_description.as_deref().map(truncate),
+            "tool_description": request.tool_description.as_deref().map(|text| cut(text, MAX_FIELD_CHARS)),
             "arguments": arguments,
         });
         let mut payload = json!({
@@ -284,19 +287,14 @@ fn verdict_from(decision: &str) -> Result<Verdict> {
 
 fn reason_from(reason: &str) -> String {
     let reason = reason.trim();
-    truncate(if reason.is_empty() {
-        "no reason given"
-    } else {
-        reason
-    })
-}
-
-fn truncate(text: &str) -> String {
-    let mut result = text.chars().take(MAX_FIELD_CHARS).collect::<String>();
-    if text.chars().count() > MAX_FIELD_CHARS {
-        result.push('…');
-    }
-    result
+    cut(
+        if reason.is_empty() {
+            "no reason given"
+        } else {
+            reason
+        },
+        MAX_FIELD_CHARS,
+    )
 }
 
 #[cfg(test)]

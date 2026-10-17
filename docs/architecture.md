@@ -103,6 +103,7 @@ src/
 │   ├── mcp.rs              MCP サーバー設定と公開可否の判定
 │   ├── skill.rs            スキルの名前・説明・本文の検証
 │   ├── environment.rs      実行環境と検証コマンドの設定
+│   ├── text.rs             上限付きの文字列の切り詰め
 │   └── github.rs           git remote の URL から GitHub のリポジトリ名を読む
 ├── application/
 │   ├── ports.rs            外部依存のトレイト
@@ -118,13 +119,15 @@ src/
 │   ├── settings.rs         実行ループの設定（AgentSettings）と、特定の tool を前提としない既定の instructions
 │   ├── approval.rs         非対話の承認ポリシー（AlwaysApprove・DenyApproval）
 │   ├── automation.rs       自動化のポート（EventSource・Notifier）と kind 名のレジストリ
+│   ├── clock.rs            現在時刻（Unix 秒）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── harness/
 │   ├── mod.rs              Harness（組み込み tool・原文履歴・スキルの登録と、実行ごとの Agent の組み立て）
 │   ├── settings.rs         config.toml の [agent]（実行ループの設定と、AGENTS.md・承認・接続先・ロールの設定）
 │   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、AGENTS.md・スキル一覧の追記
-│   ├── profile.rs          実行環境から1回の実行設定を解決（ExecutionProfile）
-│   ├── models.rs           接続先のクライアントと、メインのエージェント・ロールのモデルの解決
+│   ├── profile.rs          実行環境（または実行環境を使わない実行の権限）から1回の実行設定を解決（ExecutionProfile）
+│   ├── models.rs           接続先のクライアントと、メインのエージェント・ロールのモデルの解決、会話中のモデルの切り替え
+│   ├── conversation.rs     クライアントがターンごとに進める会話（ano web・ano acp で共有。開始・中断・終了）
 │   ├── approval.rs         承認モードから承認ハンドラーを作る（ApprovalFactory）
 │   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
 │   ├── answer.rs           判定用モデルの応答（JSON）の読み取り（自動承認とトリアージで共有）

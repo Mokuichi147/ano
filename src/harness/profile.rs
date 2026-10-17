@@ -1,4 +1,5 @@
-//! Resolution of a named environment into the settings of one run.
+//! Resolution of a named environment, or of the permissions a run chose
+//! itself, into the settings of one run.
 
 use super::{
     instructions::{append_project_instructions, append_skills},
@@ -6,6 +7,7 @@ use super::{
 };
 use crate::{
     application::settings::AgentSettings,
+    config::{AppConfig, ModelRequest, ModelSelection},
     domain::{
         approval::ApprovalMode,
         environment::EnvironmentConfig,
@@ -15,7 +17,8 @@ use crate::{
     },
     infrastructure::skills::SkillLibrary,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::PathBuf;
 
 /// Everything a run takes from configuration: model settings, the effective
 /// tool policy, and the context passed to tools.
@@ -30,7 +33,59 @@ pub struct ExecutionProfile {
     pub approval_mode: ApprovalMode,
 }
 
+/// What a run that names no configured environment may do, as its command
+/// line or its client chose.
+#[derive(Debug, Clone, Default)]
+pub struct Permissions {
+    pub workspace: Option<PathBuf>,
+    pub allow_writes: bool,
+    pub allow_exec: bool,
+    /// Defaults to `[agent].approval_mode`.
+    pub approval_mode: Option<ApprovalMode>,
+}
+
 impl ExecutionProfile {
+    /// The settings of a run that names no configured environment: those of
+    /// `[agent]` with the user's policy and `permissions`, under the
+    /// environment name `environment`.
+    pub fn ad_hoc(
+        base: &AgentConfig,
+        user_policy: UserPolicy,
+        user_id: &str,
+        environment: &str,
+        permissions: Permissions,
+    ) -> Self {
+        Self {
+            settings: base.settings.clone(),
+            project_instructions: base.project_instructions.clone(),
+            policy: user_policy,
+            context: ToolContext {
+                user_id: user_id.to_string(),
+                environment: environment.to_string(),
+                workspace: permissions.workspace,
+                allow_writes: permissions.allow_writes,
+                allow_exec: permissions.allow_exec,
+                checks: Default::default(),
+            },
+            approval_mode: permissions.approval_mode.unwrap_or(base.approval_mode),
+        }
+    }
+
+    /// Choose the model of the run from `layers`, the requests from the
+    /// bottom up, and apply it to the settings, which must then be valid.
+    pub fn choose_model(
+        &mut self,
+        config: &AppConfig,
+        layers: &[ModelRequest],
+    ) -> Result<ModelSelection> {
+        let selection = config
+            .select_model(layers)
+            .context("invalid model choice")?;
+        selection.apply_to(&mut self.settings);
+        self.settings.validate()?;
+        Ok(selection)
+    }
+
     /// Layer a named environment over the base settings and the user's
     /// policy. The result never allows a tool that either forbids.
     pub fn for_environment(

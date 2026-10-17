@@ -1,7 +1,7 @@
 //! In-memory conversation store for multi-turn use within one process.
 
 use crate::{
-    application::ports::ConversationStore,
+    application::{clock::unix_now, ports::ConversationStore},
     domain::{
         compaction::CompactionRecord,
         plan::TaskPlan,
@@ -11,7 +11,6 @@ use crate::{
 };
 use anyhow::Result;
 use serde_json::Value;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Keeps a conversation for the lifetime of the process, e.g. an interactive
 /// chat without `--session`. Nothing is written to disk.
@@ -22,12 +21,8 @@ pub struct MemoryConversation {
 
 impl MemoryConversation {
     pub fn new(binding: SessionBinding) -> Self {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         Self {
-            data: SessionData::new(binding, now),
+            data: SessionData::new(binding, unix_now()),
             replays_history: true,
         }
     }

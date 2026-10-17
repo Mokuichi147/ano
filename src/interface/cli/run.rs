@@ -20,7 +20,7 @@ use crate::{
     harness::{
         approval::ApprovalFactory,
         models::{Connections, RunModels},
-        profile::ExecutionProfile,
+        profile::{ExecutionProfile, Permissions},
         Harness,
     },
     infrastructure::{mcp::McpPool, session_store::Session},
@@ -290,23 +290,21 @@ fn resolve_run_context(
             }
             profile
         }
-        None => ExecutionProfile {
-            settings: config.agent.settings.clone(),
-            project_instructions: config.agent.project_instructions.clone(),
-            policy: config.policy_for(user_id, &args.disabled_tools),
-            context: ToolContext {
-                user_id: user_id.to_string(),
-                environment: "cli".to_string(),
+        None => config.ad_hoc_profile(
+            user_id,
+            "cli",
+            &args.disabled_tools,
+            Permissions {
                 workspace: Some(match &args.workspace {
                     Some(path) => path.clone(),
                     None => current_dir()?,
                 }),
                 allow_writes: args.allow_writes,
                 allow_exec: args.allow_exec,
-                checks: Default::default(),
+                // Set below, as for an environment.
+                approval_mode: None,
             },
-            approval_mode: config.agent.approval_mode,
-        },
+        ),
     };
     if args.non_interactive {
         profile.approval_mode = ApprovalMode::Deny;

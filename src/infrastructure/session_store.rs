@@ -2,7 +2,7 @@
 //! lock against concurrent processes, and atomic replacement on every save.
 
 use crate::{
-    application::ports::ConversationStore,
+    application::{clock::unix_now, ports::ConversationStore},
     domain::{
         compaction::CompactionRecord,
         plan::TaskPlan,
@@ -17,7 +17,6 @@ use std::{
     fs::{File, OpenOptions},
     io::{ErrorKind, Read},
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 const MAX_SESSION_BYTES: u64 = 32 * 1024 * 1024;
@@ -61,7 +60,7 @@ impl Session {
                     .downcast_ref::<std::io::Error>()
                     .is_some_and(|error| error.kind() == ErrorKind::NotFound) =>
             {
-                SessionData::new(binding.clone(), now())
+                SessionData::new(binding.clone(), unix_now())
             }
             Err(error) => return Err(error),
         };
@@ -107,7 +106,7 @@ impl Session {
     }
 
     fn save(&mut self) -> Result<()> {
-        self.data.updated_at_unix = now();
+        self.data.updated_at_unix = unix_now();
         let bytes = serde_json::to_vec_pretty(&self.data)?;
         if bytes.len() as u64 > MAX_SESSION_BYTES {
             bail!("session exceeds the 32 MiB limit; start a new session");
@@ -207,13 +206,6 @@ impl ConversationStore for Session {
         }
         Ok(())
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 #[cfg(test)]

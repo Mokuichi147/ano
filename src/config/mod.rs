@@ -20,7 +20,10 @@ pub use selection::{ModelRequest, ModelSelection, PresetSettings, DEFAULT_PRESET
 use crate::{
     application::settings::validate_reasoning_effort,
     domain::{environment::EnvironmentConfig, mcp::McpServerConfig, policy::UserPolicy},
-    harness::{profile::ExecutionProfile, settings::AgentConfig},
+    harness::{
+        profile::{ExecutionProfile, Permissions},
+        settings::AgentConfig,
+    },
     infrastructure::{
         chronotope::HistorySettings,
         openai::{ApiSettings, ProviderSettings},
@@ -435,6 +438,24 @@ impl AppConfig {
             environment,
             self.environment_for(environment)?,
         ))
+    }
+
+    /// The settings of a run of `user_id` that names no configured
+    /// environment, under the environment name `environment`.
+    pub fn ad_hoc_profile(
+        &self,
+        user_id: &str,
+        environment: &str,
+        extra_disabled: &[String],
+        permissions: Permissions,
+    ) -> ExecutionProfile {
+        ExecutionProfile::ad_hoc(
+            &self.agent,
+            self.policy_for(user_id, extra_disabled),
+            user_id,
+            environment,
+            permissions,
+        )
     }
 }
 

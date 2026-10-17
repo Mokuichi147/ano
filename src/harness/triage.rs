@@ -4,7 +4,10 @@
 use super::answer::{json_object, response_text, unreadable};
 use crate::{
     application::agent::ModelTarget,
-    domain::automation::{AutomationEvent, Priority, TriageAction, TriageVerdict, TriggerRule},
+    domain::{
+        automation::{AutomationEvent, Priority, TriageAction, TriageVerdict, TriggerRule},
+        text::cut,
+    },
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -170,14 +173,6 @@ fn fallback_summary(event: &AutomationEvent) -> String {
     } else {
         cut(body, FALLBACK_SUMMARY_CHARS)
     }
-}
-
-fn cut(text: &str, limit: usize) -> String {
-    let mut result: String = text.chars().take(limit).collect();
-    if text.chars().count() > limit {
-        result.push('…');
-    }
-    result
 }
 
 #[cfg(test)]

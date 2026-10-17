@@ -9,6 +9,7 @@ use crate::{
     domain::{
         mcp::{McpServerConfig, McpToolCatalog, McpTransport},
         policy::UserPolicy,
+        text::cut,
         tool::DIRECT_MCP_PREFIX,
     },
     infrastructure::mcp_oauth::OAuthStore,
@@ -80,11 +81,7 @@ fn redact_error(error: &str) -> String {
     });
     let redacted = redact_urls(error);
     let redacted = SECRET.replace_all(&redacted, "$1$2[redacted]");
-    let mut text: String = redacted.chars().take(MAX_FAILURE_CHARS).collect();
-    if redacted.chars().count() > MAX_FAILURE_CHARS {
-        text.push('…');
-    }
-    text
+    cut(&redacted, MAX_FAILURE_CHARS)
 }
 
 /// The client ano connects as, with the protocol version pinned to the

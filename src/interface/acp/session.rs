@@ -4,27 +4,20 @@
 use super::{approval::AcpApproval, updates::Updates, AcpOptions, Notifier};
 use crate::{
     application::{
-        agent::{Agent, AgentResult, ModelTarget, RunRequest},
+        agent::{AgentResult, ModelTarget},
         input::InputPart,
-        ports::{
-            ApprovalDecision, ApprovalHandler, ConversationStore, McpApprovalRequest, McpGateway,
-        },
+        ports::{ApprovalDecision, ApprovalHandler, McpApprovalRequest, McpGateway},
     },
     config::{AppConfig, ModelRequest, ModelSelection, DEFAULT_PRESET},
-    domain::{
-        approval::ApprovalMode,
-        mcp::McpServerConfig,
-        session::{SessionBinding, SessionStatus},
-        tool::ToolContext,
-        usage::StopReason as RunStopReason,
-    },
+    domain::{approval::ApprovalMode, mcp::McpServerConfig, usage::StopReason as RunStopReason},
     harness::{
         approval::ApprovalFactory,
-        models::{Connections, RunModels},
-        profile::ExecutionProfile,
+        conversation::{Opening, TurnOutcome, TurnRefused, Turns},
+        models::switch_model,
+        profile::{ExecutionProfile, Permissions},
         Harness,
     },
-    infrastructure::{mcp::McpPool, memory_store::MemoryConversation},
+    infrastructure::mcp::McpPool,
 };
 use agent_client_protocol::schema::v1::{
     ContentBlock, EmbeddedResourceResource, McpServer, SessionConfigOption,
@@ -39,7 +32,6 @@ use std::{
     path::Path,
     sync::{Arc, Mutex, RwLock},
 };
-use tokio::sync::oneshot;
 
 /// The environment name of sessions that take their permissions from the
 /// command line instead of a configured environment.
@@ -56,20 +48,10 @@ pub(super) struct Workbench<'a> {
     pub(super) options: &'a AcpOptions,
 }
 
-/// What a turn needs exclusively: one turn runs at a time.
-struct Conversation {
-    agent: Agent,
-    store: MemoryConversation,
-    context: ToolContext,
-    selection: ModelSelection,
-    connections: Connections,
-}
-
 pub(super) struct AcpSession {
     notifier: Notifier,
     updates: Arc<Mutex<Updates>>,
-    conversation: Arc<tokio::sync::Mutex<Conversation>>,
-    control: Mutex<TurnControl>,
+    turns: Turns,
     /// The approval mode, which the editor may change at any time; `None`
     /// when the session's environment sets it.
     mode: Option<Arc<RwLock<ApprovalMode>>>,
@@ -85,14 +67,6 @@ pub(super) struct AcpSession {
     own_mcp: Option<Arc<dyn McpGateway>>,
 }
 
-/// Whether the session ended, and how to cancel its running turn. Kept
-/// under one lock, so a turn never starts after the session ends.
-#[derive(Default)]
-struct TurnControl {
-    closed: bool,
-    cancel: Option<oneshot::Sender<()>>,
-}
-
 impl AcpSession {
     /// Resolve the session for `cwd` and build its agent. Nothing contacts
     /// the model until the first turn; MCP servers connect then.
@@ -102,70 +76,46 @@ impl AcpSession {
         cwd: &Path,
         mcp_servers: &[McpServer],
     ) -> Result<Arc<Self>> {
-        let (mut profile, selection, base) = resolve_profile(&bench, cwd)?;
-        let harness = bench.harness.clone();
-        let mut profile = tokio::task::spawn_blocking(move || {
-            harness.add_instructions(&mut profile).map(|problems| {
-                for problem in problems {
-                    eprintln!("warning: skipped skill {problem}");
-                }
-                profile
-            })
-        })
-        .await
-        .context("instructions task failed")??;
-        let mut connections = Connections::default();
-        let models = RunModels::resolve(bench.config, &base, &selection, &mut connections)?;
-        let endpoint = models.main.client.base_url().to_string();
-        let binding = SessionBinding::new(&profile.context, &endpoint)?;
+        let (profile, selection, base) = resolve_profile(&bench, cwd)?;
+        let opening =
+            Opening::prepare(bench.harness, bench.config, profile, selection, &base).await?;
+        let fixed_mode = opening.profile.approval_mode;
+        let workspace = opening.profile.context.workspace.clone();
 
-        let updates = Arc::new(Mutex::new(Updates::new(profile.context.workspace.clone())));
+        let updates = Arc::new(Mutex::new(Updates::new(workspace.clone())));
         let ask_user: Arc<dyn ApprovalHandler> = Arc::new(AcpApproval {
             notifier: notifier.clone(),
             updates: Arc::clone(&updates),
         });
-        let mode = (bench.options.environment.is_none())
-            .then(|| Arc::new(RwLock::new(profile.approval_mode)));
-        let approval = approval_factory(&mode, profile.approval_mode, &ask_user, &models.approval);
-        let own_mcp = session_mcp(
-            bench.config,
-            mcp_servers,
-            profile.context.workspace.as_deref(),
-        );
+        let mode = (bench.options.environment.is_none()).then(|| Arc::new(RwLock::new(fixed_mode)));
+        let approval = approval_factory(&mode, fixed_mode, &ask_user, &opening.models.approval);
+        let own_mcp = session_mcp(bench.config, mcp_servers, workspace.as_deref());
         let mcp = own_mcp.clone().unwrap_or_else(|| Arc::clone(bench.mcp));
         let events = (notifier.clone(), Arc::clone(&updates));
         let text = (notifier.clone(), Arc::clone(&updates));
-        let agent = bench
-            .harness
-            .agent(&profile, models, mcp, &approval)
-            .with_event_listener(Arc::new(move |event| {
-                let (notifier, updates) = &events;
-                let mut updates = lock(updates);
-                for update in updates.event(event) {
-                    notifier.update(update);
-                }
-            }))
-            .with_text_listener(Arc::new(move |delta| {
-                let (notifier, updates) = &text;
-                if let Some(update) = lock(updates).delta(delta) {
-                    notifier.update(update);
-                }
-            }));
+        let conversation = opening.open(bench.harness, mcp, &approval, |agent| {
+            agent
+                .with_event_listener(Arc::new(move |event| {
+                    let (notifier, updates) = &events;
+                    let mut updates = lock(updates);
+                    for update in updates.event(event) {
+                        notifier.update(update);
+                    }
+                }))
+                .with_text_listener(Arc::new(move |delta| {
+                    let (notifier, updates) = &text;
+                    if let Some(update) = lock(updates).delta(delta) {
+                        notifier.update(update);
+                    }
+                }))
+        });
 
-        let context = std::mem::take(&mut profile.context);
         Ok(Arc::new(Self {
             notifier,
             updates,
-            conversation: Arc::new(tokio::sync::Mutex::new(Conversation {
-                agent,
-                store: MemoryConversation::new(binding),
-                context,
-                selection,
-                connections,
-            })),
-            control: Mutex::default(),
+            turns: Turns::new(conversation),
             mode,
-            fixed_mode: profile.approval_mode,
+            fixed_mode,
             ask_user,
             preset: Mutex::new(
                 bench
@@ -188,95 +138,38 @@ impl AcpSession {
     ) -> Result<impl Future<Output = Result<StopReason>> + Send + 'static> {
         let approval_request = approval_request(&prompt);
         let input = prompt_input(prompt)?;
-        let (conversation, cancelled) = {
-            let mut control = lock(&self.control);
-            if control.closed {
-                bail!("the session has ended");
-            }
-            let conversation = Arc::clone(&self.conversation)
-                .try_lock_owned()
-                .map_err(|_| anyhow::anyhow!("a turn is already running in this session"))?;
-            let (cancel, cancelled) = oneshot::channel();
-            control.cancel = Some(cancel);
-            (conversation, cancelled)
-        };
+        let turn = self.turns.start()?;
         let session = Arc::clone(self);
         Ok(async move {
-            session
-                .run_turn(conversation, cancelled, input, approval_request)
-                .await
+            lock(&session.updates).start_turn();
+            let (_conversation, outcome) = turn.run(input, approval_request).await;
+            for update in lock(&session.updates).finish_turn() {
+                session.notifier.update(update);
+            }
+            match outcome {
+                TurnOutcome::Completed(result) => {
+                    if !result.streamed && !result.text.trim().is_empty() {
+                        session.notifier.update(Updates::message(&result.text));
+                    }
+                    Ok(stop_reason(&result))
+                }
+                // The failure is recorded in the conversation; the next turn
+                // continues from it.
+                TurnOutcome::Failed(error) => Err(error),
+                TurnOutcome::Cancelled(_) => Ok(StopReason::Cancelled),
+            }
         })
-    }
-
-    async fn run_turn(
-        &self,
-        mut conversation: tokio::sync::OwnedMutexGuard<Conversation>,
-        cancelled: oneshot::Receiver<()>,
-        input: Vec<InputPart>,
-        approval_request: Option<String>,
-    ) -> Result<StopReason> {
-        lock(&self.updates).start_turn();
-        let Conversation {
-            agent,
-            store,
-            context,
-            ..
-        } = &mut *conversation;
-        let request = RunRequest {
-            input,
-            raw_input: None,
-            context: context.clone(),
-            goal: None,
-            approval_request,
-        };
-        // A dropped sender cancels as well. Cancellation comes first, so a
-        // turn cancelled before it ran does not start.
-        let outcome = tokio::select! {
-            biased;
-            _ = cancelled => None,
-            result = agent.run_in_session(request, store) => Some(result),
-        };
-        lock(&self.control).cancel = None;
-        for update in lock(&self.updates).finish_turn() {
-            self.notifier.update(update);
-        }
-        match outcome {
-            Some(Ok(result)) => {
-                if !result.streamed && !result.text.trim().is_empty() {
-                    self.notifier.update(Updates::message(&result.text));
-                }
-                Ok(stop_reason(&result))
-            }
-            // The failure is recorded in the conversation; the next turn
-            // continues from it.
-            Some(Err(error)) => Err(error),
-            None => {
-                if store.data().status == SessionStatus::Running {
-                    store.fail("Interrupted by the user.").ok();
-                }
-                Ok(StopReason::Cancelled)
-            }
-        }
     }
 
     /// Cancel the running turn. Completed actions are not undone.
     pub(super) fn cancel(&self) {
-        if let Some(cancel) = lock(&self.control).cancel.take() {
-            cancel.send(()).ok();
-        }
+        self.turns.cancel();
     }
 
     /// Refuse further turns, cancel the running one, wait until it has
     /// stopped, and close the session's own MCP connections.
     pub(super) async fn end(&self) {
-        {
-            let mut control = lock(&self.control);
-            control.closed = true;
-            if let Some(cancel) = control.cancel.take() {
-                cancel.send(()).ok();
-            }
-        }
-        drop(self.conversation.lock().await);
+        self.turns.end().await;
         if let Some(mcp) = &self.own_mcp {
             mcp.shutdown().await;
         }
@@ -370,31 +263,25 @@ impl AcpSession {
             layers.push(ModelRequest::preset(preset));
         }
         let mut conversation = self
-            .conversation
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("the preset can change only between turns"))?;
-        let Conversation {
-            agent,
-            store,
-            selection,
-            connections,
-            ..
-        } = &mut *conversation;
-        let next = config.select_model(&layers)?;
-        let models = RunModels::resolve(config, &self.base, &next, connections)?;
-        store.switch_model(&next.choice, models.main.client.base_url())?;
-        let approval = approval_factory(
-            &self.mode,
-            self.fixed_mode,
-            &self.ask_user,
-            &models.approval,
-        );
-        agent.replace_model(
-            models.main,
-            approval.build(models.approval),
-            models.subagents,
-        );
-        *selection = next;
+            .turns
+            .between_turns()
+            .map_err(|refused| match refused {
+                TurnRefused::Busy => anyhow::anyhow!("the preset can change only between turns"),
+                TurnRefused::Closed => refused.into(),
+            })?;
+        let conversation = &mut *conversation;
+        conversation.selection = switch_model(
+            config,
+            &layers,
+            &self.base,
+            &mut conversation.connections,
+            &mut conversation.agent,
+            &mut conversation.store,
+            |reviewer| {
+                approval_factory(&self.mode, self.fixed_mode, &self.ask_user, &reviewer)
+                    .build(reviewer)
+            },
+        )?;
         *lock(&self.preset) = preset.to_string();
         Ok(())
     }
@@ -532,30 +419,23 @@ fn resolve_profile(
             (profile, vec![config.environment_request(name)?])
         }
         None => (
-            ExecutionProfile {
-                settings: config.agent.settings.clone(),
-                project_instructions: config.agent.project_instructions.clone(),
-                policy: config.policy_for(&options.user, &options.disabled_tools),
-                context: ToolContext {
-                    user_id: options.user.clone(),
-                    environment: ACP_ENVIRONMENT.to_string(),
+            config.ad_hoc_profile(
+                &options.user,
+                ACP_ENVIRONMENT,
+                &options.disabled_tools,
+                Permissions {
                     workspace: Some(cwd),
                     allow_writes: options.allow_writes,
                     allow_exec: options.allow_exec,
-                    checks: Default::default(),
+                    approval_mode: options.approval_mode,
                 },
-                approval_mode: options.approval_mode.unwrap_or(config.agent.approval_mode),
-            },
+            ),
             Vec::new(),
         ),
     };
     let mut layers = base.clone();
     layers.extend(options.preset.as_deref().map(ModelRequest::preset));
-    let selection = config
-        .select_model(&layers)
-        .context("invalid model choice")?;
-    selection.apply_to(&mut profile.settings);
-    profile.settings.validate()?;
+    let selection = profile.choose_model(config, &layers)?;
     Ok((profile, selection, base))
 }
 

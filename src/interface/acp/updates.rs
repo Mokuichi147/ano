@@ -3,7 +3,10 @@
 
 use crate::{
     application::{agent::AgentEvent, ports::ResponseDelta},
-    domain::plan::{StepStatus, TaskPlan},
+    domain::{
+        plan::{StepStatus, TaskPlan},
+        text::cut,
+    },
     infrastructure::tools::names::{
         GIT_COMMIT_PUSH_NAME, GIT_DIFF_NAME, REVIEW_CHANGES_NAME, WEB_FETCH_NAME,
         WORKSPACE_CHECK_NAME, WORKSPACE_EDIT_NAME, WORKSPACE_EXEC_NAME, WORKSPACE_READ_NAME,
@@ -473,13 +476,6 @@ fn longest_backtick_run(text: &str) -> usize {
         .map(str::len)
         .max()
         .unwrap_or(0)
-}
-
-fn cut(text: &str, max_chars: usize) -> String {
-    match text.char_indices().nth(max_chars) {
-        Some((end, _)) => format!("{}…", &text[..end]),
-        None => text.to_string(),
-    }
 }
 
 /// The plan's steps as the editor's plan. A blocked step stays pending.
