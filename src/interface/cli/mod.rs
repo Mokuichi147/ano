@@ -4,6 +4,7 @@
 
 mod approval;
 mod auth;
+mod automation;
 mod chat;
 mod history;
 mod mcp;
@@ -19,11 +20,12 @@ mod tools;
 pub use approval::InteractiveApproval;
 
 use crate::{
-    application::{ports::McpGateway, registry::ToolRegistry},
+    application::{automation::AutomationRegistry, ports::McpGateway, registry::ToolRegistry},
     config::{default_config_path, user_env_path, AppConfig},
     domain::approval::ApprovalMode,
     harness::{models::connect_provider, Harness},
     infrastructure::{
+        automation::register_builtin_automation,
         mcp::{redact_urls, McpPool},
         session_store::Session,
         tools::register_builtin_tools,
@@ -66,6 +68,9 @@ enum Command {
     Chat(ChatArgs),
     Tools(ToolsArgs),
     Serve(ServeArgs),
+    /// Show the automation of `ano serve` ([automation]), and send test
+    /// notifications.
+    Automation(automation::AutomationArgs),
     /// Talk with the agent in the browser, in sessions with their own
     /// working folder, permissions, and model.
     Web(WebArgs),
@@ -367,6 +372,7 @@ pub async fn run() -> Result<()> {
         Command::Run(args) => run::run_agent(config, cli.user, args, registry).await,
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
+        Command::Automation(args) => automation::run(&config, &automation_kinds(), args).await,
         Command::Web(args) => web(config, cli.user, args, registry).await,
         // A failed connection's error may show the server URL, with an API
         // key expanded into its query.
@@ -381,6 +387,13 @@ pub async fn run() -> Result<()> {
     }
 }
 
+/// The kinds of automation sources and notifiers the binary offers.
+fn automation_kinds() -> AutomationRegistry {
+    let mut registry = AutomationRegistry::new();
+    register_builtin_automation(&mut registry);
+    registry
+}
+
 async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -> Result<()> {
     if let Some(bind) = args.bind {
         config.webhook.bind = bind;
@@ -393,7 +406,14 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
     }
     let client = connect_provider(&config, config.default_provider())?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
-    let served = webhook::serve(config, client, Arc::clone(&mcp), registry).await;
+    let served = webhook::serve(
+        config,
+        client,
+        Arc::clone(&mcp),
+        registry,
+        automation_kinds(),
+    )
+    .await;
     // Close MCP connections after jobs have stopped, even on failure.
     mcp.shutdown().await;
     served

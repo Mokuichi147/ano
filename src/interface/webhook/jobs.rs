@@ -1,5 +1,6 @@
 //! Job states and the in-memory job table.
 
+use super::automation::{JobTrigger, TriggerInfo};
 use crate::{
     application::agent::{AgentEvent, AgentResult},
     domain::{
@@ -36,6 +37,20 @@ pub enum JobState {
 }
 
 impl JobState {
+    /// The state as it is written in JSON and in `notify_on`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Blocked => "blocked",
+            Self::Incomplete => "incomplete",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::TimedOut => "timed_out",
+        }
+    }
+
     pub fn is_finished(self) -> bool {
         matches!(
             self,
@@ -67,6 +82,9 @@ pub struct JobStatus {
     /// The latest agent events, oldest first, with large fields shortened.
     /// Available while the job runs, so progress is visible before it ends.
     pub recent_events: Vec<Value>,
+    /// The automation rule and event that started the job.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerInfo>,
 }
 
 /// Progress reported by the agent while a job runs. Updated from the event
@@ -101,6 +119,8 @@ pub(super) struct JobRecord {
     /// Monotonic completion order, including jobs finished in the same second.
     pub finished_at: Option<Instant>,
     pub progress: Arc<Mutex<JobProgress>>,
+    /// What automation gave the job, to notify its result.
+    pub trigger: Option<Arc<JobTrigger>>,
 }
 
 impl JobRecord {

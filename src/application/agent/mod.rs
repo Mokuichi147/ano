@@ -61,6 +61,11 @@ pub struct RunRequest {
     /// its acceptance criteria are verified as met or blocked, or the
     /// budget runs out. `input` may then be empty.
     pub goal: Option<TaskGoal>,
+    /// The request that calls needing approval are judged against, when it
+    /// differs from the text of `input`: for example a run whose input
+    /// carries text a third party wrote, which must not count as something
+    /// the user asked for.
+    pub approval_request: Option<String>,
 }
 
 impl RunRequest {
@@ -70,6 +75,7 @@ impl RunRequest {
             raw_input: None,
             context: ToolContext::default(),
             goal: None,
+            approval_request: None,
         }
     }
 
@@ -634,27 +640,31 @@ impl Agent {
         }
         let user_input = build_user_input(&input).await?;
         // Shown to approval handlers to judge whether a call fits the request.
-        let user_request = origin.user_request.clone().unwrap_or_else(|| {
-            let latest = input
-                .iter()
-                .filter_map(|part| match part {
-                    InputPart::Text(text) => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            let earlier = session
-                .as_deref()
-                .map(|session| {
-                    recent_user_requests(
-                        &session.data().history,
-                        EARLIER_REQUESTS,
-                        EARLIER_REQUEST_CHARS,
-                    )
-                })
-                .unwrap_or_default();
-            approval_context(&latest, &earlier)
-        });
+        let user_request = origin
+            .user_request
+            .clone()
+            .or_else(|| request.approval_request.clone())
+            .unwrap_or_else(|| {
+                let latest = input
+                    .iter()
+                    .filter_map(|part| match part {
+                        InputPart::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let earlier = session
+                    .as_deref()
+                    .map(|session| {
+                        recent_user_requests(
+                            &session.data().history,
+                            EARLIER_REQUESTS,
+                            EARLIER_REQUEST_CHARS,
+                        )
+                    })
+                    .unwrap_or_default();
+                approval_context(&latest, &earlier)
+            });
         let mut base_instructions = self.role_instructions(&origin);
         let token_limit = origin.token_limit;
         // Usage of sub-agents started during the current round.

@@ -414,6 +414,7 @@ pub(super) async fn run(
                     .then(|| vec![InputPart::Text(line.clone())]),
                 context: context.clone(),
                 goal,
+                approval_request: None,
             };
             let outcome = tokio::select! {
                 result = agent.run_in_session(request, store.as_mut()) => Some(result),

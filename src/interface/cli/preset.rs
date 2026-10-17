@@ -113,6 +113,8 @@ enum Role {
     Review,
     /// The reviewer of approval_mode = "auto".
     Approval,
+    /// The model that triages automation events (see `ano serve`).
+    Triage,
 }
 
 impl Role {
@@ -122,6 +124,7 @@ impl Role {
             Role::Delegate => "delegate",
             Role::Review => "review",
             Role::Approval => "approval",
+            Role::Triage => "triage",
         }
     }
 }

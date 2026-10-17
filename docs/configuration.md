@@ -25,6 +25,7 @@
 | `[users.<id>]` | ユーザーごとの `allowed_tools` / `disabled_tools` | [ポリシーの名前空間](mcp.md#ポリシーの名前空間) |
 | `[[mcp_servers]]` | MCP server の接続方式・許可する tool・承認 | [docs/mcp.md](mcp.md) |
 | `[webhook]` | 待ち受けアドレス・署名・ジョブ数とタイムアウト | [docs/webhook.md](webhook.md) |
+| `[automation]` | 自動化のソース（POST されたイベントの受け取り）・ルール・通知先・状態ファイル | [docs/automation.md](automation.md) |
 | `[history]` | chronotope の接続先・主体・ローカル未送信キュー・タイムアウト | [docs/chronotope-history.md](chronotope-history.md) |
 | `[skills]` | スキルの有効化と保存先 | [スキル](agent-runtime.md#スキルskill_read--skill_save) |
 

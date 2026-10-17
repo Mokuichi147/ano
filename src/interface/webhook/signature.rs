@@ -50,6 +50,16 @@ pub(super) fn verify_signature(
     Ok(Some(provided))
 }
 
+/// Forget a signature recorded by `remember_signature`, for a request that
+/// was refused after all, so that it can be sent again.
+pub(super) fn forget_signature(state: &WebhookState, signature: &[u8]) {
+    state
+        .seen_signatures
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(signature);
+}
+
 /// Record a signature for the tolerance window. Returns `false` if it was
 /// already used.
 pub(super) fn remember_signature(state: &WebhookState, signature: Vec<u8>) -> bool {

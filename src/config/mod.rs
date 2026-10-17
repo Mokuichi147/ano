@@ -26,7 +26,7 @@ use crate::{
         openai::{ApiSettings, ProviderSettings},
         skills::SkillSettings,
     },
-    interface::webhook::WebhookSettings,
+    interface::webhook::{AutomationSettings, WebhookSettings},
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -122,6 +122,9 @@ pub struct AppConfig {
     pub users: HashMap<String, UserPolicy>,
     pub environments: HashMap<String, EnvironmentConfig>,
     pub webhook: WebhookSettings,
+    /// Events posted to `ano serve` that it reacts to by itself, such as
+    /// reports, alerts, and runs started from cron.
+    pub automation: AutomationSettings,
     pub history: HistorySettings,
     pub skills: SkillSettings,
 }
@@ -201,6 +204,9 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(file) = &mut self.automation.state_file {
+            *file = resolve_path(file, directory, home).context("invalid automation.state_file")?;
         }
         for (name, environment) in &mut self.environments {
             if let Some(workspace) = &mut environment.workspace {
@@ -327,6 +333,8 @@ impl AppConfig {
                 )?;
             }
         }
+        self.automation
+            .validate(&self.environments, |user| self.has_user(user))?;
         let mut labels = HashSet::new();
         for server in &self.mcp_servers {
             server.validate()?;

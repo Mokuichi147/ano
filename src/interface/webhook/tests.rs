@@ -68,6 +68,7 @@ fn state() -> WebhookState {
         tasks: Mutex::new(JoinSet::new()),
         secret: Some(b"secret".to_vec()),
         seen_signatures: Mutex::new(HashMap::new()),
+        automation: None,
     }
 }
 
@@ -531,10 +532,12 @@ async fn overload_does_not_consume_request_signature() {
                 stop_reason: None,
                 error: None,
                 recent_events: Vec::new(),
+                trigger: None,
             },
             cancel: watch::channel(false).0,
             finished_at: None,
             progress: Default::default(),
+            trigger: None,
         },
     );
 
@@ -586,10 +589,12 @@ fn evicts_oldest_finished_jobs_only() {
             stop_reason: None,
             error: None,
             recent_events: Vec::new(),
+            trigger: None,
         },
         cancel: watch::channel(false).0,
         progress: Default::default(),
         finished_at: finished.map(|_| Instant::now()),
+        trigger: None,
     };
     let mut jobs = HashMap::new();
     for job in [

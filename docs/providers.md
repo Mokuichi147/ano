@@ -110,6 +110,7 @@ default = "quick"                        # メインのエージェントの既�
 delegate = "quick"                       # delegate_task のサブエージェント
 review = "deep"                          # review_changes のレビュー担当
 approval = "lighter"                     # approval_mode = "auto" の判定用モデル
+triage = "lighter"                       # 自動化のイベントを振り分ける判定用モデル（未設定なら approval と同じ）
 
 [environments.review]
 preset = "deep"                          # この環境の既定（provider・model・reasoning_effort で上書き可）
