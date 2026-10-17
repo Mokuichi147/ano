@@ -87,6 +87,18 @@ pub struct McpServerConfig {
     /// `url`). Only this server is left out; the rest of ano keeps working.
     #[serde(skip)]
     pub unavailable: Option<String>,
+    /// Values given as they are by the editor that started `ano acp`, never
+    /// read from the config: variables of a stdio server's process, or the
+    /// headers of a streamable_http server's requests.
+    #[serde(skip)]
+    pub given: GivenValues,
+}
+
+/// See [`McpServerConfig::given`].
+#[derive(Debug, Clone, Default)]
+pub struct GivenValues {
+    pub env: Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
 }
 
 fn default_reuse_connection() -> bool {

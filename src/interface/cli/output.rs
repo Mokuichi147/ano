@@ -784,6 +784,7 @@ mod tests {
             response_id: "resp_123".into(),
             events: vec![AgentEvent::LocalToolBlocked {
                 round: 0,
+                call_id: None,
                 name: "write".into(),
             }],
         };

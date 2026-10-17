@@ -48,22 +48,34 @@ pub enum AgentEvent {
     },
     LocalToolCall {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         name: String,
         arguments: Value,
     },
     LocalToolResult {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         name: String,
         output: Value,
     },
     LocalToolBlocked {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         name: String,
     },
     /// Decision on a local tool that requires approval, such as
     /// `workspace_exec`.
     LocalToolApproval {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         name: String,
         approved: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -71,23 +83,35 @@ pub enum AgentEvent {
     },
     McpToolCall {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         server_label: String,
         tool_name: String,
         arguments: Value,
     },
     McpToolResult {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         server_label: String,
         tool_name: String,
         output: Value,
     },
     McpToolBlocked {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         server_label: String,
         tool_name: String,
     },
     McpApproval {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         server_label: String,
         tool_name: String,
         approved: bool,
@@ -110,6 +134,9 @@ pub enum AgentEvent {
     /// the event listener but are not part of this run's events.
     SubagentStarted {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         task: String,
         /// The model the sub-agent runs on.
         #[serde(default)]
@@ -117,6 +144,9 @@ pub enum AgentEvent {
     },
     SubagentFinished {
         round: usize,
+        /// The id the model gave the call, shared by its result and approval.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        call_id: Option<String>,
         outcome: Option<RunOutcome>,
         usage: UsageSummary,
         #[serde(default, skip_serializing_if = "Option::is_none")]

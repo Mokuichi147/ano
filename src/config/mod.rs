@@ -489,7 +489,7 @@ fn expand_home(path: &Path, home: Option<&Path>) -> Result<Option<PathBuf>> {
 }
 
 /// Whether `url` parses as an absolute HTTP or HTTPS URL with a host.
-fn is_http_url(url: &str) -> bool {
+pub(crate) fn is_http_url(url: &str) -> bool {
     reqwest::Url::parse(url)
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
 }

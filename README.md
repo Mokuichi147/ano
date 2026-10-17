@@ -1,6 +1,6 @@
 # ano
 
-Rust 製の自律型 AI エージェントと、それを動かすハーネスです。エージェント（実行ループ）はモデルが返した function call を自動で実行し、結果を次のリクエストへ返して、ファイルの調査・編集・検証のような複数ステップの作業を進めます。ハーネスは、workspace で作業するための tool・権限・承認・指示をエージェントに加えます（[アーキテクチャ](docs/architecture.md#エージェントとハーネス)）。CLI・ブラウザの Web UI・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
+Rust 製の自律型 AI エージェントと、それを動かすハーネスです。エージェント（実行ループ）はモデルが返した function call を自動で実行し、結果を次のリクエストへ返して、ファイルの調査・編集・検証のような複数ステップの作業を進めます。ハーネスは、workspace で作業するための tool・権限・承認・指示をエージェントに加えます（[アーキテクチャ](docs/architecture.md#エージェントとハーネス)）。CLI・ブラウザの Web UI・Zed などのエディタ（ACP）・Webhook サーバー・Rust ライブラリのいずれとしても使えます。
 
 ## 特長
 
@@ -11,7 +11,7 @@ Rust 製の自律型 AI エージェントと、それを動かすハーネス�
 - **接続先。** OpenAI、ChatGPT サブスクリプション（実験的）、LM Studio・Ollama などのローカル AI（`/v1/responses` と `/v1/chat/completions`）。名前付きの接続先・フォールバック・プリセットで切り替え
 - **長い作業への対応。** 保存・再開できる会話セッション、長い会話の自動圧縮、トークン上限、chronotope への履歴の保存、手順をスキル（`SKILL.md`）として保存
 - **入出力。** 対話モード（`ano chat`）、回答のストリーミング表示、画像・音声入力、JSON 出力、プロジェクト指示（`AGENTS.md`）の自動読み込み
-- **連携。** Web UI（`ano web`）、署名付き Webhook と非同期ジョブ API（`ano serve`）、GitHub MCP と組み合わせた Issue の解決から Pull Request の作成まで
+- **連携。** Web UI（`ano web`）、Agent Client Protocol による Zed などのエディタとの連携（`ano acp`）、署名付き Webhook と非同期ジョブ API（`ano serve`）、GitHub MCP と組み合わせた Issue の解決から Pull Request の作成まで
 
 ## クイックスタート
 
@@ -38,6 +38,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano run [PROMPT]` | タスクを実行します。PROMPT を省略すると stdin から読みます |
 | `ano chat` | 同じ会話で複数ターンのやり取りをします（`/model`・`/preset`・`/goal`・`/compact` などのコマンドあり） |
 | `ano web` | ブラウザで対話する Web UI を起動します（[docs/web.md](docs/web.md)） |
+| `ano acp` | Zed などのエディタから起動され、Agent Client Protocol で対話します（[docs/acp.md](docs/acp.md)） |
 | `ano serve` | Webhook サーバーを起動します（[docs/webhook.md](docs/webhook.md)） |
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano provider` / `ano model` / `ano preset` | 接続先・モデル・プリセットを、設定ファイルを直接編集せずに管理します（[docs/providers.md](docs/providers.md)） |
@@ -79,6 +80,7 @@ model = "ロードしたモデル名"
 | [docs/chatgpt-subscription.md](docs/chatgpt-subscription.md) | ChatGPT ログイン、利用枠による接続、認証情報の保存、対応範囲 |
 | [docs/chronotope-history.md](docs/chronotope-history.md) | 原文会話・ツール履歴の保存と再送、ローカル未送信キュー、`history_*` tool と `ano history` |
 | [docs/web.md](docs/web.md) | Web UI の起動とトークン、セッション、API、naui による画面のビルド |
+| [docs/acp.md](docs/acp.md) | エディタとの連携（Agent Client Protocol）の設定、セッション、承認、表示、エディタから渡される MCP server |
 | [docs/webhook.md](docs/webhook.md) | Webhook の API、署名方法（curl / PowerShell）、ジョブの状態と中止 |
 | [docs/library.md](docs/library.md) | Rust ライブラリとしての使い方（tool の登録、拡張、`Harness`） |
 | [docs/architecture.md](docs/architecture.md) | レイヤー構成、ポート、ディレクトリ構成、設計上の判断 |

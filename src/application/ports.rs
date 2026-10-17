@@ -244,6 +244,9 @@ pub enum ApprovalSource {
 #[derive(Debug, Clone, Default)]
 pub struct McpApprovalRequest {
     pub approval_request_id: String,
+    /// The id the model gave the call, as in its events; `None` for calls
+    /// the Responses API makes itself.
+    pub call_id: Option<String>,
     pub source: ApprovalSource,
     pub server_label: String,
     pub tool_name: String,

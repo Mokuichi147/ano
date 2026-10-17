@@ -28,7 +28,7 @@ use crate::{
         session_store::Session,
         tools::register_builtin_tools,
     },
-    interface::{web, webhook},
+    interface::{acp, web, webhook},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -69,6 +69,9 @@ enum Command {
     /// Talk with the agent in the browser, in sessions with their own
     /// working folder, permissions, and model.
     Web(WebArgs),
+    /// Serve an editor (such as Zed) over the Agent Client Protocol on stdin
+    /// and stdout; each session works in the folder the editor opened.
+    Acp(AcpArgs),
     /// Inspect saved conversation state without contacting the model.
     Session(SessionArgs),
     /// Manage the authorization and the enabled tools of MCP servers.
@@ -308,6 +311,48 @@ struct WebArgs {
     allow_any_workspace: bool,
 }
 
+#[derive(Debug, Args)]
+struct AcpArgs {
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Use a configured environment's permissions, tool restrictions, and approval mode"
+    )]
+    environment: Option<String>,
+
+    #[arg(
+        long,
+        conflicts_with = "environment",
+        help = "Allow workspace_write, workspace_edit, workspace_move, and workspace_delete to modify files"
+    )]
+    allow_writes: bool,
+
+    #[arg(
+        long,
+        conflicts_with = "environment",
+        help = "Allow workspace_exec to run shell commands in the workspace (each command needs approval)"
+    )]
+    allow_exec: bool,
+
+    #[arg(
+        long,
+        value_name = "MODE",
+        conflicts_with = "environment",
+        help = "How calls that need approval are answered at first: ask (in the editor), auto, allow, or deny; the editor can change it per session"
+    )]
+    approval_mode: Option<ApprovalMode>,
+
+    #[arg(
+        long,
+        value_name = "NAME",
+        help = "Start sessions with a preset from [presets]; the editor can switch presets per session"
+    )]
+    preset: Option<String>,
+
+    #[arg(long = "disable-tool", value_name = "NAME")]
+    disabled_tools: Vec<String>,
+}
+
 /// Parse the process arguments and run the selected command.
 pub async fn run() -> Result<()> {
     // Neither file overrides variables that are already set, so the process
@@ -368,6 +413,7 @@ pub async fn run() -> Result<()> {
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
         Command::Web(args) => web(config, cli.user, args, registry).await,
+        Command::Acp(args) => acp(config, cli.user, args, registry).await,
         // A failed connection's error may show the server URL, with an API
         // key expanded into its query.
         Command::Mcp(args) => mcp::run(&config, &config_path, &cli.user, args)
@@ -414,6 +460,23 @@ async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegis
     };
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = web::serve(config, Arc::clone(&mcp), registry, options).await;
+    // Close MCP connections after the sessions have stopped, even on failure.
+    mcp.shutdown().await;
+    served
+}
+
+async fn acp(config: AppConfig, user: String, args: AcpArgs, registry: ToolRegistry) -> Result<()> {
+    let options = acp::AcpOptions {
+        user,
+        environment: args.environment,
+        allow_writes: args.allow_writes,
+        allow_exec: args.allow_exec,
+        approval_mode: args.approval_mode,
+        preset: args.preset,
+        disabled_tools: args.disabled_tools,
+    };
+    let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
+    let served = acp::serve(config, Arc::clone(&mcp), registry, options).await;
     // Close MCP connections after the sessions have stopped, even on failure.
     mcp.shutdown().await;
     served

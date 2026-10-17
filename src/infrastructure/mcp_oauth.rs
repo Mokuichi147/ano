@@ -348,6 +348,7 @@ mod tests {
             require_approval: McpApprovalMode::Always,
             reuse_connection: true,
             unavailable: None,
+            given: Default::default(),
         }
     }
 

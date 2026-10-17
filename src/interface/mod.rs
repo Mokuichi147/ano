@@ -1,6 +1,7 @@
 //! Interface layer: the command line, the webhook server, and the web UI,
 //! which build their agents with the harness.
 
+pub mod acp;
 pub mod cli;
 pub mod web;
 pub mod webhook;

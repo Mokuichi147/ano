@@ -15,6 +15,7 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use reqwest::header::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, ClientConfig, ProtocolVersion},
     service::RunningService,
@@ -25,7 +26,12 @@ use rmcp::{
     RoleClient, ServiceExt,
 };
 use serde_json::{json, Map, Value};
-use std::{collections::HashSet, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    process::Stdio,
+    sync::Arc,
+    time::Duration,
+};
 use tokio::{
     process::Command,
     sync::{watch, Mutex},
@@ -372,6 +378,27 @@ fn check_responses_server(config: &McpServerConfig) -> Result<()> {
     Ok(())
 }
 
+/// The headers the editor gave for `config`, checked as HTTP headers.
+fn given_headers(config: &McpServerConfig) -> Result<HashMap<HeaderName, HeaderValue>> {
+    config
+        .given
+        .headers
+        .iter()
+        .map(|(name, value)| {
+            let invalid = || {
+                format!(
+                    "MCP server '{}' has an invalid header '{name}'",
+                    config.label
+                )
+            };
+            Ok((
+                HeaderName::try_from(name.as_str()).with_context(invalid)?,
+                HeaderValue::try_from(value.as_str()).with_context(invalid)?,
+            ))
+        })
+        .collect()
+}
+
 /// Start and initialize an MCP session with a directly connected server.
 async fn open_service(config: &McpServerConfig, oauth: &OAuthStore) -> Result<McpClient> {
     config.validate()?;
@@ -402,6 +429,7 @@ async fn open_service(config: &McpServerConfig, oauth: &OAuthStore) -> Result<Mc
                 })?;
                 command.env(child_name, value);
             }
+            command.envs(config.given.env.iter().map(|(name, value)| (name, value)));
             let transport = TokioChildProcess::new(command)
                 .with_context(|| format!("failed to start stdio MCP server '{}'", config.label))?;
             client_config()
@@ -421,6 +449,9 @@ async fn open_service(config: &McpServerConfig, oauth: &OAuthStore) -> Result<Mc
                     )
                 })?;
                 transport_config = transport_config.auth_header(token);
+            }
+            if !config.given.headers.is_empty() {
+                transport_config = transport_config.custom_headers(given_headers(config)?);
             }
             let initialized = if config.oauth {
                 let client = oauth.authorized_client(config).await?;
@@ -613,6 +644,7 @@ mod tests {
             require_approval: McpApprovalMode::Always,
             reuse_connection: true,
             unavailable: None,
+            given: Default::default(),
         }
     }
 
