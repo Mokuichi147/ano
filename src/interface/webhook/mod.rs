@@ -725,8 +725,7 @@ async fn execute_job(
         }
     }
     let base = [state.config.environment_request(&spec.environment)?];
-    let selection = state.config.select_model(&base)?;
-    selection.apply_to(&mut profile.settings);
+    let selection = profile.choose_model(&state.config, &base)?;
     let mut connections = state.connections.clone();
     // The default provider's client, which `serve` was given.
     connections.insert(state.config.default_provider(), Arc::clone(&state.client));
