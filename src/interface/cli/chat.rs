@@ -15,7 +15,7 @@ use super::{
 };
 use crate::{
     application::{
-        agent::{Agent, RunRequest},
+        agent::RunRequest,
         input::InputPart,
         ports::{ApprovalHandler, ConversationStore, McpApprovalRequest},
         registry::ToolRegistry,
@@ -26,10 +26,7 @@ use crate::{
         session::SessionStatus,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
     },
-    harness::{
-        approval::ApprovalFactory,
-        models::{Connections, RunModels},
-    },
+    harness::models::switch_model,
     infrastructure::memory_store::MemoryConversation,
 };
 use anyhow::Result;
@@ -311,11 +308,11 @@ pub(super) async fn run(
                         &mut connections,
                         &mut agent,
                         store.as_mut(),
-                        &approval,
-                        &mut selection,
+                        |reviewer| approval.build(reviewer),
                     );
                     match switched {
-                        Ok(()) => {
+                        Ok(next) => {
+                            selection = next;
                             binding.endpoint = store.data().binding.endpoint.clone();
                             eprintln!(
                                 "(switched to {} ({}))",
@@ -449,32 +446,6 @@ pub(super) async fn run(
     .await;
     mcp.shutdown().await;
     result
-}
-
-/// Continue the conversation in `store` with the model `layers` choose. The
-/// roles follow the new model; `base` is what their `default` preset stands
-/// for. Nothing changes when any step fails.
-#[allow(clippy::too_many_arguments)]
-fn switch_model(
-    config: &AppConfig,
-    layers: &[ModelRequest],
-    base: &[ModelRequest],
-    connections: &mut Connections,
-    agent: &mut Agent,
-    store: &mut dyn ConversationStore,
-    approval: &ApprovalFactory,
-    selection: &mut ModelSelection,
-) -> Result<()> {
-    let next = config.select_model(layers)?;
-    let models = RunModels::resolve(config, base, &next, connections)?;
-    store.switch_model(&next.choice, models.main.client.base_url())?;
-    agent.replace_model(
-        models.main,
-        approval.build(models.approval),
-        models.subagents,
-    );
-    *selection = next;
-    Ok(())
 }
 
 /// Every preset with its settings, marking the ones that give the current
@@ -611,14 +582,14 @@ fn skill_prompt(focus: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_providers, switch_model};
+    use super::format_providers;
     use crate::{
         application::{
             agent::Agent, approval::AlwaysApprove, ports::ConversationStore, registry::ToolRegistry,
         },
         config::{AppConfig, ModelRequest},
         domain::{approval::ApprovalMode, policy::UserPolicy, session::SessionBinding},
-        harness::approval::ApprovalFactory,
+        harness::{approval::ApprovalFactory, models::switch_model},
         infrastructure::{mcp::McpPool, memory_store::MemoryConversation, openai::OpenAiClient},
     };
     use serde_json::json;
@@ -662,16 +633,16 @@ mod tests {
                 model: model.map(str::to_string),
                 ..ModelRequest::default()
             };
-            switch_model(
+            selection = switch_model(
                 &config,
                 &[ModelRequest::from(&selection.choice), request],
                 &[],
                 &mut connections,
                 &mut agent,
                 &mut store,
-                &approval,
-                &mut selection,
-            )
+                |reviewer| approval.build(reviewer),
+            )?;
+            anyhow::Ok(())
         };
 
         switch(None, Some("gpt-other")).unwrap();

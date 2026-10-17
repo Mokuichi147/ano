@@ -16,5 +16,6 @@ pub mod policy;
 pub mod provider;
 pub mod session;
 pub mod skill;
+pub mod text;
 pub mod tool;
 pub mod usage;

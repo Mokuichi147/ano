@@ -2,7 +2,7 @@
 
 use crate::{
     application::ports::{replay_deltas, DeltaSink, ResponseDelta, ResponsesApi},
-    domain::provider::ModelFilter,
+    domain::{provider::ModelFilter, text::cut},
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -643,11 +643,7 @@ fn error_text(value: &Value) -> String {
 }
 
 pub(super) fn truncate(text: &str) -> String {
-    let mut result = text.chars().take(MAX_ERROR_BODY_CHARS).collect::<String>();
-    if text.chars().count() > MAX_ERROR_BODY_CHARS {
-        result.push('…');
-    }
-    result
+    cut(text, MAX_ERROR_BODY_CHARS)
 }
 
 #[cfg(test)]

@@ -10,6 +10,7 @@ mod assembly;
 
 pub mod approval;
 pub mod auto_approval;
+pub mod conversation;
 pub mod instructions;
 pub mod models;
 pub mod notify;

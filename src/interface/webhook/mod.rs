@@ -19,13 +19,18 @@ use crate::{
     application::{
         agent::{AgentResult, RunRequest},
         approval::DenyApproval,
-        automation::{Admission, AutomationRegistry, PostAuthentication, PostedRequest, Rejection},
+        automation::{
+            unix_now, Admission, AutomationRegistry, PostAuthentication, PostedRequest, Rejection,
+        },
         input::InputPart,
         ports::{McpGateway, ResponsesApi},
         registry::ToolRegistry,
     },
     config::AppConfig,
-    domain::plan::{RunOutcome, TaskGoal},
+    domain::{
+        plan::{RunOutcome, TaskGoal},
+        text::cut,
+    },
     harness::{
         approval::ApprovalFactory,
         models::{Connections, RunModels},
@@ -52,7 +57,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 use tokio::{
     net::TcpListener,
@@ -470,10 +475,10 @@ async fn post_event(
         Ok(event) => event,
         // A source's reason is cut, so a long one is not sent back whole.
         Err(Rejection::Unauthorized(message)) => {
-            return error_response(StatusCode::UNAUTHORIZED, &cut_reason(&message))
+            return error_response(StatusCode::UNAUTHORIZED, &cut(&message, MAX_REASON_CHARS))
         }
         Err(Rejection::Invalid(message)) => {
-            return error_response(StatusCode::BAD_REQUEST, &cut_reason(&message))
+            return error_response(StatusCode::BAD_REQUEST, &cut(&message, MAX_REASON_CHARS))
         }
     };
     // A source speaks only for itself.
@@ -847,22 +852,6 @@ async fn finish(state: &WebhookState, id: &str, outcome: JobOutcome) {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .spawn(async move { automation::send_all(&notifiers, &notification).await });
     }
-}
-
-fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
-}
-
-/// A reason a source gave, cut to `MAX_REASON_CHARS`.
-fn cut_reason(message: &str) -> String {
-    let mut reason: String = message.chars().take(MAX_REASON_CHARS).collect();
-    if message.chars().count() > MAX_REASON_CHARS {
-        reason.push('…');
-    }
-    reason
 }
 
 fn error_response(status: StatusCode, message: &str) -> Response {

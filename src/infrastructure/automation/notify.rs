@@ -4,7 +4,7 @@
 use super::{error_excerpt, secure_url};
 use crate::{
     application::automation::{Notification, Notifier},
-    domain::automation::Priority,
+    domain::{automation::Priority, text::cut_within},
 };
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -164,7 +164,7 @@ impl Notifier for HttpNotifier {
                 let mut body = json!({
                     "topic": topic,
                     "title": notification.title,
-                    "message": cut(&notification.message, MESSAGE_MAX_CHARS),
+                    "message": cut_within(&notification.message, MESSAGE_MAX_CHARS),
                     "priority": match notification.priority {
                         Priority::Low => 2,
                         Priority::Normal => 3,
@@ -180,20 +180,20 @@ impl Notifier for HttpNotifier {
             HttpNotifierKind::Discord => (
                 self.url.clone(),
                 json!({
-                    "content": cut(&chat_text(notification, "**", |text| text.to_string()), DISCORD_MAX_CHARS),
+                    "content": cut_within(&chat_text(notification, "**", |text| text.to_string()), DISCORD_MAX_CHARS),
                     // Text the agent passes on must never ping anyone.
                     "allowed_mentions": {"parse": []},
                 }),
             ),
             HttpNotifierKind::Slack => (
                 self.url.clone(),
-                json!({"text": cut(&chat_text(notification, "*", slack_escape), SLACK_MAX_CHARS)}),
+                json!({"text": cut_within(&chat_text(notification, "*", slack_escape), SLACK_MAX_CHARS)}),
             ),
             HttpNotifierKind::Webhook => (
                 self.url.clone(),
                 json!({
                     "title": notification.title,
-                    "message": cut(&notification.message, MESSAGE_MAX_CHARS),
+                    "message": cut_within(&notification.message, MESSAGE_MAX_CHARS),
                     "priority": notification.priority,
                     "url": notification.url,
                     "rule": notification.rule,
@@ -284,15 +284,6 @@ fn check_url(url: &str) -> Result<Url> {
 
 fn is_http(url: &str) -> bool {
     Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
-}
-
-fn cut(text: &str, limit: usize) -> String {
-    if text.chars().count() <= limit {
-        return text.to_string();
-    }
-    let mut result: String = text.chars().take(limit.saturating_sub(1)).collect();
-    result.push('…');
-    result
 }
 
 #[cfg(test)]

@@ -5,22 +5,19 @@ use super::{
     approval::{PendingApprovals, WebApproval},
     events::{EventLog, Progress, UiEvent},
 };
+pub(super) use crate::harness::conversation::TurnRefused;
 use crate::{
     application::{
-        agent::{Agent, RunRequest},
+        automation::unix_now,
         input::InputPart,
         ports::{ConversationStore, McpGateway},
     },
     config::{AppConfig, ModelRequest, ModelSelection},
-    domain::{
-        approval::ApprovalMode,
-        session::{SessionBinding, SessionStatus},
-        tool::ToolContext,
-    },
+    domain::approval::ApprovalMode,
     harness::{
         approval::ApprovalFactory,
-        models::{Connections, RunModels},
-        profile::ExecutionProfile,
+        conversation::{Opening, TurnOutcome, Turns},
+        profile::{ExecutionProfile, Permissions},
         Harness,
     },
     infrastructure::memory_store::MemoryConversation,
@@ -30,10 +27,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc,
 };
-use tokio::sync::oneshot;
 use uuid::Uuid;
 
 /// The environment name of sessions that choose their workspace and
@@ -105,36 +100,11 @@ pub(super) struct SessionStatusView {
     pub(super) progress: Progress,
 }
 
-/// What a turn needs exclusively: one turn runs at a time.
-struct Conversation {
-    agent: Agent,
-    store: MemoryConversation,
-    context: ToolContext,
-}
-
 pub(super) struct WebSession {
     pub(super) info: SessionInfo,
     pub(super) log: Arc<EventLog>,
     pub(super) approvals: Arc<PendingApprovals>,
-    conversation: Arc<tokio::sync::Mutex<Conversation>>,
-    control: Mutex<TurnControl>,
-}
-
-/// Whether the session ended, and how to cancel its running turn. Kept
-/// under one lock, so a turn never starts after the session ends.
-#[derive(Default)]
-struct TurnControl {
-    closed: bool,
-    cancel: Option<oneshot::Sender<()>>,
-}
-
-/// Why a turn cannot start.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum TurnRefused {
-    /// Another turn runs.
-    Busy,
-    /// The session ended.
-    Closed,
+    turns: Turns,
 }
 
 /// What sessions are built from: shared by the sessions of a server.
@@ -155,27 +125,16 @@ impl WebSession {
     /// Resolve `request` and build the session's agent. Nothing contacts the
     /// model until the first turn.
     pub(super) async fn open(bench: Workbench<'_>, request: NewSession) -> Result<Arc<Self>> {
-        let (mut profile, selection, base) = resolve_profile(&bench, &request)?;
-        let harness = bench.harness.clone();
-        let mut profile = tokio::task::spawn_blocking(move || {
-            harness.add_instructions(&mut profile).map(|problems| {
-                for problem in problems {
-                    eprintln!("warning: skipped skill {problem}");
-                }
-                profile
-            })
-        })
-        .await
-        .context("instructions task failed")??;
-        let models =
-            RunModels::resolve(bench.config, &base, &selection, &mut Connections::default())?;
-        let endpoint = models.main.client.base_url().to_string();
-        let binding = SessionBinding::new(&profile.context, &endpoint)?;
+        let (profile, selection, base) = resolve_profile(&bench, &request)?;
+        let opening =
+            Opening::prepare(bench.harness, bench.config, profile, selection, &base).await?;
+        let approval_mode = opening.profile.approval_mode;
+        let endpoint = opening.endpoint.clone();
 
         let log = Arc::new(EventLog::default());
         let approvals = Arc::new(PendingApprovals::default());
         let approval = ApprovalFactory {
-            mode: profile.approval_mode,
+            mode: approval_mode,
             ask_user: Arc::new(WebApproval {
                 log: Arc::clone(&log),
                 pending: Arc::clone(&approvals),
@@ -183,35 +142,30 @@ impl WebSession {
         };
         let events = Arc::clone(&log);
         let text = Arc::clone(&log);
-        let agent = bench
-            .harness
-            .agent(&profile, models, Arc::clone(bench.mcp), &approval)
-            .with_event_listener(Arc::new(move |event| events.record(event)))
-            .with_text_listener(Arc::new(move |delta| text.text_delta(delta)));
+        let conversation = opening.open(bench.harness, Arc::clone(bench.mcp), &approval, |agent| {
+            agent
+                .with_event_listener(Arc::new(move |event| events.record(event)))
+                .with_text_listener(Arc::new(move |delta| text.text_delta(delta)))
+        });
 
-        let context = std::mem::take(&mut profile.context);
+        let context = &conversation.context;
         let info = SessionInfo {
             id: Uuid::new_v4().to_string(),
             user: context.user_id.clone(),
             environment: context.environment.clone(),
             workspace: context.workspace.clone(),
-            model: selection.describe(),
+            model: conversation.selection.describe(),
             endpoint,
             allow_writes: context.allow_writes,
             allow_exec: context.allow_exec,
-            approval_mode: profile.approval_mode,
+            approval_mode,
             created_at_unix: unix_now(),
         };
         Ok(Arc::new(Self {
             info,
             log,
             approvals,
-            conversation: Arc::new(tokio::sync::Mutex::new(Conversation {
-                agent,
-                store: MemoryConversation::new(binding),
-                context,
-            })),
-            control: Mutex::default(),
+            turns: Turns::new(conversation),
         }))
     }
 
@@ -229,43 +183,17 @@ impl WebSession {
     /// Start a turn with the user's `text`. The returned future runs it to
     /// the end; the caller spawns it.
     pub(super) fn start_turn(
-        self: &Arc<Self>,
+        &self,
         text: String,
     ) -> Result<impl Future<Output = ()> + Send + 'static, TurnRefused> {
-        let mut control = self.lock_control();
-        if control.closed {
-            return Err(TurnRefused::Closed);
-        }
-        let mut conversation = Arc::clone(&self.conversation)
-            .try_lock_owned()
-            .map_err(|_| TurnRefused::Busy)?;
-        let (cancel, cancelled) = oneshot::channel();
-        control.cancel = Some(cancel);
-        drop(control);
+        let turn = self.turns.start()?;
         self.log.start_turn(text.clone());
         let log = Arc::clone(&self.log);
         Ok(async move {
-            let Conversation {
-                agent,
-                store,
-                context,
-            } = &mut *conversation;
-            let request = RunRequest {
-                input: vec![InputPart::Text(text)],
-                raw_input: None,
-                context: context.clone(),
-                goal: None,
-                approval_request: None,
-            };
-            // A dropped sender cancels as well. Cancellation comes first, so
-            // a turn cancelled before it ran does not start.
-            let outcome = tokio::select! {
-                biased;
-                _ = cancelled => None,
-                result = agent.run_in_session(request, store) => Some(result),
-            };
+            let (conversation, outcome) = turn.run(vec![InputPart::Text(text)], None).await;
+            let store = &conversation.store;
             let finished = match outcome {
-                Some(Ok(result)) => {
+                TurnOutcome::Completed(result) => {
                     let finished = turn_finished(store, Some(&result), None, false);
                     if !result.streamed && !result.text.trim().is_empty() {
                         log.flush_partial();
@@ -273,15 +201,11 @@ impl WebSession {
                     }
                     finished
                 }
-                // The failure is recorded in the conversation; the next turn
-                // continues from it.
-                Some(Err(error)) => turn_finished(store, None, Some(format!("{error:#}")), false),
-                None => {
-                    let error = (store.data().status == SessionStatus::Running)
-                        .then(|| store.fail("Interrupted by the user."))
-                        .and_then(Result::err)
-                        .map(|error| format!("{error:#}"));
-                    turn_finished(store, None, error, true)
+                TurnOutcome::Failed(error) => {
+                    turn_finished(store, None, Some(format!("{error:#}")), false)
+                }
+                TurnOutcome::Cancelled(error) => {
+                    turn_finished(store, None, error.map(|error| format!("{error:#}")), true)
                 }
             };
             log.finish_turn(finished, &store.data().plan, &store.data().usage);
@@ -291,33 +215,19 @@ impl WebSession {
     /// Cancel the running turn. Completed actions are not undone. False
     /// when no turn runs.
     pub(super) fn cancel(&self) -> bool {
-        self.lock_control()
-            .cancel
-            .take()
-            .is_some_and(|cancel| cancel.send(()).is_ok())
+        self.turns.cancel()
     }
 
     /// Refuse further turns and cancel the running one.
     pub(super) fn close(&self) {
-        let mut control = self.lock_control();
-        control.closed = true;
-        if let Some(cancel) = control.cancel.take() {
-            cancel.send(()).ok();
-        }
+        self.turns.close();
     }
 
     /// End the session: close it, wait until its turn has stopped, and then
     /// tell the pages, so nothing follows `Closed`.
     pub(super) async fn end(&self) {
-        self.close();
-        drop(self.conversation.lock().await);
+        self.turns.end().await;
         self.log.push(UiEvent::Closed);
-    }
-
-    fn lock_control(&self) -> std::sync::MutexGuard<'_, TurnControl> {
-        self.control
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -369,33 +279,28 @@ fn resolve_profile(
             }
             (profile, vec![config.environment_request(name)?])
         }
-        None => (
-            ExecutionProfile {
-                settings: config.agent.settings.clone(),
-                project_instructions: config.agent.project_instructions.clone(),
-                policy: config.policy_for(bench.user, &[]),
-                context: ToolContext {
-                    user_id: bench.user.to_string(),
-                    environment: WEB_ENVIRONMENT.to_string(),
+        None => {
+            let mut profile = config.ad_hoc_profile(
+                bench.user,
+                WEB_ENVIRONMENT,
+                &[],
+                Permissions {
                     workspace: Some(
                         workspace.unwrap_or_else(|| bench.default_workspace.to_path_buf()),
                     ),
                     allow_writes: request.allow_writes,
                     allow_exec: request.allow_exec,
-                    checks: Default::default(),
                 },
-                approval_mode: request.approval_mode.unwrap_or(config.agent.approval_mode),
-            },
-            Vec::new(),
-        ),
+            );
+            if let Some(mode) = request.approval_mode {
+                profile.approval_mode = mode;
+            }
+            (profile, Vec::new())
+        }
     };
     let mut layers = base.clone();
     layers.extend(request.preset.as_deref().map(ModelRequest::preset));
-    let selection = config
-        .select_model(&layers)
-        .context("invalid model choice")?;
-    selection.apply_to(&mut profile.settings);
-    profile.settings.validate()?;
+    let selection = profile.choose_model(config, &layers)?;
     if let Some(path) = profile.context.workspace.take() {
         let root = bench.workspace_root.filter(|_| !configured);
         let inside_root = |canonical: &Path| {
@@ -471,13 +376,6 @@ fn expand_home(path: &str) -> Result<PathBuf> {
     };
     let home = std::env::home_dir().context("cannot expand '~': the home directory is unknown")?;
     Ok(home.join(rest))
-}
-
-pub(super) fn unix_now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
 }
 
 #[cfg(test)]

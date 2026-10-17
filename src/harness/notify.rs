@@ -7,7 +7,7 @@ use crate::{
         agent::{AgentExtension, ExtensionCall, RunInfo},
         automation::{NamedNotifier, Notification},
     },
-    domain::{automation::Priority, tool::ToolDefinition},
+    domain::{automation::Priority, text::cut, tool::ToolDefinition},
 };
 use async_trait::async_trait;
 use futures::future::join_all;
@@ -136,12 +136,4 @@ impl AgentExtension for NotifyExtension {
         }
         json!({"sent": sent, "failed": failed})
     }
-}
-
-fn cut(text: &str, limit: usize) -> String {
-    let mut result: String = text.chars().take(limit).collect();
-    if text.chars().count() > limit {
-        result.push('…');
-    }
-    result
 }

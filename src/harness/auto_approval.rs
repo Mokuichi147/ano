@@ -5,8 +5,11 @@
 //! mode never waits for the user.
 
 use super::answer::{json_object, response_text, unreadable};
-use crate::application::ports::{
-    ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest, ResponsesApi,
+use crate::{
+    application::ports::{
+        ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest, ResponsesApi,
+    },
+    domain::text::cut,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
@@ -292,11 +295,7 @@ fn reason_from(reason: &str) -> String {
 }
 
 fn truncate(text: &str) -> String {
-    let mut result = text.chars().take(MAX_FIELD_CHARS).collect::<String>();
-    if text.chars().count() > MAX_FIELD_CHARS {
-        result.push('…');
-    }
-    result
+    cut(text, MAX_FIELD_CHARS)
 }
 
 #[cfg(test)]

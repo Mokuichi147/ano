@@ -7,6 +7,7 @@ use crate::{
     },
     domain::{
         plan::{CriterionStatus, RunOutcome, StepStatus, TaskGoal, TaskPlan},
+        text::cut,
         usage::StopReason,
     },
 };
@@ -688,11 +689,7 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
             ));
         }
         AgentEvent::SubagentStarted { task, model, .. } => {
-            let summary = task.lines().next().unwrap_or_default();
-            let summary = match summary.char_indices().nth(80) {
-                Some((index, _)) => format!("{}…", &summary[..index]),
-                None => summary.to_string(),
-            };
+            let summary = cut(task.lines().next().unwrap_or_default(), 80);
             status(format!("[subagent] started on {model}: {summary}"));
         }
         AgentEvent::SubagentFinished {

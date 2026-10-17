@@ -3,8 +3,8 @@
 
 use crate::{
     application::{
-        agent::{ModelTarget, SubagentModels, DELEGATE_ROLE},
-        ports::ResponsesApi,
+        agent::{Agent, ModelTarget, SubagentModels, DELEGATE_ROLE},
+        ports::{ApprovalHandler, ConversationStore, ResponsesApi},
     },
     config::{AppConfig, ModelRequest, ModelSelection},
     harness::review::REVIEW_ROLE,
@@ -155,4 +155,24 @@ impl RunModels {
             subagents,
         })
     }
+}
+
+/// Continue the conversation of `agent` in `store` with the model `layers`
+/// choose, and return that choice. The roles follow the new model; `base`
+/// is what their `default` preset stands for. `approval` gives the approval
+/// handler for the new reviewer. Nothing changes when any step fails.
+pub fn switch_model(
+    config: &AppConfig,
+    layers: &[ModelRequest],
+    base: &[ModelRequest],
+    connections: &mut Connections,
+    agent: &mut Agent,
+    store: &mut dyn ConversationStore,
+    approval: impl FnOnce(ModelTarget) -> Arc<dyn ApprovalHandler>,
+) -> Result<ModelSelection> {
+    let next = config.select_model(layers)?;
+    let models = RunModels::resolve(config, base, &next, connections)?;
+    store.switch_model(&next.choice, models.main.client.base_url())?;
+    agent.replace_model(models.main, approval(models.approval), models.subagents);
+    Ok(next)
 }

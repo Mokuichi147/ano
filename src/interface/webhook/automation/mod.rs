@@ -17,8 +17,11 @@ use crate::{
         input::InputPart,
     },
     config::AppConfig,
-    domain::automation::{
-        event_run_request, matching_rule, AutomationEvent, Priority, TriageAction, TriggerRule,
+    domain::{
+        automation::{
+            event_run_request, matching_rule, AutomationEvent, Priority, TriageAction, TriggerRule,
+        },
+        text::cut,
     },
     harness::triage::Triage,
     infrastructure::automation_store::{default_state_file, AutomationStore},
@@ -265,12 +268,4 @@ pub(super) async fn send_all(notifiers: &[NamedNotifier], notification: &Notific
             eprintln!("automation: notifier '{name}' failed: {error:#}");
         }
     }
-}
-
-fn cut(text: &str, limit: usize) -> String {
-    let mut result: String = text.chars().take(limit).collect();
-    if text.chars().count() > limit {
-        result.push('…');
-    }
-    result
 }
