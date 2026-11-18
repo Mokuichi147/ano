@@ -13,7 +13,7 @@ use crate::{
         ports::{ApprovalHandler, ApprovalSource, McpApprovalRequest},
     },
     domain::{automation::Priority, text::cut},
-    interface::shorten,
+    interface::{escape_html as escape, shorten},
 };
 use anyhow::{bail, Result};
 use async_trait::async_trait;
@@ -336,14 +336,6 @@ fn page(status: StatusCode, title: &str, body: &str) -> Response {
         Html(html),
     )
         .into_response()
-}
-
-fn escape(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }
 
 #[cfg(test)]

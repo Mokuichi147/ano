@@ -796,31 +796,54 @@ async fn spaces_are_served_isolated_with_their_data() {
         .unwrap();
     assert_eq!(listed["spaces"][0]["name"], "habits");
 
+    // The page frames the content; its own policy keeps the frame on this
+    // server, so the content cannot navigate it elsewhere with the data in
+    // the URL.
     let page = server
         .request(reqwest::Method::GET, "/spaces/habits")
         .send()
         .await
         .unwrap();
     assert_eq!(page.status(), StatusCode::OK);
-    let policy = page
-        .headers()
-        .get("content-security-policy")
+    let policy = page.headers()["content-security-policy"]
+        .to_str()
         .unwrap()
+        .to_string();
+    assert!(policy.starts_with("default-src 'self'"), "{policy}");
+    let html = page.text().await.unwrap();
+    assert!(
+        html.contains(r#"<iframe sandbox="allow-scripts allow-forms allow-modals" referrerpolicy="no-referrer" title="習慣" src="/spaces/habits/frame">"#),
+        "{html}"
+    );
+
+    let frame = server
+        .request(reqwest::Method::GET, "/spaces/habits/frame")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(frame.status(), StatusCode::OK);
+    let policy = frame.headers()["content-security-policy"]
         .to_str()
         .unwrap()
         .to_string();
     // Its scripts run with no origin and may not connect anywhere, so they
     // cannot reach /api with the page's cookie.
     assert!(policy.starts_with("sandbox allow-scripts"), "{policy}");
-    assert!(!policy.contains("allow-same-origin"), "{policy}");
-    assert!(policy.contains("connect-src 'none'"), "{policy}");
-    let html = page.text().await.unwrap();
+    assert!(
+        !policy.contains("allow-same-origin") && !policy.contains("allow-popups"),
+        "{policy}"
+    );
+    assert!(
+        policy.contains("connect-src 'none'") && policy.ends_with("frame-ancestors 'self'"),
+        "{policy}"
+    );
+    let html = frame.text().await.unwrap();
     assert!(
         html.contains(r#"window.ANO_SPACE = {"name":"habits","title":"習慣","data":{"days":3}};"#),
         "{html}"
     );
 
-    for missing in ["/spaces/none", "/spaces/..%2Fx"] {
+    for missing in ["/spaces/none", "/spaces/..%2Fx", "/spaces/none/frame"] {
         let response = server
             .request(reqwest::Method::GET, missing)
             .send()

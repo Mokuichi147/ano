@@ -355,6 +355,7 @@ fn router(state: Arc<WebState>) -> Router {
             get(|| asset("application/wasm", UI_WASM)),
         )
         .route("/spaces/{name}", get(space_page))
+        .route("/spaces/{name}/frame", get(space_frame))
         .nest("/api", api)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -604,11 +605,17 @@ async fn list_spaces(State(state): State<Arc<WebState>>) -> Response {
     }
 }
 
-/// A space, isolated: the policy gives it no origin (so it cannot use the
-/// session's cookie or the API) and lets it connect nowhere, so its scripts
-/// see only the data the page carries.
-const SPACE_POLICY: &str = "sandbox allow-scripts allow-forms allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+/// The content of a space, isolated: the policy gives it no origin (so it
+/// cannot use the session's cookie or the API) and lets it load and send
+/// nothing. It is shown only inside its frame page, whose own policy
+/// (`frame-src` from `default-src 'self'`) keeps the frame from navigating
+/// to another site, which could carry the data out in the URL.
+const SPACE_POLICY: &str = "sandbox allow-scripts allow-forms allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
 
+/// The page of a space: a frame around its content. The page has the
+/// server's usual policy; the frame is sandboxed without popups or top
+/// navigation, so the content can neither leave the frame nor send the
+/// frame elsewhere.
 async fn space_page(
     State(state): State<Arc<WebState>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -618,13 +625,29 @@ async fn space_page(
     if !state.access.admits(peer, &headers) {
         return (StatusCode::UNAUTHORIZED, Html(LOCKED_HTML)).into_response();
     }
-    let Some(spaces) = state.harness.spaces.clone() else {
+    let Some(info) = read_space(&state, name).await.map(|(info, _, _)| info) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let user = state.user.clone();
-    let read = tokio::task::spawn_blocking(move || spaces.read(&user, &name)).await;
-    match read {
-        Ok(Ok(Some((info, html, data)))) => (
+    let title = crate::interface::escape_html(&info.title);
+    let page = format!(
+        "<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>html,body{{margin:0;height:100%;background:#fff}}iframe{{border:0;display:block;width:100%;height:100%}}</style><iframe sandbox=\"allow-scripts allow-forms allow-modals\" referrerpolicy=\"no-referrer\" title=\"{title}\" src=\"/spaces/{}/frame\"></iframe></html>",
+        info.name
+    );
+    ([(header::CACHE_CONTROL, "no-cache")], Html(page)).into_response()
+}
+
+/// The content of a space, for its frame page.
+async fn space_frame(
+    State(state): State<Arc<WebState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if !state.access.admits(peer, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match read_space(&state, name).await {
+        Some((info, html, data)) => (
             [
                 (header::CONTENT_SECURITY_POLICY, SPACE_POLICY),
                 (header::CACHE_CONTROL, "no-cache"),
@@ -634,9 +657,25 @@ async fn space_page(
             )),
         )
             .into_response(),
-        Ok(Ok(None)) | Ok(Err(_)) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
     }
+}
+
+async fn read_space(
+    state: &WebState,
+    name: String,
+) -> Option<(
+    crate::infrastructure::spaces::SpaceInfo,
+    String,
+    serde_json::Value,
+)> {
+    let spaces = state.harness.spaces.clone()?;
+    let user = state.user.clone();
+    tokio::task::spawn_blocking(move || spaces.read(&user, &name))
+        .await
+        .ok()?
+        .ok()
+        .flatten()
 }
 
 /// Rate an item of the feed, or mark it done.

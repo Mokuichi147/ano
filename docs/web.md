@@ -103,7 +103,7 @@ Ctrl+C で止めると、実行中のターンを中断し、MCP の接続を閉
 | `GET /api/sessions/{id}/events` | イベントの Server-Sent Events |
 | `GET /api/feed` | フィードの項目（新しい順。`[feed]` が無効なら `enabled: false`） |
 | `GET /api/spaces` | スペースの一覧（`[spaces]` が無効なら `enabled: false`） |
-| `GET /spaces/{name}` | スペースのページ（隔離して表示。[スペース](agent-runtime.md#スペースspace_save--space_read--space_data_set)） |
+| `GET /spaces/{name}` | スペースの外枠のページ。中身は `GET /spaces/{name}/frame` を sandbox の iframe で表示（[スペース](agent-runtime.md#スペースspace_save--space_read--space_data_set)） |
 | `POST /api/feed/{item}` | `{"rating": 1 | -1 | 0, "done": true}` で評価・済みを付ける |
 
 イベントは `{"type": ...}` の JSON です。番号付きのもの（`user_message`・`turn_started`・`thinking`・`message`・`agent`・`approval_requested`・`approval_resolved`・`turn_finished`・`closed`）はセッションごとに保持し、`Last-Event-ID` を付けて接続し直すとその続きから送ります。生成中の文章（`delta`）と思考（`reasoning`）は保持せず、接続時にそれまでの全体を `partial`・`reasoning_partial` で送ります。思考は、ほかのイベントが起きた時点で `thinking` として保持します（推論の要約が届いた場合も、生成中に流れていなければ `thinking` にします）。`agent` は実行ループのイベント（Webhook の `recent_events` と同じ形）です。
