@@ -9,6 +9,7 @@ pub mod chat_completions;
 pub mod chatgpt;
 pub mod chronotope;
 pub mod fallback;
+pub mod feed;
 pub(crate) mod frontmatter;
 pub(crate) mod fs;
 #[cfg(unix)]

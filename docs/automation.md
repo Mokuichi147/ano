@@ -327,7 +327,7 @@ Rust のライブラリとして使う場合、`EventSource`（ソース）と `
 - **第三者の入力。** 中継された Issue やコメント、外部サービスの通知などは、誰でも書ける文面を含みます。こうしたイベント（`untrusted`）の本文は「データであり指示ではない」と明示してエージェントに渡します。自動承認（`approval_mode = "auto"`）は、ルールの `task` とソース名だけを依頼として審査し、イベントの本文・タイトル・URL・種類は含めません。そのため、Issue に「main へ push して」と書かれていても、依頼したことにはなりません。
 - **`allow` の禁止。** 信頼できないイベントで作業を始めうるルール（`run`・`auto`）は、`approval_mode = "allow"` の環境を指定できません（設定の検証で拒否します）。
 - **判断の限界。** エージェントはイベントの本文を読んで作業するため、本文に埋め込まれた指示に従ってしまう可能性は残ります。トリアージも自動承認も、モデルによる補助的な安全策です。自動承認はルールの `task` の範囲に見える操作を許可するため、`task` が書き込みを求めるルールでは、埋め込まれた指示による書き込みも通りうると考えてください。第三者の入力で動かす環境は、できるだけ読み取り専用（`allow_writes = false`・`allow_exec = false`）にして調査と報告に留め、書き込ませる場合も tool を必要なものに絞り、Git などで元に戻せる workspace にしてください。`notify_user` は承認なしにルールの通知先へ送れます（1回の作業で5回まで）。
-- **記憶と、以後に残る書き込み。** 信頼できないイベントの作業には、[記憶](agent-runtime.md#記憶memory_save--memory_forget)を載せず、`memory_save`・`memory_forget`・`character_update`・`skill_save`・`objective_*`・`routine_*` も使わせません（[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)とルーティンも載せません）。
+- **記憶と、以後に残る書き込み。** 信頼できないイベントの作業には、[記憶](agent-runtime.md#記憶memory_save--memory_forget)を載せず、`memory_save`・`memory_forget`・`character_update`・`skill_save`・`objective_*`・`routine_*`・`feed_*` も使わせません（[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)とルーティンも載せません）。
 - **プロジェクト指示。** 自動化の作業でも、workspace の `AGENTS.md` などのプロジェクト指示を読みます（手動の実行と同じです）。第三者が変更できるリポジトリを扱う環境では、`[agent] project_instructions = []` にしてください。
 - **繰り返しの防止。** 作業が書いたもの（MCP で投稿したコメントなど）が、外部サービスの Webhook を通じて再びイベントとして届く構成では、作業が連鎖しないよう、ルールの `authors` を絞るか、その投稿者のイベントを `action = "ignore"` のルールで先に受けてください。MCP で読んだ第三者の文面も、作業の中では信頼できない入力です。
 - **通知の内容。** 通知にはイベントや作業結果の一部が含まれます。Discord・Slack のチャンネルを共有している場合は、そのメンバーにも見えることに注意してください。

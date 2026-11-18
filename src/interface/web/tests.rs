@@ -87,6 +87,15 @@ impl Server {
 
     /// A server that keeps sessions in `saved` and opens those kept there.
     async fn start_saving(api_url: &str, saved: Option<&std::path::Path>) -> Self {
+        Self::start_with(api_url, saved, None).await
+    }
+
+    /// `start_saving`, with the user's feed kept in `feed`.
+    async fn start_with(
+        api_url: &str,
+        saved: Option<&std::path::Path>,
+        feed: Option<&std::path::Path>,
+    ) -> Self {
         let config = AppConfig::parse(&format!(
             "[agent]\nprovider = 'fake'\n[providers.fake]\nbase_url = '{api_url}'\nmodel = 'fake-model'\nstream = false\nmax_retries = 0"
         ))
@@ -104,8 +113,10 @@ impl Server {
             )
             .unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        let mut harness = Harness::bare(registry);
+        harness.feed = feed.map(|dir| Arc::new(crate::infrastructure::feed::Feed::new(dir)));
         let state = Arc::new(WebState {
-            harness: Harness::bare(registry),
+            harness,
             config,
             mcp: Arc::new(McpPool::new(Vec::new())),
             user: "default".into(),
@@ -698,4 +709,54 @@ async fn saved_sessions_survive_a_restart() {
         .await
         .unwrap();
     assert!(!saved.path().join("default").join(&id).exists());
+}
+
+/// The page reads the feed and rates its items; without a feed, the list
+/// says so.
+#[tokio::test]
+async fn the_page_reads_and_rates_the_feed() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let server = Server::start(&api).await;
+    let feed: Value = server
+        .request(reqwest::Method::GET, "/api/feed")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(feed, json!({"enabled": false, "items": []}));
+
+    let dir = tempfile::tempdir().unwrap();
+    crate::infrastructure::feed::Feed::new(dir.path())
+        .post(
+            "default",
+            crate::domain::feed::FeedKind::Idea,
+            "Morning walk",
+            "",
+            None,
+            Some("Plan a walk"),
+        )
+        .unwrap();
+    let server = Server::start_with(&api, None, Some(dir.path())).await;
+    let feed: Value = server
+        .request(reqwest::Method::GET, "/api/feed")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(feed["items"][0]["action"], "Plan a walk");
+    let rated = server
+        .post("/api/feed/f1", json!({"rating": 1, "done": true}))
+        .await;
+    assert_eq!(rated.status(), StatusCode::OK);
+    let item: Value = rated.json().await.unwrap();
+    assert_eq!(
+        (item["rating"].clone(), item["done"].clone()),
+        (json!(1), json!(true))
+    );
+    let missing = server.post("/api/feed/f9", json!({"rating": 1})).await;
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
 }

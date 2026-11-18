@@ -10,6 +10,7 @@ pub mod automation;
 pub mod character;
 pub mod compaction;
 pub mod environment;
+pub mod feed;
 pub mod github;
 pub mod mcp;
 pub mod objective;

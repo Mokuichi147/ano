@@ -27,6 +27,7 @@ use crate::{
     infrastructure::{
         character::CharacterSettings,
         chronotope::HistorySettings,
+        feed::FeedSettings,
         objectives::ObjectiveSettings,
         openai::{ApiSettings, ProviderSettings},
         routines::RoutineSettings,
@@ -143,6 +144,8 @@ pub struct AppConfig {
     /// Reminders and recurring tasks set up in conversations, which
     /// `ano serve` carries out.
     pub routines: RoutineSettings,
+    /// Ideas, articles, and reports the agent leaves for the user.
+    pub feed: FeedSettings,
 }
 
 impl AppConfig {
@@ -220,6 +223,9 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(dir) = &mut self.feed.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid feed.dir")?;
         }
         if let Some(dir) = &mut self.routines.dir {
             *dir = resolve_path(dir, directory, home).context("invalid routines.dir")?;

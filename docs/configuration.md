@@ -31,6 +31,7 @@
 | `[memory]` | 記憶（ユーザーについての事実）の有効化と保存先 | [記憶](agent-runtime.md#記憶memory_save--memory_forget) |
 | `[objectives]` | 目標（長期の目標と進捗）の有効化と保存先 | [目標](agent-runtime.md#目標objective_set--objective_log--objective_read) |
 | `[routines]` | 会話から作るリマインダーと定期作業の有効化と保存先 | [ルーティン](automation.md#会話から作るリマインダーと定期作業routines) |
+| `[feed]` | フィード（提案・記事・報告）の有効化と保存先 | [フィード](agent-runtime.md#フィードfeed_post--feed_read) |
 | `[character]` | キャラクター（名前・性格・口調）の有効化と保存先 | [キャラクター](agent-runtime.md#キャラクターcharacter_update) |
 
 設定の誤りで意図せず制限が外れないよう、次の場合はエラーになります。
@@ -43,7 +44,7 @@
 
 これまでプロジェクト直下の `config.toml` を使っていた場合は、`ano --config config.toml ...` で明示するか、`.ano/config.toml` に移動してください。明示したファイルが無い場合や未知のキーがある場合などの厳密な検証は変わりません。自動探索で選ばれる ano の設定が不正・読み取り不可・リンク切れの場合もエラーにし、別の設定や既定値へ黙って切り替えません。
 
-`environments.*.workspace`、MCP の `cwd`、`history.data_dir`、`skills.dir`、`character.dir`、`memory.dir`、`objectives.dir`、`routines.dir`、API・provider の `chatgpt_auth_file` の相対パスは設定ファイルのあるディレクトリを基準に解決するため、移動時にはパスを調整してください。たとえば、プロジェクト直下の設定で `workspace = "."` としていた場合、`.ano/config.toml` では `workspace = ".."` とすると同じプロジェクトを指します。MCP の `cwd = "./mcp-servers/files"` も `cwd = "../mcp-servers/files"` に変更します。
+`environments.*.workspace`、MCP の `cwd`、`history.data_dir`、`skills.dir`、`character.dir`、`memory.dir`、`objectives.dir`、`routines.dir`、`feed.dir`、API・provider の `chatgpt_auth_file` の相対パスは設定ファイルのあるディレクトリを基準に解決するため、移動時にはパスを調整してください。たとえば、プロジェクト直下の設定で `workspace = "."` としていた場合、`.ano/config.toml` では `workspace = ".."` とすると同じプロジェクトを指します。MCP の `cwd = "./mcp-servers/files"` も `cwd = "../mcp-servers/files"` に変更します。
 
 CLI の `--workspace` は引き続き起動ディレクトリが基準です。`agent.project_instructions` は workspace 基準なので、workspace を維持する場合は変更しません。MCP の `command` は先頭の `~` だけを展開し、`args` はそのまま子プロセスに渡します。workspace 内で実行する検証コマンドのパスも、設定ファイルの移動だけでは変更する必要はありません。
 

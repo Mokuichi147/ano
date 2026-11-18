@@ -10,7 +10,7 @@ use crate::{
     application::{agent::Agent, ports::McpGateway, registry::ToolRegistry},
     config::AppConfig,
     infrastructure::{
-        character::CharacterStore, chronotope::Chronotope, objectives::ObjectiveBook,
+        character::CharacterStore, chronotope::Chronotope, feed::Feed, objectives::ObjectiveBook,
         project::read_project_instructions, routines::RoutineBook, skills::SkillLibrary,
         tools::register_builtin_tools, user_memory::MemoryBook,
     },
@@ -22,7 +22,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Harness {
     /// The built-in tools, with those of the raw history, skills, the
-    /// character, memory, objectives, and routines when they are enabled.
+    /// character, memory, objectives, routines, and the feed when they are
+    /// enabled.
     pub registry: ToolRegistry,
     pub history: Option<Arc<Chronotope>>,
     pub skills: Option<Arc<SkillLibrary>>,
@@ -30,6 +31,7 @@ pub struct Harness {
     pub memory: Option<Arc<MemoryBook>>,
     pub objectives: Option<Arc<ObjectiveBook>>,
     pub routines: Option<Arc<RoutineBook>>,
+    pub feed: Option<Arc<Feed>>,
 }
 
 impl Harness {
@@ -53,6 +55,7 @@ impl Harness {
             memory: None,
             objectives: None,
             routines: None,
+            feed: None,
         }
     }
 
@@ -67,6 +70,7 @@ impl Harness {
         let memory = MemoryBook::from_settings(&config.memory, &registry)?;
         let objectives = ObjectiveBook::from_settings(&config.objectives, &registry)?;
         let routines = RoutineBook::from_settings(&config.routines, &registry)?;
+        let feed = Feed::from_settings(&config.feed, &registry)?;
         Ok(Self {
             registry,
             history,
@@ -75,6 +79,7 @@ impl Harness {
             memory,
             objectives,
             routines,
+            feed,
         })
     }
 
@@ -106,6 +111,9 @@ impl Harness {
             if let Err(error) = profile.append_routines(routines) {
                 warnings.push(format!("left out the routines: {error:#}"));
             }
+        }
+        if self.feed.is_some() {
+            profile.append_feed();
         }
         if let Some(workspace) = &profile.context.workspace {
             let sources = read_project_instructions(workspace, &profile.project_instructions)?;
@@ -178,6 +186,7 @@ mod tests {
             memory: None,
             objectives: None,
             routines: None,
+            feed: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {
@@ -223,6 +232,7 @@ mod tests {
             memory: None,
             objectives: None,
             routines: None,
+            feed: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {

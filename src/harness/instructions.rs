@@ -3,6 +3,7 @@
 
 use crate::domain::{
     character::{Character, CHARACTER_UPDATE_NAME},
+    feed::{FEED_POST_NAME, FEED_READ_NAME},
     objective::{active_summaries, OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
     routine::{MAX_ROUTINE_INDEX_BYTES, ROUTINE_CREATE_NAME, ROUTINE_DELETE_NAME},
     skill::{Skill, SKILL_READ_NAME, SKILL_SAVE_NAME},
@@ -181,6 +182,14 @@ pub fn append_routines(
         bytes += line.len() + 3;
         instructions.push_str(&format!("\n- {line}"));
     }
+}
+
+/// Tell the model about the user's feed: where ideas, articles, and
+/// reports go, and that the user's ratings say what they like.
+pub fn append_feed(instructions: &mut String) {
+    instructions.push_str(&format!(
+        "\n\n# Feed\nThe user has a feed in ano web's home for things to look at later. When the user asks for ideas, suggestions, or articles to read later, or a task tells you to, leave them there with {FEED_POST_NAME}: an idea comes with the request that would carry it out (its action), an article with its URL, and work done on your own as a short report. Before posting, read recent items with {FEED_READ_NAME} to avoid repeats and to follow the user's ratings: more like those rated 1, fewer like those rated -1. Post a few good items rather than many."
+    ));
 }
 
 /// Append project instructions read from the workspace. Each source is

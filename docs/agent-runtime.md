@@ -1,6 +1,6 @@
 # エージェントの実行モデル
 
-`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶・目標について説明します。
+`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶・目標・フィードについて説明します。
 
 - [実行ループと上限](#実行ループと上限)
 - [回答のストリーミング](#回答のストリーミング)
@@ -16,6 +16,7 @@
 - [キャラクター（character_update）](#キャラクターcharacter_update)
 - [記憶（memory_save / memory_forget）](#記憶memory_save--memory_forget)
 - [目標（objective_set / objective_log / objective_read）](#目標objective_set--objective_log--objective_read)
+- [フィード（feed_post / feed_read）](#フィードfeed_post--feed_read)
 
 ## 実行ループと上限
 
@@ -387,4 +388,45 @@ ano objectives remove o1
 - **第三者の入力では使いません。** 信頼できないイベントから始まった[自動化](automation.md)の作業には、目標を載せず、`objective_*` も使わせません。
 - 保存先は `<dir>/<ユーザー>/objectives.json` です（JSON。目標は 100 件、進捗は目標ごとに新しい 200 件まで）。`dir` を省略した場合の場所は、macOS は `~/Library/Application Support/ano/objectives`、Linux は `$XDG_DATA_HOME/ano/objectives`（既定 `~/.local/share/ano/objectives`）、Windows は `%APPDATA%\ano\data\objectives` です。
 - `objective_set` と `objective_log` は `tool_search` を経ずに常に公開します。`objective_read` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます（進行中の目標は instructions に載っているため、ほとんどの会話では不要です。`tool_search` を無効にした実行では、`objective_read` の案内を省きます）。`allowed_tools` を指定した環境では `objective_*` を加えてください。`objective_read` を使えない実行には目標を載せません。
+
+## フィード（feed_post / feed_read）
+
+フィードは、エージェントがユーザーに後で見てもらうために残すものの置き場です。記憶や目標から考えた**提案**（`idea`。実行するための依頼文つき）、興味に合う**記事**（`article`。URL つき）、自分で進めた作業の**報告**（`report`）を残します。ユーザーは `ano web` のホームや `ano feed` で読み、👍・👎 の評価や「済み」を付けます。`[feed] enabled = true` で有効になります。
+
+```toml
+[feed]
+enabled = true
+# dir = "~/notes/ano-feed"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**先回りの提案と記事の収集。** 決まった時刻に動かすと、頼まれる前に提案や記事が届きます（[定期実行](automation.md#定期実行schedule)）。
+
+```toml
+[automation.sources.ideas]
+kind = "schedule"
+cron = "0 8 * * *"
+
+[automation.sources.reading]
+kind = "schedule"
+cron = "30 7 * * MON-FRI"
+
+[[automation.rules]]
+name = "ideas"
+sources = ["ideas"]
+action = "run"
+task = "記憶と目標を踏まえて、今日やるとよさそうなことを2〜3件考え、feed_post で idea として残す。feed_read で最近の評価を確かめ、似たものの繰り返しや 👎 のついた種類は避ける"
+environment = "assistant"
+
+[[automation.rules]]
+name = "reading"
+sources = ["reading"]
+action = "run"
+task = "記憶にある興味に合う新しい記事を web_fetch で探し、良いものを2〜3件 feed_post で article として残す"
+environment = "reader"                  # web_fetch を許し、approval_mode = "auto" の環境
+```
+
+- `feed_post`（残す）と `feed_read`（最近の項目を評価・済みとともに読む）は承認なしで使えます。残すのはユーザーに見せる項目で、以後の実行の instructions には載せません。`feed_read` で読んだ項目は、作業の中ではデータとして扱います。
+- 実行の instructions には、フィードの使い方だけを短く載せます（項目そのものは載せません）。
+- 保存先は `<dir>/<ユーザー>/feed.json` です（新しい 200 件まで）。`ano feed` で一覧、`ano feed rate f3 up`（`down`・`none`）で評価、`ano feed done f3` で済みにできます。
+- 信頼できないイベントから始まった作業では、`feed_*` を使わせません。
 

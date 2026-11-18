@@ -3,8 +3,8 @@
 
 use super::{
     instructions::{
-        append_character, append_memory, append_objectives, append_project_instructions,
-        append_routines, append_skills,
+        append_character, append_feed, append_memory, append_objectives,
+        append_project_instructions, append_routines, append_skills,
     },
     settings::AgentConfig,
 };
@@ -15,6 +15,7 @@ use crate::{
         approval::ApprovalMode,
         character::CHARACTER_UPDATE_NAME,
         environment::EnvironmentConfig,
+        feed::{FEED_POST_NAME, FEED_READ_NAME},
         objective::{OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
         policy::UserPolicy,
         routine::{ROUTINE_CREATE_NAME, ROUTINE_DELETE_NAME},
@@ -181,6 +182,8 @@ impl ExecutionProfile {
             OBJECTIVE_READ_NAME,
             ROUTINE_CREATE_NAME,
             ROUTINE_DELETE_NAME,
+            FEED_POST_NAME,
+            FEED_READ_NAME,
         ]);
     }
 
@@ -189,6 +192,15 @@ impl ExecutionProfile {
     /// small, so the instructions mention them only when they can be loaded.
     fn can_search(&self) -> bool {
         !self.policy.is_disabled(TOOL_SEARCH_NAME)
+    }
+
+    /// Tell the run about the user's feed, when it may post to it and keeps
+    /// personal context.
+    pub fn append_feed(&mut self) {
+        let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
+        if self.personal_context && available(FEED_POST_NAME) && available(FEED_READ_NAME) {
+            append_feed(&mut self.settings.instructions);
+        }
     }
 
     /// Tell the run the current time and its user's upcoming routines in
@@ -473,9 +485,15 @@ mod tests {
             OBJECTIVE_READ_NAME,
             ROUTINE_CREATE_NAME,
             ROUTINE_DELETE_NAME,
+            FEED_POST_NAME,
+            FEED_READ_NAME,
         ] {
             assert!(untrusted.policy.is_disabled(name), "{name}");
         }
+        let mut untrusted_feed = untrusted.clone();
+        let before = untrusted_feed.settings.instructions.clone();
+        untrusted_feed.append_feed();
+        assert_eq!(untrusted_feed.settings.instructions, before);
     }
 
     #[test]

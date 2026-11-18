@@ -101,6 +101,8 @@ Ctrl+C で止めると、実行中のターンを中断し、MCP の接続を閉
 | `POST /api/sessions/{id}/cancel` | 実行中のターンを中断 |
 | `POST /api/sessions/{id}/approvals/{approval}` | `{"approved": true}` で承認要求に答える。待っている要求が無ければ 404 |
 | `GET /api/sessions/{id}/events` | イベントの Server-Sent Events |
+| `GET /api/feed` | フィードの項目（新しい順。`[feed]` が無効なら `enabled: false`） |
+| `POST /api/feed/{item}` | `{"rating": 1 | -1 | 0, "done": true}` で評価・済みを付ける |
 
 イベントは `{"type": ...}` の JSON です。番号付きのもの（`user_message`・`turn_started`・`thinking`・`message`・`agent`・`approval_requested`・`approval_resolved`・`turn_finished`・`closed`）はセッションごとに保持し、`Last-Event-ID` を付けて接続し直すとその続きから送ります。生成中の文章（`delta`）と思考（`reasoning`）は保持せず、接続時にそれまでの全体を `partial`・`reasoning_partial` で送ります。思考は、ほかのイベントが起きた時点で `thinking` として保持します（推論の要約が届いた場合も、生成中に流れていなければ `thinking` にします）。`agent` は実行ループのイベント（Webhook の `recent_events` と同じ形）です。
 

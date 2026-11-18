@@ -335,6 +335,8 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/sessions/{id}/cancel", post(cancel_turn))
         .route("/sessions/{id}/approvals/{approval}", post(answer_approval))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/feed", get(list_feed))
+        .route("/feed/{item}", post(update_feed_item))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             require_access,
@@ -559,6 +561,55 @@ async fn delete_session(State(state): State<Arc<WebState>>, Path(id): Path<Strin
             StatusCode::NO_CONTENT.into_response()
         }
         None => session_not_found(),
+    }
+}
+
+/// The user's feed, newest first; empty when the feed is disabled.
+async fn list_feed(State(state): State<Arc<WebState>>) -> Response {
+    let Some(feed) = state.harness.feed.clone() else {
+        return Json(json!({"enabled": false, "items": []})).into_response();
+    };
+    let user = state.user.clone();
+    match tokio::task::spawn_blocking(move || feed.items(&user)).await {
+        Ok(Ok(items)) => Json(json!({"enabled": true, "items": items})).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}")),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeedItemUpdate {
+    /// 1, -1, or 0 to clear.
+    rating: Option<i8>,
+    done: Option<bool>,
+}
+
+/// Rate an item of the feed, or mark it done.
+async fn update_feed_item(
+    State(state): State<Arc<WebState>>,
+    Path(item): Path<String>,
+    Json(update): Json<FeedItemUpdate>,
+) -> Response {
+    let Some(feed) = state.harness.feed.clone() else {
+        return error_response(StatusCode::NOT_FOUND, "the feed is disabled");
+    };
+    let user = state.user.clone();
+    let changed = tokio::task::spawn_blocking(move || {
+        let mut changed = None;
+        if let Some(rating) = update.rating {
+            changed = Some(feed.rate(&user, &item, rating)?);
+        }
+        if let Some(done) = update.done {
+            changed = Some(feed.mark_done(&user, &item, done)?);
+        }
+        changed.context("give rating or done")
+    })
+    .await;
+    match changed {
+        Ok(Ok(item)) => Json(item).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::BAD_REQUEST, &format!("{error:#}")),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 
