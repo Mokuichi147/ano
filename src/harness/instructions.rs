@@ -150,11 +150,11 @@ pub fn append_routines(
     can_delete: bool,
 ) {
     instructions.push_str(&format!(
-        "\n\n# Routines\nThe current local time is {now}. Routines are reminders and recurring tasks that ano carries out at set times while its server runs, even with no conversation open."
+        "\n\n# Routines\nThis conversation started at {now} (local time); in a long or resumed conversation the time has moved on since. Routines are reminders and recurring tasks that ano carries out at set times while its server runs, even with no conversation open."
     ));
     if can_create {
         instructions.push_str(&format!(
-            " When the user asks to be reminded of something at a time, or for something to be done regularly (\"every Friday at 17:00, sum up my week\"), set it up with {ROUTINE_CREATE_NAME}: kind reminder or task, a time for once or five cron fields to repeat, and the task in the user's words. Confirm the time when the request is ambiguous. Setting one up needs approval."
+            " When the user asks to be reminded of something at a time, or for something to be done regularly (\"every Friday at 17:00, sum up my week\"), set it up with {ROUTINE_CREATE_NAME}: kind reminder or task, a time for once or five cron fields to repeat, and the task in the user's words. Confirm the time when the request is ambiguous. Its result gives the current time and the time it set: check them against what the user meant. Setting one up needs approval."
         ));
     }
     if can_delete {

@@ -322,11 +322,13 @@ impl RoutineBook {
             field("cron")?,
             at,
         )?;
-        let next = next_time(&routine, unix_now()).map(local_time);
+        let now = unix_now();
+        let next = next_time(&routine, now).map(local_time);
         Ok(json!({
             "status": "created",
             "id": routine.id,
             "next": next,
+            "now": local_time(now),
             "note": "It runs while ano serve is running with a routines source.",
         }))
     }
@@ -449,6 +451,8 @@ mod tests {
             .unwrap();
         assert_eq!(created["id"], "r1");
         assert!(created["next"].as_str().is_some());
+        // The current time, for conversations that started long ago.
+        assert!(created["now"].as_str().unwrap().starts_with("20"));
         let tomorrow = Local::now() + chrono::Duration::days(1);
         let at = tomorrow.format("%Y-%m-%d %H:%M").to_string();
         book.create_tool(

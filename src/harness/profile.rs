@@ -561,7 +561,7 @@ mod tests {
         empty.append_routines(&book).unwrap();
         let added = &empty.settings.instructions[base.len()..];
         assert!(
-            added.starts_with("\n\n# Routines\nThe current local time is 20"),
+            added.starts_with("\n\n# Routines\nThis conversation started at 20"),
             "{added}"
         );
         assert!(added.contains(ROUTINE_CREATE_NAME) && added.ends_with("No routine is set up."));

@@ -77,7 +77,7 @@ async fn runs_set_up_routines_that_later_runs_see() {
         let requests = requests.lock().unwrap();
         let instructions = requests[0]["instructions"].as_str().unwrap();
         assert!(
-            instructions.contains("# Routines\nThe current local time is ")
+            instructions.contains("# Routines\nThis conversation started at ")
                 && instructions.contains("\n\nNo routine is set up."),
             "{instructions}"
         );
