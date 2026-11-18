@@ -120,7 +120,7 @@ token_env = "MONITORING_TOKEN"
 | `describe` | `ano automation list` に出す1行の説明 |
 | `authentication` | 要求の認証の担い手。既定の `PostAuthentication::Server` では、サーバーが ano の署名を検証し、リプレイを拒否してから渡します。`PostAuthentication::Source` では、検証はソースが `receive` で行います（GitHub・Slack・Stripe など、送り手が独自の方式で署名するサービス向け）。この場合、サーバーは何も検証しません。署名と時刻を確かめ、同じ要求から同じ `key` を作って重複として除くなど、認証とリプレイの拒否はソースの役目です |
 | `receive` | POST された要求（`PostedRequest`: ソース名・ヘッダー・本文）をイベントにします。認証できなければ `Rejection::Unauthorized`（`401`）、読めなければ `Rejection::Invalid`（`400`）を返します。理由は 1,000 文字までに切って返します |
-| `next_fire`・`fired` | 決まった時刻に自分でイベントを作るソース（組み込みの `schedule` など）だけが実装します。`next_fire(after)` は `after` より後の次の時刻（Unix 秒）を返し、`ano serve` はその時刻に `fired(source, at)` が返すイベントを、POST されたイベントと同じく処理します。`key` には時刻を含め、同じ時刻を二度処理しないようにします。既定は `None`（POST だけを受け取るソース） |
+| `next_fire`・`fired` | 決まった時刻に自分でイベントを作るソース（組み込みの `schedule` など）だけが実装します。`next_fire(after)` は `after` より後の次の時刻（Unix 秒）を返し、`ano serve` はその時刻に `fired(source, at)` が返すイベント（同じ時刻に複数あってよい）を、POST されたイベントと同じく処理します。`key` には時刻を含め、同じ時刻を二度処理しないようにします。既定は `None` と空（POST だけを受け取るソース） |
 
 - `receive` が返したイベントの `source` は、受け取ったソースの名前に置き換えられます。
 - どの種類のイベントも、共通の検証（`kind`・`key`・`title` が空でないこと、長さの上限）を受け、満たさなければ `400` になります。

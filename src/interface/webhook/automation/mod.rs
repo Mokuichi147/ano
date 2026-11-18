@@ -326,10 +326,9 @@ async fn run_timer(state: &Arc<WebhookState>, name: &str, source: &dyn EventSour
             continue;
         }
         after = next;
-        let Some(event) = source.fired(name, next) else {
-            continue;
-        };
-        fire(state, event).await;
+        for event in source.fired(name, next) {
+            fire(state, event).await;
+        }
     }
 }
 

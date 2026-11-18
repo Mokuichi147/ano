@@ -114,13 +114,13 @@ impl EventSource for ScheduleSource {
         next_after(&self.cron, after)
     }
 
-    fn fired(&self, source: &str, at: u64) -> Option<AutomationEvent> {
+    fn fired(&self, source: &str, at: u64) -> Vec<AutomationEvent> {
         let time = local_time(at);
         let mut body = format!("Scheduled for {time} (\"{}\").", self.pattern);
         if !self.body.is_empty() {
             body = format!("{}\n\n{body}", self.body);
         }
-        Some(AutomationEvent {
+        vec![AutomationEvent {
             source: source.to_string(),
             kind: "schedule".into(),
             key: format!("{source}@{at}"),
@@ -129,7 +129,7 @@ impl EventSource for ScheduleSource {
             url: None,
             author: None,
             trust: self.trust,
-        })
+        }]
     }
 }
 
@@ -158,7 +158,7 @@ mod tests {
         // The time itself does not count again.
         assert!(schedule.next_fire(next).unwrap() > next);
 
-        let event = schedule.fired("morning", next).unwrap();
+        let event = schedule.fired("morning", next).remove(0);
         assert_eq!(event.key, format!("morning@{next}"));
         assert_eq!(event.title, "morning");
         assert_eq!(event.kind, "schedule");
@@ -179,7 +179,7 @@ mod tests {
             .unwrap();
         let local = Local.timestamp_opt(next as i64, 0).single().unwrap();
         assert_eq!(local.weekday(), chrono::Weekday::Fri);
-        assert_eq!(schedule.fired("w", next).unwrap().title, "Weekly review");
+        assert_eq!(schedule.fired("w", next)[0].title, "Weekly review");
     }
 
     #[test]

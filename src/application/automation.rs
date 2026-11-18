@@ -125,11 +125,11 @@ pub trait EventSource: Send + Sync {
         None
     }
 
-    /// The event the source `source` makes at `at`, a time `next_fire`
-    /// returned. Its key should name the time, so that the same time is
+    /// The events the source `source` makes at `at`, a time `next_fire`
+    /// returned. Their keys should name the time, so that the same time is
     /// handled once.
-    fn fired(&self, _source: &str, _at: u64) -> Option<AutomationEvent> {
-        None
+    fn fired(&self, _source: &str, _at: u64) -> Vec<AutomationEvent> {
+        Vec::new()
     }
 }
 

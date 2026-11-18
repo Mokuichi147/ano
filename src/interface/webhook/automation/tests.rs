@@ -704,8 +704,8 @@ impl EventSource for EverySecond {
         Some(after + 1)
     }
 
-    fn fired(&self, source: &str, at: u64) -> Option<AutomationEvent> {
-        Some(AutomationEvent {
+    fn fired(&self, source: &str, at: u64) -> Vec<AutomationEvent> {
+        vec![AutomationEvent {
             source: source.into(),
             kind: "tick".into(),
             key: format!("{source}@{at}"),
@@ -714,7 +714,7 @@ impl EventSource for EverySecond {
             url: None,
             author: None,
             trust: Trust::Trusted,
-        })
+        }]
     }
 }
 
