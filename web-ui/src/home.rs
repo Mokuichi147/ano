@@ -4,7 +4,10 @@
 //! out), active objectives, upcoming routines, spaces, and what is
 //! remembered.
 
-use crate::{api, app::App};
+use crate::{
+    api,
+    app::{App, Message},
+};
 use naui::{web::WebWidgetExt, Align, Label, Orientation, Padding, Stack, TextColor, TextStyle};
 use serde_json::{json, Value};
 use std::rc::Rc;
@@ -225,7 +228,10 @@ fn carry_out(app: &Rc<App>, id: &str, action: &str) {
         let status = match api::post("/api/sessions", &json!({})).await {
             Ok(status) => status,
             Err(error) => {
-                web_sys::console::error_1(&error.into());
+                // Shown above the form, which can start a session another way.
+                app.show_setup(Some(Message::error(format!(
+                    "提案を始められませんでした: {error}"
+                ))));
                 return;
             }
         };
