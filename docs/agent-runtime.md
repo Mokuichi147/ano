@@ -374,6 +374,7 @@ ano objectives add "貯金" --category money --target 100000 --unit 円 --due 20
 ano objectives log o1 "今月は3万円貯めた" --value 30000             # 進捗の記録
 ano objectives set o1 --next-step "スマホのプランを見直す"           # 一部の変更
 ano objectives set o1 --status done
+ano objectives set o1 --clear-target                               # 数値の目標を外す
 ano objectives show o1                                            # 進捗の記録を含めて表示
 ano objectives remove o1
 ```

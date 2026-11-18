@@ -41,6 +41,9 @@ enum ObjectivesCommand {
         /// active, paused, done, or dropped.
         #[arg(long)]
         status: Option<String>,
+        /// Remove the target.
+        #[arg(long, conflicts_with_all = ["target", "unit"])]
+        clear_target: bool,
     },
     /// Record progress.
     Log {
@@ -144,9 +147,13 @@ pub(super) fn run(config: &AppConfig, user: &str, args: ObjectivesArgs) -> Resul
             title,
             fields,
             status,
+            clear_target,
         } => {
             let status = status.map(|status| Status::parse(&status)).transpose()?;
-            let change = fields.into_change(title, status);
+            let mut change = fields.into_change(title, status);
+            if clear_target {
+                change.target = Some(None);
+            }
             if change.is_empty() {
                 anyhow::bail!("give at least one field to change");
             }
