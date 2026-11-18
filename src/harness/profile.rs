@@ -151,14 +151,18 @@ impl ExecutionProfile {
         problem
     }
 
-    /// Keep what is known about the user out of this run: its memory, and
-    /// the tools that read or change it. For runs started by content that
-    /// third parties wrote, which could ask the agent to send it somewhere.
+    /// Set this run up for content that third parties wrote, which could
+    /// ask the agent to send what it knows about the user somewhere, or to
+    /// leave instructions for later runs: keep the user's memory out, and
+    /// disable the tools that change what every later run reads.
     pub fn without_personal_context(&mut self) {
         self.personal_context = false;
-        self.policy = self
-            .policy
-            .with_extra_disabled([MEMORY_SAVE_NAME, MEMORY_FORGET_NAME]);
+        self.policy = self.policy.with_extra_disabled([
+            MEMORY_SAVE_NAME,
+            MEMORY_FORGET_NAME,
+            CHARACTER_UPDATE_NAME,
+            SKILL_SAVE_NAME,
+        ]);
     }
 
     /// Tell the run what `book` remembers about its user. Saving is
@@ -171,7 +175,7 @@ impl ExecutionProfile {
         }
         let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
         let can_save = available(MEMORY_SAVE_NAME) && self.approval_mode != ApprovalMode::Deny;
-        let can_forget = available(MEMORY_FORGET_NAME);
+        let can_forget = available(MEMORY_FORGET_NAME) && self.approval_mode != ApprovalMode::Deny;
         let facts = book.facts(&self.context.user_id)?;
         append_memory(
             &mut self.settings.instructions,
@@ -354,13 +358,19 @@ mod tests {
         let added = &run.settings.instructions[base.len()..];
         assert!(added.ends_with("\n- Prefers green tea."), "{added}");
         assert!(!added.contains(MEMORY_SAVE_NAME), "{added}");
-        assert!(added.contains(MEMORY_FORGET_NAME), "{added}");
+        assert!(!added.contains(MEMORY_FORGET_NAME), "{added}");
 
         let mut untrusted = profile(UserPolicy::default(), ApprovalMode::Ask);
         untrusted.without_personal_context();
         untrusted.append_memory(&book).unwrap();
         assert_eq!(untrusted.settings.instructions, base);
-        assert!(untrusted.policy.is_disabled(MEMORY_SAVE_NAME));
-        assert!(untrusted.policy.is_disabled(MEMORY_FORGET_NAME));
+        for name in [
+            MEMORY_SAVE_NAME,
+            MEMORY_FORGET_NAME,
+            CHARACTER_UPDATE_NAME,
+            SKILL_SAVE_NAME,
+        ] {
+            assert!(untrusted.policy.is_disabled(name), "{name}");
+        }
     }
 }

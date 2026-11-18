@@ -134,3 +134,46 @@ async fn runs_read_remember_and_forget_facts_about_the_user() {
         "{shown}"
     );
 }
+
+/// Without `[memory] enabled`, nothing remembered reaches the model, even
+/// when a memory file exists.
+#[tokio::test]
+async fn a_disabled_memory_stays_out_of_runs() {
+    let (endpoint, requests) = mock_responses(vec![json!([
+        {"type": "message", "content": [{"type": "output_text", "text": "hi"}]}
+    ])])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("config.toml"),
+        "[memory]\ndir = 'memory'\n",
+    )
+    .unwrap();
+    let added = ano(directory.path())
+        .args(["memory", "add", "Prefers green tea."])
+        .output()
+        .await
+        .unwrap();
+    assert!(added.status.success());
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        ano(directory.path())
+            .env("OPENAI_BASE_URL", &endpoint)
+            .env("OPENAI_API_KEY", "test-fixture-key")
+            .args(["run", "hello"])
+            .output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(output.status.success());
+    let requests = requests.lock().unwrap().clone();
+    let instructions = requests[0]["instructions"].as_str().unwrap();
+    assert!(!instructions.contains("# Memory"), "{instructions}");
+    assert!(!requests[0]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"].as_str().unwrap().starts_with("memory_")));
+}

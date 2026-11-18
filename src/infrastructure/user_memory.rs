@@ -9,8 +9,11 @@
 use crate::{
     application::registry::ToolRegistry,
     domain::{
+        text::cut_within,
         tool::ToolDefinition,
-        user_memory::{normalize_fact, MAX_FACTS, MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
+        user_memory::{
+            normalize_fact, MAX_FACTS, MAX_FACT_CHARS, MEMORY_FORGET_NAME, MEMORY_SAVE_NAME,
+        },
     },
     infrastructure::fs::{atomic_write, lock_in, user_directory},
 };
@@ -119,7 +122,7 @@ impl MemoryBook {
     pub fn forget(&self, user: &str, facts: &[String]) -> Result<Vec<String>> {
         let wanted: Vec<String> = facts
             .iter()
-            .map(|fact| fact.split_whitespace().collect::<Vec<_>>().join(" "))
+            .map(|fact| fact_of(&format!("- {fact}")).unwrap_or_default())
             .collect();
         let _lock = self.lock(user)?;
         let text = self.read_text(user)?;
@@ -212,7 +215,7 @@ impl MemoryBook {
             registry.register_contextual(
                 ToolDefinition::new(
                     MEMORY_FORGET_NAME,
-                    "Forget remembered facts about the user, given exactly as they appear in the memory list.",
+                    "Forget remembered facts about the user, given exactly as they appear in the memory list. Requires approval.",
                     json!({
                         "type": "object",
                         "properties": {"facts": {"type": "array", "items": {"type": "string"}, "description": "The facts to forget, copied from the memory list."}},
@@ -220,6 +223,7 @@ impl MemoryBook {
                         "additionalProperties": false
                     }),
                 )
+                .with_approval()
                 .always_offered(),
                 move |arguments, context| {
                     let book = Arc::clone(&book);
@@ -256,11 +260,17 @@ impl MemoryBook {
     }
 }
 
-/// The fact of a `- ` line, normalized as saved facts are.
+/// The fact of a `- ` line, normalized as saved facts are. A line written
+/// by hand gets the same limits: control characters are dropped and a long
+/// line is cut, so one line cannot crowd out the others.
 fn fact_of(line: &str) -> Option<String> {
     let fact = line.trim_start().strip_prefix("- ")?;
+    let fact: String = fact
+        .chars()
+        .filter(|c| !c.is_control() || c.is_whitespace())
+        .collect();
     let fact = fact.split_whitespace().collect::<Vec<_>>().join(" ");
-    (!fact.is_empty()).then_some(fact)
+    (!fact.is_empty()).then(|| cut_within(&fact, MAX_FACT_CHARS))
 }
 
 fn parse_facts(text: &str) -> Vec<String> {
@@ -327,6 +337,22 @@ mod tests {
             text,
             "\u{feff}# My notes\nFree text.\n-not a fact\n- Early riser\n- Plays the piano.\n"
         );
+    }
+
+    #[test]
+    fn long_hand_written_lines_are_cut_and_can_still_be_forgotten() {
+        let root = tempfile::tempdir().unwrap();
+        let book = MemoryBook::new(root.path());
+        let path = book.path("default").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("- Short.\n- {}\u{7}\n", "x".repeat(5000))).unwrap();
+        let facts = book.facts("default").unwrap();
+        assert_eq!(facts[0], "Short.");
+        assert_eq!(facts[1].chars().count(), MAX_FACT_CHARS);
+        assert!(facts[1].ends_with('…'));
+        let missing = book.forget("default", &[facts[1].clone()]).unwrap();
+        assert!(missing.is_empty());
+        assert_eq!(book.facts("default").unwrap(), ["Short."]);
     }
 
     #[test]

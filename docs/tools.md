@@ -18,7 +18,7 @@
 | `skill_read` | 保存済みスキルの手順を名前で読む（[詳細](agent-runtime.md#スキルskill_read--skill_save)） | `[skills]` |
 | `skill_save` | 上手くいった手順をスキルとして保存・更新する。呼び出しごとに承認が必要 | `[skills]` |
 | `memory_save` | ユーザーについての事実を一文として記憶する。呼び出しごとに承認が必要（[詳細](agent-runtime.md#記憶memory_save--memory_forget)） | `[memory]` |
-| `memory_forget` | 記憶した事実を、一覧どおりの文言を指定して消す | `[memory]` |
+| `memory_forget` | 記憶した事実を、一覧どおりの文言を指定して消す。呼び出しごとに承認が必要 | `[memory]` |
 | `character_update` | キャラクター（名前・タグライン・性格と口調）を作る・一部を変える。呼び出しごとに承認が必要（[詳細](agent-runtime.md#キャラクターcharacter_update)） | `[character]` |
 | `history_search` / `history_get` / `history_context` / `history_conversations` | chronotope に保存した会話・ツール履歴の原文を検索し、発言 ID から前後ごと読む | `[history]` |
 | `task_plan` | 作業計画の読み書き（[詳細](agent-runtime.md#作業計画と完了判定)） | 常時 |
