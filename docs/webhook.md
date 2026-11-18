@@ -56,6 +56,7 @@ ano serve                      # --bind / --path で設定を上書きできま�
 | `GET /jobs/<job_id>` | `<timestamp>.<job_id>` | ジョブの状態と結果を取得 |
 | `POST /jobs/<job_id>/cancel` | `<timestamp>.cancel:<job_id>` | ジョブを中止 |
 | `POST /events/<source>` | `<timestamp>.event:<source>:<body>` | 自動化の webhook ソースへイベントを送る（[自動化](automation.md#webhookレポートなどの受け取り)） |
+| `GET`・`POST /approvals/<id>` | 署名なし（リンクのトークン `t`） | 作業の承認ページと、その答え（[スマホから承認する](automation.md#スマホから承認するapprovals)） |
 | `GET /healthz` | なし | 死活確認 |
 
 ## 署名

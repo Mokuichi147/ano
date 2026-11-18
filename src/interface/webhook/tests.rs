@@ -64,6 +64,7 @@ fn state() -> WebhookState {
         tasks: Mutex::new(JoinSet::new()),
         secret: Some(b"secret".to_vec()),
         seen_signatures: Mutex::new(HashMap::new()),
+        approvals: None,
         automation: None,
     }
 }

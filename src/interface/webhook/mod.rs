@@ -4,6 +4,7 @@
 
 mod automation;
 mod jobs;
+mod remote_approval;
 mod settings;
 mod signature;
 #[cfg(test)]
@@ -13,6 +14,8 @@ pub use automation::{
     AutomationParts, AutomationSettings, NotifierSettings, SourceSettings, TriggerInfo,
 };
 pub use jobs::{JobState, JobStatus};
+pub use remote_approval::ApprovalSettings;
+use remote_approval::RemoteApprovals;
 pub use settings::WebhookSettings;
 
 use crate::{
@@ -22,7 +25,7 @@ use crate::{
         automation::{Admission, AutomationRegistry, PostAuthentication, PostedRequest, Rejection},
         clock::unix_now,
         input::InputPart,
-        ports::{McpGateway, ResponsesApi},
+        ports::{ApprovalHandler, McpGateway, ResponsesApi},
         registry::ToolRegistry,
     },
     config::AppConfig,
@@ -144,6 +147,9 @@ struct WebhookState {
     seen_signatures: Mutex<HashMap<Vec<u8>, u64>>,
     /// The sources, rules, and notifiers of `[automation]`, when any.
     automation: Option<Automation>,
+    /// Requests of jobs waiting for the user's answer from a phone, when
+    /// `[automation.approvals]` is set.
+    approvals: Option<Arc<RemoteApprovals>>,
 }
 
 /// Start the inbound webhook server and run until Ctrl+C.
@@ -207,6 +213,13 @@ pub async fn serve(
     }
     let harness = Harness::with_registry(registry, &config)?;
     let automation_registry = automation;
+    let approvals = config.automation.approvals.clone();
+    if let Some(approvals) = &approvals {
+        println!(
+            "ano automation: approvals are asked through the rules' notifiers, with links to {}",
+            approvals.public_url
+        );
+    }
     let automation = if config.automation.is_enabled() {
         let selection = config.select_model(&[])?;
         let models = RunModels::resolve(&config, &[], &selection, &mut connections)
@@ -234,6 +247,7 @@ pub async fn serve(
         tasks: Mutex::new(JoinSet::new()),
         secret,
         seen_signatures: Mutex::new(HashMap::new()),
+        approvals: approvals.map(|settings| Arc::new(RemoteApprovals::new(settings))),
         automation,
     });
     automation::start_timers(&state);
@@ -261,6 +275,10 @@ fn router(state: Arc<WebhookState>) -> Router {
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
         .route("/events/{source}", post(post_event))
+        .route(
+            "/approvals/{id}",
+            get(remote_approval::approval_page).post(remote_approval::answer_approval),
+        )
         .route("/healthz", get(healthz))
         .layer(DefaultBodyLimit::max(state.config.webhook.max_body_bytes))
         .with_state(state)
@@ -750,11 +768,18 @@ async fn execute_job(
     })
     .await
     .context("instructions task failed")??;
-    // A webhook has nobody to ask: requests that would go to the user, and
-    // those automatic review does not clearly allow, are denied.
+    // Jobs of rules ask the user through the rules' notifiers when
+    // `[automation.approvals]` is set; otherwise nobody can be asked, and
+    // requests that would go to the user are denied.
+    let ask_user: Arc<dyn ApprovalHandler> = match (&state.approvals, &spec.trigger) {
+        (Some(approvals), Some(trigger)) if !trigger.notifiers.is_empty() => {
+            Arc::new(approvals.handler(&trigger.rule.name, trigger.notifiers.clone()))
+        }
+        _ => Arc::new(DenyApproval),
+    };
     let approval = ApprovalFactory {
         mode: profile.approval_mode,
-        ask_user: Arc::new(DenyApproval),
+        ask_user,
     };
     let mut agent = state
         .harness

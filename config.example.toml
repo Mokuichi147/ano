@@ -182,6 +182,10 @@ job_timeout_secs = 1800
 # [automation]
 # state_file = "~/ano-automation.json"   # 省略時は OS 標準のデータディレクトリの automation/state.json
 #
+# [automation.approvals]                # 作業の承認を、ルールの通知先へ承認ページのリンクで尋ねる
+# public_url = "https://ano.example.com" # スマホからこのサーバーに届く URL
+# timeout_secs = 600                     # これを過ぎると拒否
+#
 # [automation.notifiers.phone]
 # kind = "ntfy"                          # ntfy・discord・slack・webhook
 # url = "https://ntfy.sh/my-private-topic"

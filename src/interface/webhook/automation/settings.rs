@@ -10,6 +10,7 @@ use crate::{
         automation::{RuleAction, TriggerRule, Trust},
         environment::EnvironmentConfig,
     },
+    interface::webhook::remote_approval::ApprovalSettings,
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -28,6 +29,9 @@ pub struct AutomationSettings {
     pub sources: BTreeMap<String, SourceSettings>,
     pub rules: Vec<TriggerRule>,
     pub notifiers: BTreeMap<String, NotifierSettings>,
+    /// Ask the user to approve calls of jobs through the rules' notifiers,
+    /// instead of denying them.
+    pub approvals: Option<ApprovalSettings>,
 }
 
 /// One entry of `[automation.sources]`.
@@ -115,6 +119,9 @@ impl AutomationSettings {
         environments: &HashMap<String, EnvironmentConfig>,
         has_user: impl Fn(&str) -> bool,
     ) -> Result<()> {
+        if let Some(approvals) = &self.approvals {
+            approvals.validate()?;
+        }
         for (name, source) in &self.sources {
             if name.is_empty()
                 || !name

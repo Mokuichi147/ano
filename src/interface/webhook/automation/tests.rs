@@ -50,6 +50,9 @@ use tokio::{
 struct FakeApi {
     triage: String,
     agent_calls: Mutex<Vec<Value>>,
+    /// The tool the agent calls first (with no arguments, unless it is
+    /// `notify_user`).
+    first_tool: &'static str,
 }
 
 #[async_trait]
@@ -65,7 +68,11 @@ impl ResponsesApi for FakeApi {
         }
         let mut calls = self.agent_calls.lock().unwrap();
         calls.push(payload.clone());
-        Ok(if calls.len() == 1 {
+        Ok(if calls.len() == 1 && self.first_tool != "notify_user" {
+            json!({"id": "r1", "status": "completed", "output": [{
+                "type": "function_call", "call_id": "t1", "name": self.first_tool, "arguments": "{}"
+            }]})
+        } else if calls.len() == 1 {
             json!({"id": "r1", "status": "completed", "output": [{
                 "type": "function_call", "call_id": "n1", "name": "notify_user",
                 "arguments": json!({"title": "DAU drop", "message": "DAU fell 30%.", "priority": "high"}).to_string()
@@ -137,6 +144,7 @@ async fn setup_with(
         rules,
         triage,
         Harness::bare(ToolRegistry::new()),
+        "notify_user",
     )
     .await
 }
@@ -148,6 +156,7 @@ async fn setup_with_harness(
     rules: &str,
     triage: &str,
     harness: Harness,
+    first_tool: &'static str,
 ) -> Setup {
     let (url, received) = notifier_server().await;
     let settings: AutomationSettings = toml::from_str(&format!(
@@ -158,12 +167,17 @@ async fn setup_with_harness(
     config
         .environments
         .insert("coding".into(), Default::default());
+    config.environments.insert(
+        "asking".into(),
+        toml::from_str("approval_mode = 'ask'").unwrap(),
+    );
     config.automation = settings.clone();
     config.validate().unwrap();
 
     let api = Arc::new(FakeApi {
         triage: triage.into(),
         agent_calls: Mutex::new(Vec::new()),
+        first_tool,
     });
     let dir = tempfile::tempdir().unwrap();
     let store = AutomationStore::open(&dir.path().join("state.json")).unwrap();
@@ -186,6 +200,10 @@ async fn setup_with_harness(
         tasks: std::sync::Mutex::new(JoinSet::new()),
         secret: Some(b"secret".to_vec()),
         seen_signatures: std::sync::Mutex::new(HashMap::new()),
+        approvals: settings
+            .approvals
+            .clone()
+            .map(|approvals| Arc::new(super::super::RemoteApprovals::new(approvals))),
         automation: Some(Automation::new(settings, store, parts, triage)),
     });
     Setup {
@@ -344,6 +362,7 @@ async fn only_runs_of_trusted_events_see_the_memory() {
         "[[rules]]\nname = 'weekly'\naction = 'run'\ntask = 'Summarize it.'\nenvironment = 'coding'\nnotify = ['phone']\nnotify_on = ['completed']",
         "unused",
         harness,
+        "notify_user",
     )
     .await;
     for (source, title) in [("reports", "Own report"), ("posted", "Posted report")] {
@@ -829,4 +848,102 @@ async fn routines_fire_at_their_time() {
     .expect("the reminder did not fire");
     assert_eq!(received["title"], "Water the plants");
     crate::interface::webhook::shutdown_jobs(&setup.state).await;
+}
+
+/// A job whose call needs the user's approval asks through the rule's
+/// notifier with a link; the page shows the call, and the answer from it
+/// lets the job go on. The link works only with its token, and once.
+#[tokio::test]
+async fn jobs_ask_for_approval_with_a_link_the_user_answers() {
+    let registry = ToolRegistry::new();
+    registry
+        .register(
+            crate::domain::tool::ToolDefinition::new(
+                "guarded_tool",
+                "A test tool that needs approval",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            )
+            .with_approval()
+            .always_offered(),
+            |_| async { Ok(json!("ran")) },
+        )
+        .unwrap();
+    let setup = setup_with_harness(
+        &builtin(),
+        "[approvals]\npublic_url = 'https://ano.example.com/'\ntimeout_secs = 60",
+        "[[rules]]\nname = 'weekly'\naction = 'run'\ntask = 'Check.'\nenvironment = 'asking'\nnotify = ['phone']\nnotify_on = ['completed']",
+        "unused",
+        Harness::bare(registry),
+        "guarded_tool",
+    )
+    .await;
+    let (status, _) = post_signed(
+        &setup.state,
+        "reports",
+        serde_json::from_str(REPORT).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let asked = wait_for(&setup.received, 1).await;
+    assert_eq!(asked[0]["title"], "承認が必要です — weekly");
+    assert_eq!(asked[0]["priority"], "high");
+    let link = asked[0]["url"].as_str().unwrap();
+    let path = link.strip_prefix("https://ano.example.com").unwrap();
+    let (page_path, query) = path.split_once("?t=").unwrap();
+    assert!(page_path.starts_with("/approvals/"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = super::super::router(Arc::clone(&setup.state));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+
+    let wrong = http
+        .get(format!("{base}{page_path}?t=wrong"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::NOT_FOUND);
+    let page = http.get(format!("{base}{path}")).send().await.unwrap();
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    assert!(page
+        .headers()
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("default-src 'none'"));
+    let html = page.text().await.unwrap();
+    assert!(
+        html.contains("guarded_tool") && html.contains("weekly"),
+        "{html}"
+    );
+
+    let answer = |token: &str| {
+        http.post(format!("{base}{page_path}"))
+            .form(&[("t", token), ("decision", "allow")])
+            .send()
+    };
+    assert_eq!(
+        answer("wrong").await.unwrap().status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        answer(query).await.unwrap().status(),
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        answer(query).await.unwrap().status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
+    let received = wait_for(&setup.received, 2).await;
+    assert_eq!(
+        received[1]["title"],
+        "weekly: completed — Weekly active users"
+    );
+    let calls = setup.api.agent_calls.lock().unwrap();
+    let output = calls[1]["input"].to_string();
+    assert!(output.contains("ran"), "{output}");
 }
