@@ -150,7 +150,7 @@ src/
 │   ├── objectives.rs       objectives.json の読み書きと objective_set・objective_log・objective_read
 │   ├── frontmatter.rs      YAML frontmatter 付き Markdown の分割（SKILL.md・SOUL.md）
 │   ├── fs.rs               原子的なファイル置き換えと、ユーザーごとのディレクトリ名の検証
-│   ├── automation/         組み込みの自動化の種類（ソース: webhook、通知先: ntfy・discord・slack・webhook）
+│   ├── automation/         組み込みの自動化の種類（ソース: webhook・schedule、通知先: ntfy・discord・slack・webhook）
 │   ├── automation_store.rs 自動化の処理済みイベントの保存
 │   └── tools/
 │       ├── mod.rs          組み込み tool の登録（echo・unix_time）

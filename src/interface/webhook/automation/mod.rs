@@ -13,7 +13,9 @@ use super::{admit_job, JobSpec, WebhookState};
 use crate::{
     application::{
         agent::ModelTarget,
-        automation::{Admission, AutomationRegistry, EventSource, NamedNotifier, Notification},
+        automation::{
+            unix_now, Admission, AutomationRegistry, EventSource, NamedNotifier, Notification,
+        },
         input::InputPart,
     },
     config::AppConfig,
@@ -24,7 +26,10 @@ use crate::{
         text::cut,
     },
     harness::triage::Triage,
-    infrastructure::automation_store::{default_state_file, AutomationStore},
+    infrastructure::{
+        automation::schedule::local_time,
+        automation_store::{default_state_file, AutomationStore},
+    },
 };
 use anyhow::{Context, Result};
 use futures::future::join_all;
@@ -253,6 +258,110 @@ async fn act(automation: &Automation, state: &Arc<WebhookState>, event: Automati
         }
     }
 }
+
+/// The longest a timer sleeps before it looks at the clock again, so a
+/// changed clock or a machine waking from sleep is noticed.
+const MAX_TIMER_SLEEP: Duration = Duration::from_secs(60);
+/// A time missed by more than this (the machine slept, or the server was
+/// busy) is skipped instead of handled late.
+const MAX_TIMER_LATENESS_SECS: u64 = 300;
+
+/// Start a timer for every source that fires by itself at set times
+/// (`schedule`). Each waits for its next time, hands the event to
+/// automation like a posted one, and stops when the server shuts down. The
+/// next time is always counted from now, so times that passed while the
+/// server was stopped are not made up for.
+pub(in crate::interface::webhook) fn start_timers(state: &Arc<WebhookState>) {
+    let Some(automation) = &state.automation else {
+        return;
+    };
+    let now = unix_now();
+    for (name, source) in &automation.sources {
+        let Some(next) = source.next_fire(now) else {
+            continue;
+        };
+        println!(
+            "automation: source '{name}' fires next at {}",
+            local_time(next)
+        );
+        let (state, name, source) = (Arc::clone(state), name.clone(), Arc::clone(source));
+        let mut tasks = state
+            .tasks
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let task_state = Arc::clone(&state);
+        tasks.spawn(async move { run_timer(&task_state, &name, source.as_ref()).await });
+    }
+}
+
+async fn run_timer(state: &Arc<WebhookState>, name: &str, source: &dyn EventSource) {
+    let mut shutdown = state.shutdown.subscribe();
+    let mut after = unix_now();
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        // A clock set back would put `after` in the future and skip the
+        // times until it caught up; counting from now instead may meet a
+        // handled time again, which its key turns into a duplicate.
+        let Some(next) = source.next_fire(after.min(unix_now())) else {
+            return;
+        };
+        let now = unix_now();
+        if now < next {
+            let wait = Duration::from_secs(next - now).min(MAX_TIMER_SLEEP);
+            tokio::select! {
+                () = tokio::time::sleep(wait) => {}
+                _ = shutdown.changed() => return,
+            }
+            continue;
+        }
+        if now - next > MAX_TIMER_LATENESS_SECS {
+            // Count from now, so missed times are never handled in a burst.
+            println!(
+                "automation: source '{name}' skipped {}, which passed while the server was busy or asleep",
+                local_time(next)
+            );
+            after = now;
+            continue;
+        }
+        after = next;
+        let Some(event) = source.fired(name, next) else {
+            continue;
+        };
+        fire(state, event).await;
+    }
+}
+
+/// Hand an event a timer made to automation, as a posted one is.
+async fn fire(state: &Arc<WebhookState>, event: AutomationEvent) {
+    let Some(automation) = &state.automation else {
+        return;
+    };
+    let source = event.source.clone();
+    let key = event.key.clone();
+    let Ok(queued) = Arc::clone(&automation.queued_events).try_acquire_owned() else {
+        eprintln!("automation: {source}/{key} skipped: too many pending events");
+        return;
+    };
+    let Some(slot) = automation.slot(TIMER_SLOT_WAIT).await else {
+        eprintln!("automation: {source}/{key} skipped: busy with other events");
+        return;
+    };
+    match accept(state, &event) {
+        Admission::New => {
+            process_in(state, event, slot).await;
+        }
+        Admission::Duplicate => {}
+        Admission::Failed(error) => {
+            eprintln!("automation: could not record {source}/{key}: {error}");
+        }
+    }
+    drop(queued);
+}
+
+/// How long a timer waits for a slot to handle its event.
+const TIMER_SLOT_WAIT: Duration = Duration::from_secs(60);
 
 /// Send `notification` to every notifier, logging failures.
 pub(super) async fn send_all(notifiers: &[NamedNotifier], notification: &Notification) {

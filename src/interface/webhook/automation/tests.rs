@@ -682,3 +682,102 @@ fn the_example_in_config_example_toml_is_valid() {
     assert_eq!(config.automation.rules.len(), 2);
     assert_eq!(config.automation.notifiers.len(), 2);
 }
+
+/// A source that fires every second, keyed by the second.
+struct EverySecond;
+
+#[async_trait]
+impl EventSource for EverySecond {
+    fn trust(&self) -> Trust {
+        Trust::Trusted
+    }
+
+    fn describe(&self) -> String {
+        "every second".into()
+    }
+
+    fn receive(&self, _request: &PostedRequest<'_>) -> Result<AutomationEvent, Rejection> {
+        Err(Rejection::invalid("timer only"))
+    }
+
+    fn next_fire(&self, after: u64) -> Option<u64> {
+        Some(after + 1)
+    }
+
+    fn fired(&self, source: &str, at: u64) -> Option<AutomationEvent> {
+        Some(AutomationEvent {
+            source: source.into(),
+            kind: "tick".into(),
+            key: format!("{source}@{at}"),
+            title: "Tick".into(),
+            body: String::new(),
+            url: None,
+            author: None,
+            trust: Trust::Trusted,
+        })
+    }
+}
+
+/// Timers hand their events to the rules like posted ones, each time once,
+/// and stop when the server shuts down.
+#[tokio::test]
+async fn timed_sources_fire_through_the_rules_until_shutdown() {
+    let mut registry = builtin();
+    registry.register_source("every-second", |_| Ok(Arc::new(EverySecond)));
+    let setup = setup_with(
+        &registry,
+        "[sources.ticks]\nkind = 'every-second'",
+        "[[rules]]\nname = 'ticks'\nsources = ['ticks']\naction = 'notify'\nnotify = ['phone']",
+        "unused",
+    )
+    .await;
+    // Posting to it is refused by the source.
+    let (status, _) = post_signed(&setup.state, "ticks", json!({"title": "x"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    super::start_timers(&setup.state);
+    let received = wait_for(&setup.received, 2).await;
+    assert!(received
+        .iter()
+        .all(|notification| notification["title"] == "Tick"));
+    let seen = setup
+        .state
+        .automation
+        .as_ref()
+        .unwrap()
+        .store
+        .path()
+        .to_path_buf();
+    assert!(seen.exists());
+
+    crate::interface::webhook::shutdown_jobs(&setup.state).await;
+    let count = setup.received.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(setup.received.lock().unwrap().len(), count);
+}
+
+/// Built from the config, a schedule names its pattern in the listing and
+/// cannot be set up with a broken one.
+#[test]
+fn schedules_are_built_from_the_config() {
+    let config = AppConfig {
+        automation: toml::from_str(
+            "[sources.morning]\nkind = 'schedule'\ncron = '0 7 * * *'\nbody = 'Plan the day.'\n[[rules]]\nname = 'morning'\nsources = ['morning']\nnotify = []",
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    config.validate().unwrap();
+    let parts = config
+        .automation
+        .build(&builtin(), &config.environments)
+        .unwrap();
+    let morning = &parts.sources["morning"];
+    assert_eq!(morning.trust(), Trust::Trusted);
+    assert!(morning.describe().contains("\"0 7 * * *\""));
+    assert!(morning.next_fire(unix_now()).is_some());
+    assert!(
+        problem("[sources.morning]\nkind = 'schedule'\ncron = 'every morning'")
+            .contains("invalid cron pattern")
+    );
+}

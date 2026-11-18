@@ -177,7 +177,7 @@ max_retained_jobs = 1000
 job_timeout_secs = 1800
 
 # 自動化（docs/automation.md）。ano serve が、POST /events/<name> に送られたイベント
-# （レポート・監視の結果・cron からの起動など）を受け、ルールに従って無視・通知・
+# （レポート・監視の結果など）や、決まった時刻に自分で作るイベント（schedule）を受け、ルールに従って無視・通知・
 # 作業（ジョブ）のどれにするかを決めます。sources が無ければ無効です。
 # [automation]
 # state_file = "~/ano-automation.json"   # 省略時は OS 標準のデータディレクトリの automation/state.json
@@ -196,10 +196,10 @@ job_timeout_secs = 1800
 # secret_env = "ANALYTICS_SECRET"        # このソース専用の秘密（省略するとサーバーの秘密）
 # trust = "trusted"                      # 自分のサービスのレポート（既定は untrusted）
 #
-# [automation.sources.cron]
-# kind = "webhook"                       # OS の cron などから定期的に POST して作業を起動する
-# secret_env = "CRON_SECRET"
-# trust = "trusted"
+# [automation.sources.daily]
+# kind = "schedule"                      # 決まった時刻に ano serve が自分でイベントを作る
+# cron = "0 9 * * MON-FRI"               # 分 時 日 月 曜日（サーバーのローカル時刻）
+# title = "毎朝の Issue 確認"
 #
 # [[automation.rules]]                   # 上から順に照合し、最初に一致したルールを使う
 # name = "active-users"
@@ -209,8 +209,7 @@ job_timeout_secs = 1800
 #
 # [[automation.rules]]
 # name = "daily-issues"
-# sources = ["cron"]
-# kinds = ["daily"]
+# sources = ["daily"]
 # action = "run"
 # task = "GitHub MCP で owner/name の過去1日の新しい Issue を読み、対応が要るものだけ notify_user で知らせる"
 # environment = "coding"                 # 第三者の文面を読む作業は approval_mode = "auto" か "deny" の環境で

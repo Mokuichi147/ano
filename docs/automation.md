@@ -1,22 +1,22 @@
 # 自動化（イベントへの反応と通知）
 
-`ano serve` は、人が依頼するのを待つだけでなく、外から届くイベントに自分で反応できます。`POST /events/<name>` に送られたイベント（サービスのレポート、監視の結果、cron からの起動など）を受け取り、設定したルールに従って、**無視する・ユーザーに通知する・作業（ジョブ）を始める**のどれにするかを決めます。どれにするかは、判定用モデル（トリアージ）に判断させることも、ルールで固定することもできます。作業の途中や終了時に、エージェントが「知らせるべき」と判断したことも通知します。
+`ano serve` は、人が依頼するのを待つだけでなく、外から届くイベントや決まった時刻に自分で反応できます。`POST /events/<name>` に送られたイベント（サービスのレポート、監視の結果など）や、設定した時刻に自分で作るイベント（毎朝のチェックイン、毎週の振り返りなど）を受け取り、設定したルールに従って、**無視する・ユーザーに通知する・作業（ジョブ）を始める**のどれにするかを決めます。どれにするかは、判定用モデル（トリアージ）に判断させることも、ルールで固定することもできます。作業の途中や終了時に、エージェントが「知らせるべき」と判断したことも通知します。
 
-ano 自身は外へデータを取りに行きません。入力は送られてくるものだけです。定期的に何かを調べたいときは、cron などから定期的にイベントを送って作業を起動し、作業の中でエージェントが MCP（GitHub MCP など）で取りに行きます（[定期的に調べる](#定期的に調べるcron-と-mcp)）。
+ano 自身は外へデータを取りに行きません。入力は送られてくるものと、決まった時刻だけです。定期的に何かを調べたいときは、スケジュールで作業を起動し、作業の中でエージェントが MCP（GitHub MCP など）で取りに行きます（[定期実行](#定期実行schedule)）。
 
-入力元（ソース）と通知先は、`kind` の名前で登録された種類から作られます。組み込みの種類（ソースは `webhook`、通知先は `ntfy`・`discord`・`slack`・`webhook`）も、ライブラリから加える独自の種類も、同じ仕組みで動きます。ルール・判断・作業・通知の処理は、種類に依存しません（[独自の種類](#独自の種類)）。
+入力元（ソース）と通知先は、`kind` の名前で登録された種類から作られます。組み込みの種類（ソースは `webhook`・`schedule`、通知先は `ntfy`・`discord`・`slack`・`webhook`）も、ライブラリから加える独自の種類も、同じ仕組みで動きます。ルール・判断・作業・通知の処理は、種類に依存しません（[独自の種類](#独自の種類)）。
 
 ```text
  送り手                       ソース           ルール               判断                    結果
  サービスのレポート ┐                                                                  ┌→ ignore（記録だけ）
  監視の結果         ├→ POST /events/<name> → 本文を読む → 最初に一致した → トリアージ ─┼→ notify（要約を通知）
- cron からの起動    ┘   （署名を確認）       （重複は除く） ルール      （またはルールで固定）└→ run（ジョブ）→ notify_user・終了時の通知
+ 決まった時刻      ┘   （または schedule） （重複は除く） ルール      （またはルールで固定）└→ run（ジョブ）→ notify_user・終了時の通知
                                                                                           （作業の中で MCP を使って取得）
 ```
 
 - [起動](#起動)
 - [ソース](#ソース)
-- [定期的に調べる（cron と MCP）](#定期的に調べるcron-と-mcp)
+- [定期実行（schedule）](#定期実行schedule)
 - [ルールと判断](#ルールと判断)
 - [作業と通知](#作業と通知)
 - [通知先](#通知先)
@@ -112,20 +112,32 @@ curl -sS -X POST http://127.0.0.1:8080/events/analytics \
   --data-binary "$body"
 ```
 
-## 定期的に調べる（cron と MCP）
+## 定期実行（schedule）
 
-ano には定期実行もポーリングもありません。定期的に何かを調べるには、OS の cron（macOS の launchd、Windows のタスク スケジューラなど）から、決まった時刻にイベントを送ります。そのイベントで作業を始めるルールを書けば、エージェントが MCP の tool で必要なデータを取りに行き、知らせるべきことがあれば `notify_user` で通知します。
+`kind = "schedule"` のソースは、`cron` に書いた時刻に `ano serve` が自分でイベントを作ります。そのイベントで作業を始めるルールを書けば、毎朝のチェックインや毎週の振り返り、定期的な確認を任せられます。エージェントは MCP の tool で必要なデータを取りに行き、知らせるべきことがあれば `notify_user` で通知します。
 
 ```toml
-[automation.sources.cron]
-kind = "webhook"
-secret_env = "CRON_SECRET"
-trust = "trusted"                       # 送るのは自分の cron だけ
+[automation.sources.morning]
+kind = "schedule"
+cron = "0 7 * * *"                      # 毎日 7:00（サーバーのローカル時刻）
+title = "朝のチェックイン"                # 省略時はソース名
+body = "今日やることと、進行中の目標の次の一歩を確認する"   # イベントの本文（省略可）
+
+[automation.sources.daily]
+kind = "schedule"
+cron = "0 9 * * MON-FRI"                 # 平日の 9:00
+
+[[automation.rules]]
+name = "morning"
+sources = ["morning"]
+action = "run"
+task = "記憶と目標を踏まえて、今日の過ごし方の提案を短くまとめ、notify_user で知らせる"
+environment = "assistant"
+notify = ["phone"]
 
 [[automation.rules]]
 name = "daily-issues"
-sources = ["cron"]
-kinds = ["daily"]
+sources = ["daily"]
 action = "run"
 task = "GitHub MCP で owner/name の過去1日の新しい Issue を読み、対応が要るものだけ notify_user で知らせる"
 environment = "coding"                  # GitHub MCP を許可し、approval_mode = "auto" の環境
@@ -133,27 +145,14 @@ notify = ["phone"]
 notify_on = ["failed", "timed_out"]
 ```
 
-送る側のスクリプトの例です（`~/bin/ano-event`）。
+- `cron` は5つの欄（分・時・日・月・曜日）で書きます。`*/15 * * * *`（15分ごと）、`0 17 * * FRI`（金曜 17:00）、`0 8 1 * *`（毎月1日 8:00）のように書けます。時刻はサーバーのローカル時刻です。
+- イベントは、`kind` が `schedule`、`key` が `<ソース名>@<予定時刻（Unix 秒）>`、本文が `body` と予定時刻です。ほかのイベントと同じく、ルールの照合・トリアージ・重複の除外・通知を通ります。ルールの `action` を省くと、トリアージがその都度、無視・通知・作業を決めます。
+- 次の時刻は、いつも今から数えます。サーバーを止めていた間やスリープ中に過ぎた時刻は、再起動後にまとめて実行しません。5分以上遅れた時刻（処理が詰まっていた場合など）も飛ばして、ログに残します。
+- 既定では信頼できる入力（`trusted`）として扱います。書くのは設定ファイルの持ち主だからです。そのため、作業には[記憶](agent-runtime.md#記憶memory_save--memory_forget)や[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)が載ります。作業の中で第三者の文面（Issue など）を読む場合は、環境を `approval_mode = "auto"` か `deny` にしてください。
+- スケジュールに `POST /events/<name>` で送ることはできません（`400`）。
+- 起動時に、各スケジュールの次の時刻を表示します。
 
-```sh
-#!/bin/sh
-# 使い方: ano-event <ソース名> <kind> <タイトル>
-source="$1"; kind="$2"; title="$3"
-body=$(printf '{"kind":"%s","title":"%s"}' "$kind" "$title")
-timestamp=$(date +%s)
-signature=$(printf '%s.event:%s:%s' "$timestamp" "$source" "$body" \
-  | openssl dgst -sha256 -hmac "$CRON_SECRET" | sed 's/^.* //')
-curl -sS -X POST "http://127.0.0.1:8080/events/$source" \
-  -H "X-Ano-Timestamp: $timestamp" \
-  -H "X-Ano-Signature: sha256=$signature" \
-  -H 'Content-Type: application/json' \
-  --data-binary "$body"
-```
-
-```text
-# crontab: 毎朝 9 時に起動する
-0 9 * * * CRON_SECRET=... ~/bin/ano-event cron daily "毎朝の Issue 確認"
-```
+OS の cron（macOS の launchd、Windows のタスク スケジューラなど）から `webhook` のソースへ署名付きでイベントを送っても、同じことができます。`ano serve` を常に動かしておけない場合や、別のマシンから起動したい場合に使います（署名の付け方は [webhook](#webhookレポートなどの受け取り) を参照してください）。
 
 - 取りに行くのは作業の中のエージェントなので、取得先ごとの API・認証・続きの読み方は MCP server に任せられます。作業1回ごとにモデルを動かすため、細かい間隔で多くのデータを監視する用途には向きません。
 - MCP で読んだ Issue やコメントは第三者が書いた文面です。作業の環境は `approval_mode = "auto"` か `deny` にし、書き込みとコマンド実行を必要な範囲に絞ってください（[セキュリティ](#セキュリティ)）。
@@ -279,4 +278,4 @@ Rust のライブラリとして使う場合、`EventSource`（ソース）と `
 - Discord・Slack の Bot による入力（メッセージで依頼する）と、元のスレッドへの返信
 - チャット上での承認（`ask` の確認をボタンで答える）
 - GitHub などの Webhook を、独自の署名のまま受け取る組み込みの種類
-- 必要になれば、定期実行やポーリングを ano の内側に持つこと（今は cron と MCP で代わりにしています）
+- 会話の中から定期実行を作ること（「毎週金曜に振り返りをして」のように頼む）

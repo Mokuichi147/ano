@@ -236,6 +236,7 @@ pub async fn serve(
         seen_signatures: Mutex::new(HashMap::new()),
         automation,
     });
+    automation::start_timers(&state);
     let app = router(Arc::clone(&state));
 
     println!(

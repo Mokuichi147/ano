@@ -1,5 +1,6 @@
 //! The ports of automation: sources that turn requests posted from outside
-//! a conversation into events, and notifiers that tell the user. Both are
+//! a conversation, or set times, into events, and notifiers that tell the
+//! user. Both are
 //! registered by `kind` in an `AutomationRegistry`, so a harness or a
 //! library user adds new kinds without changing the code that handles
 //! events.
@@ -116,6 +117,20 @@ pub trait EventSource: Send + Sync {
     /// The event in a posted request. With `PostAuthentication::Server`,
     /// the server has authenticated it; with `Source`, this must.
     fn receive(&self, request: &PostedRequest<'_>) -> Result<AutomationEvent, Rejection>;
+
+    /// For sources that make events by themselves at set times, such as
+    /// `schedule`: the first such time after `after` (both Unix seconds).
+    /// `None`, the default, for sources that only take posted requests.
+    fn next_fire(&self, _after: u64) -> Option<u64> {
+        None
+    }
+
+    /// The event the source `source` makes at `at`, a time `next_fire`
+    /// returned. Its key should name the time, so that the same time is
+    /// handled once.
+    fn fired(&self, _source: &str, _at: u64) -> Option<AutomationEvent> {
+        None
+    }
 }
 
 /// The settings of one configured source or notifier.
