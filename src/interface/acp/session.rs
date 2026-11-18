@@ -654,6 +654,7 @@ mod tests {
             registry: ToolRegistry::new(),
             history: None,
             skills: None,
+            character: None,
         };
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let bench = Workbench {

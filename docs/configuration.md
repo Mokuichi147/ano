@@ -28,6 +28,7 @@
 | `[automation]` | 自動化のソース（POST されたイベントの受け取り）・ルール・通知先・状態ファイル | [docs/automation.md](automation.md) |
 | `[history]` | chronotope の接続先・主体・ローカル未送信キュー・タイムアウト | [docs/chronotope-history.md](chronotope-history.md) |
 | `[skills]` | スキルの有効化と保存先 | [スキル](agent-runtime.md#スキルskill_read--skill_save) |
+| `[character]` | キャラクター（名前・性格・口調）の有効化と保存先 | [キャラクター](agent-runtime.md#キャラクターcharacter_update) |
 
 設定の誤りで意図せず制限が外れないよう、次の場合はエラーになります。
 
@@ -39,7 +40,7 @@
 
 これまでプロジェクト直下の `config.toml` を使っていた場合は、`ano --config config.toml ...` で明示するか、`.ano/config.toml` に移動してください。明示したファイルが無い場合や未知のキーがある場合などの厳密な検証は変わりません。自動探索で選ばれる ano の設定が不正・読み取り不可・リンク切れの場合もエラーにし、別の設定や既定値へ黙って切り替えません。
 
-`environments.*.workspace`、MCP の `cwd`、`history.data_dir`、`skills.dir`、API・provider の `chatgpt_auth_file` の相対パスは設定ファイルのあるディレクトリを基準に解決するため、移動時にはパスを調整してください。たとえば、プロジェクト直下の設定で `workspace = "."` としていた場合、`.ano/config.toml` では `workspace = ".."` とすると同じプロジェクトを指します。MCP の `cwd = "./mcp-servers/files"` も `cwd = "../mcp-servers/files"` に変更します。
+`environments.*.workspace`、MCP の `cwd`、`history.data_dir`、`skills.dir`、`character.dir`、API・provider の `chatgpt_auth_file` の相対パスは設定ファイルのあるディレクトリを基準に解決するため、移動時にはパスを調整してください。たとえば、プロジェクト直下の設定で `workspace = "."` としていた場合、`.ano/config.toml` では `workspace = ".."` とすると同じプロジェクトを指します。MCP の `cwd = "./mcp-servers/files"` も `cwd = "../mcp-servers/files"` に変更します。
 
 CLI の `--workspace` は引き続き起動ディレクトリが基準です。`agent.project_instructions` は workspace 基準なので、workspace を維持する場合は変更しません。MCP の `command` は先頭の `~` だけを展開し、`args` はそのまま子プロセスに渡します。workspace 内で実行する検証コマンドのパスも、設定ファイルの移動だけでは変更する必要はありません。
 

@@ -10,8 +10,8 @@ use crate::{
     application::{agent::Agent, ports::McpGateway, registry::ToolRegistry},
     config::AppConfig,
     infrastructure::{
-        chronotope::Chronotope, project::read_project_instructions, skills::SkillLibrary,
-        tools::register_builtin_tools,
+        character::CharacterStore, chronotope::Chronotope, project::read_project_instructions,
+        skills::SkillLibrary, tools::register_builtin_tools,
     },
 };
 use anyhow::Result;
@@ -20,11 +20,12 @@ use std::sync::Arc;
 /// The tools and stores the agents of one process share.
 #[derive(Clone)]
 pub struct Harness {
-    /// The built-in tools, with those of the raw history and of skills when
-    /// they are enabled.
+    /// The built-in tools, with those of the raw history, skills, and the
+    /// character when they are enabled.
     pub registry: ToolRegistry,
     pub history: Option<Arc<Chronotope>>,
     pub skills: Option<Arc<SkillLibrary>>,
+    pub character: Option<Arc<CharacterStore>>,
 }
 
 impl Harness {
@@ -43,26 +44,40 @@ impl Harness {
     pub fn with_registry(registry: ToolRegistry, config: &AppConfig) -> Result<Self> {
         let history = Chronotope::from_settings(&config.history, &registry)?;
         let skills = SkillLibrary::from_settings(&config.skills, &registry)?;
+        let character = CharacterStore::from_settings(&config.character, &registry)?;
         Ok(Self {
             registry,
             history,
             skills,
+            character,
         })
     }
 
-    /// Append the project instructions of the workspace (such as
-    /// `AGENTS.md`) and the list of the user's skills to the instructions of
-    /// `profile`. It reads files, so call it off the async runtime where
-    /// that matters. Returns the problems of the skills that were left out.
+    /// Append the user's character, the project instructions of the
+    /// workspace (such as `AGENTS.md`), and the list of the user's skills to
+    /// the instructions of `profile`. It reads files, so call it off the
+    /// async runtime where that matters. Returns warnings about the files
+    /// that were left out: a broken character or skills.
     pub fn add_instructions(&self, profile: &mut ExecutionProfile) -> Result<Vec<String>> {
+        let mut warnings = Vec::new();
+        if let Some(character) = &self.character {
+            if let Some(problem) = profile.append_character(character) {
+                warnings.push(format!("ignored the character: {problem}"));
+            }
+        }
         if let Some(workspace) = &profile.context.workspace {
             let sources = read_project_instructions(workspace, &profile.project_instructions)?;
             profile.append_project_instructions(&sources);
         }
-        match &self.skills {
-            Some(skills) => profile.append_skills(skills),
-            None => Ok(Vec::new()),
+        if let Some(skills) = &self.skills {
+            warnings.extend(
+                profile
+                    .append_skills(skills)?
+                    .into_iter()
+                    .map(|problem| format!("skipped skill {problem}")),
+            );
         }
+        Ok(warnings)
     }
 
     /// An agent for a run of `profile` on `models`, whose calls that need
@@ -97,22 +112,27 @@ impl Harness {
 mod tests {
     use super::*;
     use crate::{
-        domain::{approval::ApprovalMode, skill::Skill},
+        domain::{approval::ApprovalMode, character::Character, skill::Skill},
         harness::settings::AgentConfig,
     };
 
     #[test]
-    fn runs_get_the_workspaces_instructions_and_the_users_skills() {
+    fn runs_get_the_character_the_workspaces_instructions_and_the_users_skills() {
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join("AGENTS.md"), "Run cargo fmt.\n").unwrap();
         let skills = tempfile::tempdir().unwrap();
         let library = SkillLibrary::new(skills.path());
         let skill = Skill::new("release-build", "Build a release.", "1. Build.").unwrap();
         library.save("alice", &skill).unwrap();
+        let characters = tempfile::tempdir().unwrap();
+        let store = CharacterStore::new(characters.path());
+        let character = Character::new("Mira", "A curious partner.", "Speaks warmly.").unwrap();
+        store.save("alice", &character).unwrap();
         let harness = Harness {
             registry: ToolRegistry::new(),
             history: None,
             skills: Some(Arc::new(library)),
+            character: Some(Arc::new(store)),
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {
@@ -132,12 +152,48 @@ mod tests {
         assert!(problems.is_empty());
         let instructions = &profile.settings.instructions;
         assert!(instructions.starts_with(&config.settings.instructions));
+        let character = instructions
+            .find("# Character\nYou are Mira: A curious partner.\n")
+            .unwrap();
         let project = instructions
             .find("# Project instructions from AGENTS.md\n")
             .unwrap();
         let skills = instructions
             .find("- release-build: Build a release.")
             .unwrap();
-        assert!(project < skills, "{instructions}");
+        assert!(character < project && project < skills, "{instructions}");
+    }
+
+    #[test]
+    fn a_broken_character_file_is_left_out_with_a_warning() {
+        let characters = tempfile::tempdir().unwrap();
+        std::fs::create_dir(characters.path().join("alice")).unwrap();
+        std::fs::write(characters.path().join("alice/SOUL.md"), "no frontmatter").unwrap();
+        let harness = Harness {
+            registry: ToolRegistry::new(),
+            history: None,
+            skills: None,
+            character: Some(Arc::new(CharacterStore::new(characters.path()))),
+        };
+        let config = AgentConfig::default();
+        let mut profile = ExecutionProfile {
+            settings: config.settings.clone(),
+            project_instructions: Vec::new(),
+            policy: Default::default(),
+            context: crate::domain::tool::ToolContext {
+                user_id: "alice".into(),
+                ..Default::default()
+            },
+            approval_mode: ApprovalMode::Ask,
+        };
+
+        let warnings = harness.add_instructions(&mut profile).unwrap();
+
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(
+            warnings[0].starts_with("ignored the character: "),
+            "{warnings:?}"
+        );
+        assert_eq!(profile.settings.instructions, config.settings.instructions);
     }
 }

@@ -2,7 +2,7 @@
 //! itself, into the settings of one run.
 
 use super::{
-    instructions::{append_project_instructions, append_skills},
+    instructions::{append_character, append_project_instructions, append_skills},
     settings::AgentConfig,
 };
 use crate::{
@@ -10,12 +10,13 @@ use crate::{
     config::{AppConfig, ModelRequest, ModelSelection},
     domain::{
         approval::ApprovalMode,
+        character::CHARACTER_UPDATE_NAME,
         environment::EnvironmentConfig,
         policy::UserPolicy,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
         tool::ToolContext,
     },
-    infrastructure::skills::SkillLibrary,
+    infrastructure::{character::CharacterStore, skills::SkillLibrary},
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -121,6 +122,29 @@ impl ExecutionProfile {
         }
     }
 
+    /// Tell the run about its user's character in `store`. Changing it is
+    /// mentioned only when `character_update` is allowed and can be
+    /// approved. A character file that cannot be read is left out, and its
+    /// problem returned.
+    pub fn append_character(&mut self, store: &CharacterStore) -> Option<String> {
+        let can_update = self.policy.is_allowed(CHARACTER_UPDATE_NAME)
+            && !self.policy.is_disabled(CHARACTER_UPDATE_NAME)
+            && self.approval_mode != ApprovalMode::Deny;
+        let (character, problem) = match store.read(&self.context.user_id) {
+            Ok(character) => (character, None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        // A broken file is not offered for replacement: the user may be
+        // editing it, and the model cannot see what it held.
+        let can_update = can_update && problem.is_none();
+        append_character(
+            &mut self.settings.instructions,
+            character.as_ref(),
+            can_update,
+        );
+        problem
+    }
+
     /// Tell the run about its user's skills in `library`, when it may read
     /// them. Saving is mentioned only when `skill_save` is allowed and can
     /// be approved. Returns the problems of skills that were left out.
@@ -145,7 +169,7 @@ impl ExecutionProfile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::skill::Skill;
+    use crate::domain::{character::Character, skill::Skill};
 
     #[test]
     fn instructions_list_skills_and_mention_saving_only_when_it_can_succeed() {
@@ -194,5 +218,65 @@ mod tests {
         );
         restricted.append_skills(&library).unwrap();
         assert_eq!(restricted.settings.instructions, base);
+    }
+
+    #[test]
+    fn instructions_carry_the_character_and_mention_changing_it_only_when_it_can_succeed() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CharacterStore::new(root.path());
+        let profile = |user: &str, policy: UserPolicy, approval_mode| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext {
+                user_id: user.into(),
+                ..ToolContext::default()
+            },
+            approval_mode,
+        };
+
+        // Without a character, the run only learns how to create one.
+        let mut none = profile("default", UserPolicy::default(), ApprovalMode::Ask);
+        let base = none.settings.instructions.clone();
+        assert_eq!(none.append_character(&store), None);
+        let added = &none.settings.instructions[base.len()..];
+        assert!(added.contains("has not given you a character"), "{added}");
+        assert!(added.contains(CHARACTER_UPDATE_NAME), "{added}");
+        let mut none_denied = profile("default", UserPolicy::default(), ApprovalMode::Deny);
+        none_denied.append_character(&store);
+        assert_eq!(none_denied.settings.instructions, base);
+
+        store
+            .save(
+                "default",
+                &Character::new("ミラ", "", "敬語を使わず、短く話す。").unwrap(),
+            )
+            .unwrap();
+        let mut run = profile("default", UserPolicy::default(), ApprovalMode::Ask);
+        run.append_character(&store);
+        let added = &run.settings.instructions[base.len()..];
+        assert!(
+            added.starts_with("\n\n# Character\nYou are ミラ\n"),
+            "{added}"
+        );
+        assert!(added.contains("敬語を使わず、短く話す。"), "{added}");
+        assert!(added.contains(CHARACTER_UPDATE_NAME), "{added}");
+
+        // The character stays, but changing it is not offered.
+        let mut restricted = profile(
+            "default",
+            UserPolicy::new(vec![CHARACTER_UPDATE_NAME.into()], None),
+            ApprovalMode::Ask,
+        );
+        restricted.append_character(&store);
+        let added = &restricted.settings.instructions[base.len()..];
+        assert!(added.contains("You are ミラ"), "{added}");
+        assert!(!added.contains(CHARACTER_UPDATE_NAME), "{added}");
+
+        std::fs::create_dir(root.path().join("broken")).unwrap();
+        std::fs::write(store.path("broken").unwrap(), "---\nname: \"\"\n---\n").unwrap();
+        let mut broken = profile("broken", UserPolicy::default(), ApprovalMode::Ask);
+        assert!(broken.append_character(&store).is_some());
+        assert_eq!(broken.settings.instructions, base);
     }
 }

@@ -57,6 +57,7 @@ fn state() -> WebhookState {
             registry: ToolRegistry::new(),
             history: None,
             skills: None,
+            character: None,
         },
         config,
         client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:1234/v1")),

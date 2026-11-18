@@ -10,6 +10,7 @@
 - **いろいろな使い方。** ターミナル（`ano run` / `ano chat`）、ブラウザ（`ano web`）、ACP に対応したエディタ（`ano acp`）、Webhook（`ano serve`）。画像・音声の入力と JSON 出力にも対応します
 - **MCP で拡張。** GitHub などの MCP server をつないで、できることを増やせます（OAuth 対応）
 - **長い作業にも。** 会話の保存と再開、長い会話の自動圧縮、よく使う手順のスキル化。プロジェクトの `AGENTS.md` も自動で読み込みます
+- **自分好みの相棒に。** 名前・性格・口調をキャラクターとして決めておくと、どのプロジェクトでもその話し方で応じます（会話で頼んで変えることもできます）
 - **自動化と通知。** 届いたイベント（cron・監視・GitHub など）を見て、無視・通知・作業のどれにするかを判定用モデルが決め、ntfy・Discord・Slack などへ知らせます
 
 ## クイックスタート
@@ -42,7 +43,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano tools` | 使える tool と MCP server を表示します |
 | `ano provider` / `ano model` / `ano preset` | 接続先・モデル・プリセットを管理します（[docs/providers.md](docs/providers.md)） |
 | `ano mcp` | MCP server の tool の確認・有効化と OAuth 認可（[docs/mcp.md](docs/mcp.md)） |
-| `ano auth` / `ano session` / `ano history` / `ano skills` | ChatGPT へのログイン、保存した会話・履歴・スキルの確認 |
+| `ano auth` / `ano session` / `ano history` / `ano skills` / `ano character` | ChatGPT へのログイン、保存した会話・履歴・スキル・キャラクターの確認 |
 
 ```sh
 ano chat --environment coding --session .ano/review.json   # 会話を保存し、あとで再開
@@ -74,7 +75,7 @@ model = "ロードしたモデル名"
 | [docs/configuration.md](docs/configuration.md) | 設定ファイルの場所とセクション、AGENTS.md、パスと API キー、ローカル AI |
 | [docs/providers.md](docs/providers.md) | 複数の接続先、接続先とモデルの管理、フォールバック、プリセットとロール |
 | [docs/tools.md](docs/tools.md) | 組み込み tool、コマンド実行、Web ページの取得、GitHub の Issue と Pull Request |
-| [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント、スキル |
+| [docs/agent-runtime.md](docs/agent-runtime.md) | 実行ループの上限・並行実行、セッション、圧縮、トークン上限、作業計画、tool の遅延公開、サブエージェント、スキル、キャラクター |
 | [docs/mcp.md](docs/mcp.md) | MCP の接続方式、OAuth 認証、接続の再利用、tool の確認と有効化、承認、ポリシーの名前空間、検索カタログ |
 | [docs/chatgpt-subscription.md](docs/chatgpt-subscription.md) | ChatGPT ログイン、利用枠による接続、認証情報の保存、対応範囲 |
 | [docs/chronotope-history.md](docs/chronotope-history.md) | 原文会話・ツール履歴の保存と再送、ローカル未送信キュー、`history_*` tool と `ano history` |

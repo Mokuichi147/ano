@@ -25,6 +25,7 @@ use crate::{
         settings::AgentConfig,
     },
     infrastructure::{
+        character::CharacterSettings,
         chronotope::HistorySettings,
         openai::{ApiSettings, ProviderSettings},
         skills::SkillSettings,
@@ -130,6 +131,8 @@ pub struct AppConfig {
     pub automation: AutomationSettings,
     pub history: HistorySettings,
     pub skills: SkillSettings,
+    /// The name and personality the agent takes on with its user.
+    pub character: CharacterSettings,
 }
 
 impl AppConfig {
@@ -207,6 +210,9 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(dir) = &mut self.character.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid character.dir")?;
         }
         if let Some(file) = &mut self.automation.state_file {
             *file = resolve_path(file, directory, home).context("invalid automation.state_file")?;

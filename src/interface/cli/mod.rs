@@ -5,6 +5,7 @@
 mod approval;
 mod auth;
 mod automation;
+mod character;
 mod chat;
 mod history;
 mod mcp;
@@ -92,6 +93,9 @@ enum Command {
     History(history::HistoryArgs),
     /// List the saved skills, or show one.
     Skills(skills::SkillsArgs),
+    /// Show or change the character: the name and personality the agent
+    /// takes on with you.
+    Character(character::CharacterArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -451,6 +455,7 @@ pub async fn run() -> Result<()> {
         Command::Model(args) => model::run(&config, &config_path, args).await,
         Command::History(args) => history::run(&config, &cli.user, args).await,
         Command::Skills(args) => skills::run(&config, &cli.user, args),
+        Command::Character(args) => character::run(&config, &cli.user, args),
     }
 }
 

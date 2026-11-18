@@ -391,6 +391,7 @@ mod tests {
             registry: ToolRegistry::new(),
             history: None,
             skills: None,
+            character: None,
         };
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let bench = Workbench {
@@ -414,6 +415,7 @@ mod tests {
             registry: ToolRegistry::new(),
             history: None,
             skills: None,
+            character: None,
         };
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let resolve = |request: NewSession| {
@@ -476,6 +478,7 @@ mod tests {
             registry: ToolRegistry::new(),
             history: None,
             skills: None,
+            character: None,
         };
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let resolve = |workspace_root: Option<&Path>, request: NewSession| {

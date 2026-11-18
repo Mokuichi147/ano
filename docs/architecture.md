@@ -102,6 +102,7 @@ src/
 │   ├── tool.rs             ToolDefinition・ToolContext・予約名
 │   ├── mcp.rs              MCP サーバー設定と公開可否の判定
 │   ├── skill.rs            スキルの名前・説明・本文の検証
+│   ├── character.rs        キャラクターの名前・タグライン・ソウルの検証と部分的な変更
 │   ├── environment.rs      実行環境と検証コマンドの設定
 │   ├── text.rs             上限付きの文字列の切り詰め
 │   └── github.rs           git remote の URL から GitHub のリポジトリ名を読む
@@ -122,9 +123,9 @@ src/
 │   ├── clock.rs            現在時刻（Unix 秒）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── harness/
-│   ├── mod.rs              Harness（組み込み tool・原文履歴・スキルの登録と、実行ごとの Agent の組み立て）
+│   ├── mod.rs              Harness（組み込み tool・原文履歴・スキル・キャラクターの登録と、実行ごとの Agent の組み立て）
 │   ├── settings.rs         config.toml の [agent]（実行ループの設定と、AGENTS.md・承認・接続先・ロールの設定）
-│   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、AGENTS.md・スキル一覧の追記
+│   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、キャラクター・AGENTS.md・スキル一覧の追記
 │   ├── profile.rs          実行環境（または実行環境を使わない実行の権限）から1回の実行設定を解決（ExecutionProfile）
 │   ├── models.rs           接続先のクライアントと、メインのエージェント・ロールのモデルの解決、会話中のモデルの切り替え
 │   ├── conversation.rs     クライアントがターンごとに進める会話（ano web・ano acp で共有。開始・中断・終了）
@@ -142,7 +143,9 @@ src/
 │   ├── memory_store.rs     プロセス内だけで保持する会話（ano chat）
 │   ├── project.rs          AGENTS.md などプロジェクト指示の読み込み
 │   ├── skills.rs           SKILL.md の読み書きと skill_read・skill_save
-│   ├── fs.rs               原子的なファイル置き換え
+│   ├── character.rs        SOUL.md の読み書きと character_update
+│   ├── frontmatter.rs      YAML frontmatter 付き Markdown の分割（SKILL.md・SOUL.md）
+│   ├── fs.rs               原子的なファイル置き換えと、ユーザーごとのディレクトリ名の検証
 │   ├── automation/         組み込みの自動化の種類（ソース: webhook、通知先: ntfy・discord・slack・webhook）
 │   ├── automation_store.rs 自動化の処理済みイベントの保存
 │   └── tools/

@@ -12,7 +12,10 @@ use crate::{
         skill::{validate_skill_name, Skill, SKILL_READ_NAME, SKILL_SAVE_NAME},
         tool::ToolDefinition,
     },
-    infrastructure::fs::atomic_write,
+    infrastructure::{
+        frontmatter::split_frontmatter,
+        fs::{atomic_write, user_directory},
+    },
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -89,20 +92,7 @@ impl SkillLibrary {
 
     /// The directory that holds `user`'s skills.
     pub fn user_dir(&self, user: &str) -> Result<PathBuf> {
-        if user.is_empty()
-            || user == "."
-            || user == ".."
-            || user.chars().any(|character| {
-                character.is_control()
-                    || matches!(
-                        character,
-                        '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-                    )
-            })
-        {
-            bail!("user id {user:?} cannot be used as a skill directory name");
-        }
-        Ok(self.root.join(user))
+        user_directory(&self.root, user)
     }
 
     /// Every skill of `user`, sorted by name. A missing directory means no
@@ -293,24 +283,7 @@ struct FrontmatterOut<'a> {
 /// between `---` lines, then the Markdown body. Other frontmatter fields of
 /// the Agent Skills format are accepted and ignored.
 fn parse_skill_file(text: &str) -> Result<Skill> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
-    let mut lines = text.split_inclusive('\n');
-    if lines.next().map(str::trim_end) != Some("---") {
-        bail!("{SKILL_FILE} must start with a --- line and YAML frontmatter");
-    }
-    let mut frontmatter = String::new();
-    let mut closed = false;
-    for line in lines.by_ref() {
-        if line.trim_end() == "---" {
-            closed = true;
-            break;
-        }
-        frontmatter.push_str(line);
-    }
-    if !closed {
-        bail!("the frontmatter of {SKILL_FILE} is not closed with a --- line");
-    }
-    let body: String = lines.collect();
+    let (frontmatter, body) = split_frontmatter(text, SKILL_FILE)?;
     let frontmatter: Frontmatter = serde_yaml_ng::from_str(&frontmatter)
         .context("the frontmatter needs string fields name and description")?;
     Skill::new(&frontmatter.name, &frontmatter.description, &body)

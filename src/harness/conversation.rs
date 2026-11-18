@@ -61,7 +61,7 @@ impl Opening {
         let profile = tokio::task::spawn_blocking(move || {
             harness.add_instructions(&mut profile).map(|problems| {
                 for problem in problems {
-                    eprintln!("warning: skipped skill {problem}");
+                    eprintln!("warning: {problem}");
                 }
                 profile
             })

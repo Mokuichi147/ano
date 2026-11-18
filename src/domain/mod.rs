@@ -7,6 +7,7 @@
 
 pub mod approval;
 pub mod automation;
+pub mod character;
 pub mod compaction;
 pub mod environment;
 pub mod github;

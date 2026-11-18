@@ -81,7 +81,7 @@ pub(super) fn prepare_agent(
     } = resolve_run_context(config, user_id, options)?;
     let harness = Harness::with_registry(registry, config)?;
     for problem in harness.add_instructions(&mut profile)? {
-        eprintln!("warning: skipped skill {problem}");
+        eprintln!("warning: {problem}");
     }
     let mut connections = Connections::default();
     let models = RunModels::resolve(config, &base, &selection, &mut connections)?;

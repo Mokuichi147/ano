@@ -4,10 +4,12 @@
 
 pub mod automation;
 pub mod automation_store;
+pub mod character;
 pub mod chat_completions;
 pub mod chatgpt;
 pub mod chronotope;
 pub mod fallback;
+pub(crate) mod frontmatter;
 pub(crate) mod fs;
 #[cfg(unix)]
 pub mod login_shell;

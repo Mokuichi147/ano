@@ -104,6 +104,7 @@ impl Server {
                 registry,
                 history: None,
                 skills: None,
+                character: None,
             },
             config,
             mcp: Arc::new(McpPool::new(Vec::new())),

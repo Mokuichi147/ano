@@ -160,6 +160,7 @@ async fn setup_with(
             registry: ToolRegistry::new(),
             history: None,
             skills: None,
+            character: None,
         },
         config,
         client: api.clone(),

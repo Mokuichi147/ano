@@ -732,7 +732,8 @@ async fn execute_job(
     let models = RunModels::resolve(&state.config, &base, &selection, &mut connections)?;
     let harness = state.harness.clone();
     let profile = tokio::task::spawn_blocking(move || {
-        // Broken skill files are left out; they must not fail the job.
+        // A broken character or skill file is left out; it must not fail
+        // the job.
         harness.add_instructions(&mut profile).map(|_| profile)
     })
     .await
