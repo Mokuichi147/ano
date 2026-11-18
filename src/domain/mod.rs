@@ -16,6 +16,7 @@ pub mod objective;
 pub mod plan;
 pub mod policy;
 pub mod provider;
+pub mod routine;
 pub mod session;
 pub mod skill;
 pub mod text;

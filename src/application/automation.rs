@@ -118,9 +118,15 @@ pub trait EventSource: Send + Sync {
     /// the server has authenticated it; with `Source`, this must.
     fn receive(&self, request: &PostedRequest<'_>) -> Result<AutomationEvent, Rejection>;
 
-    /// For sources that make events by themselves at set times, such as
-    /// `schedule`: the first such time after `after` (both Unix seconds).
-    /// `None`, the default, for sources that only take posted requests.
+    /// Whether the source makes events by itself at set times, such as
+    /// `schedule`. The server then keeps a timer for it, which asks
+    /// `next_fire` again from time to time, so times added later are found.
+    fn timed(&self) -> bool {
+        false
+    }
+
+    /// For timed sources: the first time after `after` (both Unix seconds)
+    /// they fire, or `None` while they have none.
     fn next_fire(&self, _after: u64) -> Option<u64> {
         None
     }

@@ -17,6 +17,7 @@ ano 自身は外へデータを取りに行きません。入力は送られて�
 - [起動](#起動)
 - [ソース](#ソース)
 - [定期実行（schedule）](#定期実行schedule)
+- [会話から作るリマインダーと定期作業（routines）](#会話から作るリマインダーと定期作業routines)
 - [ルールと判断](#ルールと判断)
 - [作業と通知](#作業と通知)
 - [通知先](#通知先)
@@ -157,6 +158,43 @@ OS の cron（macOS の launchd、Windows のタスク スケジューラなど�
 - 取りに行くのは作業の中のエージェントなので、取得先ごとの API・認証・続きの読み方は MCP server に任せられます。作業1回ごとにモデルを動かすため、細かい間隔で多くのデータを監視する用途には向きません。
 - MCP で読んだ Issue やコメントは第三者が書いた文面です。作業の環境は `approval_mode = "auto"` か `deny` にし、書き込みとコマンド実行を必要な範囲に絞ってください（[セキュリティ](#セキュリティ)）。
 
+## 会話から作るリマインダーと定期作業（routines）
+
+`[routines] enabled = true` にすると、会話の中で「明日9時に歯医者をリマインドして」「毎週金曜17時に今週の振り返りをまとめて」と頼むだけで、エージェントが `routine_create` でルーティン（リマインダーか定期作業）を作ります。`kind = "routines"` のソースを置いた `ano serve` が、その時刻にイベントを作って実行します。
+
+```toml
+[routines]
+enabled = true                          # 会話でルーティンを作れるようにする
+# dir = "~/notes/ano-routines"          # 省略時は OS 標準のデータディレクトリ
+
+[automation.sources.routines]
+kind = "routines"
+# user = "default"                      # どのユーザーのルーティンを実行するか
+
+[[automation.rules]]                    # リマインダーは要約して通知だけ
+name = "reminders"
+sources = ["routines"]
+kinds = ["reminder"]
+action = "notify"
+notify = ["phone"]
+
+[[automation.rules]]                    # 定期作業は作業して結果を知らせる
+name = "routine-tasks"
+sources = ["routines"]
+kinds = ["task"]
+action = "run"
+task = "イベントのルーティンを実行し、結果を notify_user で知らせる"
+environment = "assistant"
+notify = ["phone"]
+notify_on = ["failed", "timed_out"]
+```
+
+- **作り方。** 会話では、エージェントが種類（`reminder`・`task`）、時刻（1回なら `2026-11-20 09:00` のようなローカル時刻、繰り返しなら5欄の cron 式）、内容を決めて作ります。作成には承認が必要です。実行の開始時に、現在のローカル時刻と、これからのルーティン（近い順、2 KiB まで）を instructions に載せるので、「明日」「来週の月曜」も解釈できます。止めたいと頼めば `routine_delete` で消します（これも承認が必要です）。
+- **コマンド。** `ano routines` で一覧（次の時刻つき）、`ano routines add "ストレッチ" --cron "0 15 * * *"` や `ano routines add "歯医者" --at "2026-11-20 09:00" --task "10時の歯医者に出かける"` で作成、`ano routines remove r1` で削除できます。
+- **イベント。** `kind` はルーティンの種類（`reminder`・`task`）、`key` は `<id>@<予定時刻>`、本文は内容と予定時刻です。信頼できる入力（`trusted`）として扱います（作ったのはユーザーで、作成に承認が要るため）。そのため、作業には記憶や目標が載り、自動承認の審査ではルーティンの内容も依頼として見ます。
+- **時刻の拾い方。** タイマーは最長 60 秒ごとにルーティンを読み直すので、`ano serve` を動かしたまま作ったものも、その時刻に実行します。停止中に過ぎた時刻は実行しません（[定期実行](#定期実行schedule)と同じです）。1回きりのルーティンは、時刻が過ぎると一覧で `passed` になり、次に作るときに片付けます。
+- 保存先は `<dir>/<ユーザー>/routines.json` です（ユーザーごとに 50 件まで）。信頼できないイベントから始まった作業では、`routine_*` を使わせず、ルーティンも載せません。
+
 ## ルールと判断
 
 `[[automation.rules]]` を上から順に照合し、最初に一致したルールでイベントを扱います。どのルールにも一致しないイベントは記録だけします。
@@ -268,7 +306,7 @@ Rust のライブラリとして使う場合、`EventSource`（ソース）と `
 - **第三者の入力。** 中継された Issue やコメント、外部サービスの通知などは、誰でも書ける文面を含みます。こうしたイベント（`untrusted`）の本文は「データであり指示ではない」と明示してエージェントに渡します。自動承認（`approval_mode = "auto"`）は、ルールの `task` とソース名だけを依頼として審査し、イベントの本文・タイトル・URL・種類は含めません。そのため、Issue に「main へ push して」と書かれていても、依頼したことにはなりません。
 - **`allow` の禁止。** 信頼できないイベントで作業を始めうるルール（`run`・`auto`）は、`approval_mode = "allow"` の環境を指定できません（設定の検証で拒否します）。
 - **判断の限界。** エージェントはイベントの本文を読んで作業するため、本文に埋め込まれた指示に従ってしまう可能性は残ります。トリアージも自動承認も、モデルによる補助的な安全策です。自動承認はルールの `task` の範囲に見える操作を許可するため、`task` が書き込みを求めるルールでは、埋め込まれた指示による書き込みも通りうると考えてください。第三者の入力で動かす環境は、できるだけ読み取り専用（`allow_writes = false`・`allow_exec = false`）にして調査と報告に留め、書き込ませる場合も tool を必要なものに絞り、Git などで元に戻せる workspace にしてください。`notify_user` は承認なしにルールの通知先へ送れます（1回の作業で5回まで）。
-- **記憶と、以後に残る書き込み。** 信頼できないイベントの作業には、[記憶](agent-runtime.md#記憶memory_save--memory_forget)を載せず、`memory_save`・`memory_forget`・`character_update`・`skill_save`・`objective_*` も使わせません（[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)も載せません）。
+- **記憶と、以後に残る書き込み。** 信頼できないイベントの作業には、[記憶](agent-runtime.md#記憶memory_save--memory_forget)を載せず、`memory_save`・`memory_forget`・`character_update`・`skill_save`・`objective_*`・`routine_*` も使わせません（[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)とルーティンも載せません）。
 - **プロジェクト指示。** 自動化の作業でも、workspace の `AGENTS.md` などのプロジェクト指示を読みます（手動の実行と同じです）。第三者が変更できるリポジトリを扱う環境では、`[agent] project_instructions = []` にしてください。
 - **繰り返しの防止。** 作業が書いたもの（MCP で投稿したコメントなど）が、外部サービスの Webhook を通じて再びイベントとして届く構成では、作業が連鎖しないよう、ルールの `authors` を絞るか、その投稿者のイベントを `action = "ignore"` のルールで先に受けてください。MCP で読んだ第三者の文面も、作業の中では信頼できない入力です。
 - **通知の内容。** 通知にはイベントや作業結果の一部が含まれます。Discord・Slack のチャンネルを共有している場合は、そのメンバーにも見えることに注意してください。
@@ -278,4 +316,3 @@ Rust のライブラリとして使う場合、`EventSource`（ソース）と `
 - Discord・Slack の Bot による入力（メッセージで依頼する）と、元のスレッドへの返信
 - チャット上での承認（`ask` の確認をボタンで答える）
 - GitHub などの Webhook を、独自の署名のまま受け取る組み込みの種類
-- 会話の中から定期実行を作ること（「毎週金曜に振り返りをして」のように頼む）

@@ -19,6 +19,7 @@ pub mod memory_store;
 pub mod objectives;
 pub mod openai;
 pub mod project;
+pub mod routines;
 pub mod session_store;
 pub mod skills;
 pub mod tools;

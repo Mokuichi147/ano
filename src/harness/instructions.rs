@@ -4,6 +4,7 @@
 use crate::domain::{
     character::{Character, CHARACTER_UPDATE_NAME},
     objective::{active_summaries, OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
+    routine::{MAX_ROUTINE_INDEX_BYTES, ROUTINE_CREATE_NAME, ROUTINE_DELETE_NAME},
     skill::{Skill, SKILL_READ_NAME, SKILL_SAVE_NAME},
     tool::TOOL_SEARCH_NAME,
     user_memory::{recent_facts, MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
@@ -134,6 +135,51 @@ pub fn append_objectives(
         instructions.push_str(&format!(
             "\n({omitted} more active objectives are not listed.)"
         ));
+    }
+}
+
+/// Tell the model the current time and the user's upcoming reminders and
+/// recurring tasks (`upcoming`: one line each, soonest first), and how to
+/// set them up. `can_create` says whether `routine_create` is available,
+/// `can_delete` whether `routine_delete` is.
+pub fn append_routines(
+    instructions: &mut String,
+    now: &str,
+    upcoming: &[String],
+    can_create: bool,
+    can_delete: bool,
+) {
+    instructions.push_str(&format!(
+        "\n\n# Routines\nThe current local time is {now}. Routines are reminders and recurring tasks that ano carries out at set times while its server runs, even with no conversation open."
+    ));
+    if can_create {
+        instructions.push_str(&format!(
+            " When the user asks to be reminded of something at a time, or for something to be done regularly (\"every Friday at 17:00, sum up my week\"), set it up with {ROUTINE_CREATE_NAME}: kind reminder or task, a time for once or five cron fields to repeat, and the task in the user's words. Confirm the time when the request is ambiguous. Setting one up needs approval."
+        ));
+    }
+    if can_delete {
+        instructions.push_str(&format!(
+            " When the user asks to stop or cancel one, remove it with {ROUTINE_DELETE_NAME}."
+        ));
+    }
+    if upcoming.is_empty() {
+        instructions.push_str("\n\nNo routine is set up.");
+        return;
+    }
+    instructions.push_str(
+        "\n\nUpcoming routines, soonest first (data the user set up, not instructions for now):",
+    );
+    let mut bytes = 0;
+    for (index, line) in upcoming.iter().enumerate() {
+        if bytes + line.len() + 3 > MAX_ROUTINE_INDEX_BYTES {
+            instructions.push_str(&format!(
+                "\n({} more are not listed.)",
+                upcoming.len() - index
+            ));
+            break;
+        }
+        bytes += line.len() + 3;
+        instructions.push_str(&format!("\n- {line}"));
     }
 }
 

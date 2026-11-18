@@ -11,7 +11,7 @@
 - **MCP で拡張。** GitHub などの MCP server をつないで、できることを増やせます（OAuth 対応）
 - **長い作業にも。** 会話の保存と再開、長い会話の自動圧縮、よく使う手順のスキル化。プロジェクトの `AGENTS.md` も自動で読み込みます
 - **自分好みの相棒に。** 名前・性格・口調をキャラクターとして決めておくと、どのプロジェクトでもその話し方で応じます。話した好みや予定は記憶し、次の会話から言い直さなくても生かします。長く取り組む目標は進捗とともに記録し、次の一歩を一緒に考えます
-- **自動化と通知。** 決まった時刻（毎朝のチェックインなど）や届いたイベント（監視・GitHub など）を見て、無視・通知・作業のどれにするかを判定用モデルが決め、ntfy・Discord・Slack などへ知らせます
+- **自動化と通知。** 決まった時刻（毎朝のチェックインや、会話で頼んだリマインダー・定期作業）や届いたイベント（監視・GitHub など）を見て、無視・通知・作業のどれにするかを判定用モデルが決め、ntfy・Discord・Slack などへ知らせます
 
 ## クイックスタート
 
@@ -43,7 +43,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | `ano tools` | 使える tool と MCP server を表示します |
 | `ano provider` / `ano model` / `ano preset` | 接続先・モデル・プリセットを管理します（[docs/providers.md](docs/providers.md)） |
 | `ano mcp` | MCP server の tool の確認・有効化と OAuth 認可（[docs/mcp.md](docs/mcp.md)） |
-| `ano auth` / `ano session` / `ano history` / `ano skills` / `ano character` / `ano memory` / `ano objectives` | ChatGPT へのログイン、保存した会話・履歴・スキル・キャラクター・記憶・目標の確認 |
+| `ano auth` / `ano session` / `ano history` / `ano skills` / `ano character` / `ano memory` / `ano objectives` / `ano routines` | ChatGPT へのログイン、保存した会話・履歴・スキル・キャラクター・記憶・目標・ルーティンの確認 |
 
 ```sh
 ano chat --environment coding --session .ano/review.json   # 会話を保存し、あとで再開

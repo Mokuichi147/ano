@@ -15,6 +15,7 @@
 | `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](agent-runtime.md#スキルskill_read--skill_save)） |
 | `ano memory` / `ano memory add` / `ano memory forget` | 記憶した事実を番号付きで一覧し、追加・削除します（[記憶](agent-runtime.md#記憶memory_save--memory_forget)） |
 | `ano objectives` / `add` / `set` / `log` / `show` / `remove` | 長期の目標を一覧し、追加・変更・進捗の記録・削除をします（[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)） |
+| `ano routines` / `add` / `remove` | リマインダーと定期作業を次の時刻つきで一覧し、作成・削除します（[ルーティン](automation.md#会話から作るリマインダーと定期作業routines)） |
 | `ano character` / `ano character set` | キャラクターを表示し、`set --name`・`--tagline`・`--soul`（`--soul-file`）で作成・変更します（[キャラクター](agent-runtime.md#キャラクターcharacter_update)） |
 | `ano mcp tools [LABEL]` | MCP server に接続して提供される tool をすべて表示し、設定で有効なものに印を付けます（[tool の確認と有効化](mcp.md#tool-の確認と有効化)） |
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |

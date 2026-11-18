@@ -110,6 +110,10 @@ impl EventSource for ScheduleSource {
         ))
     }
 
+    fn timed(&self) -> bool {
+        true
+    }
+
     fn next_fire(&self, after: u64) -> Option<u64> {
         next_after(&self.cron, after)
     }

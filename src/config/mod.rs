@@ -29,6 +29,7 @@ use crate::{
         chronotope::HistorySettings,
         objectives::ObjectiveSettings,
         openai::{ApiSettings, ProviderSettings},
+        routines::RoutineSettings,
         skills::SkillSettings,
         user_memory::MemorySettings,
     },
@@ -139,6 +140,9 @@ pub struct AppConfig {
     pub memory: MemorySettings,
     /// The user's long-term objectives and the progress toward them.
     pub objectives: ObjectiveSettings,
+    /// Reminders and recurring tasks set up in conversations, which
+    /// `ano serve` carries out.
+    pub routines: RoutineSettings,
 }
 
 impl AppConfig {
@@ -216,6 +220,9 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(dir) = &mut self.routines.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid routines.dir")?;
         }
         if let Some(dir) = &mut self.objectives.dir {
             *dir = resolve_path(dir, directory, home).context("invalid objectives.dir")?;

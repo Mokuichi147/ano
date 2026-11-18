@@ -16,6 +16,7 @@ mod output;
 mod preset;
 mod prompt;
 mod provider;
+mod routines;
 mod run;
 mod skills;
 mod tools;
@@ -30,6 +31,7 @@ use crate::{
     infrastructure::{
         automation::register_builtin_automation,
         mcp::{redact_urls, McpPool},
+        routines::RoutineSource,
         session_store::Session,
         tools::register_builtin_tools,
     },
@@ -102,6 +104,8 @@ enum Command {
     Memory(memory::MemoryArgs),
     /// List, add, and track your long-term objectives.
     Objectives(objectives::ObjectivesArgs),
+    /// List, set up, and remove your reminders and recurring tasks.
+    Routines(routines::RoutinesArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -448,7 +452,9 @@ pub async fn run() -> Result<()> {
         Command::Run(args) => run::run_agent(config, cli.user, args, registry).await,
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
-        Command::Automation(args) => automation::run(&config, &automation_kinds(), args).await,
+        Command::Automation(args) => {
+            automation::run(&config, &automation_kinds(&config)?, args).await
+        }
         Command::Web(args) => web(config, cli.user, args, registry).await,
         Command::Acp(args) => acp(config, cli.user, args, registry).await,
         // A failed connection's error may show the server URL, with an API
@@ -464,14 +470,26 @@ pub async fn run() -> Result<()> {
         Command::Character(args) => character::run(&config, &cli.user, args),
         Command::Memory(args) => memory::run(&config, &cli.user, args),
         Command::Objectives(args) => objectives::run(&config, &cli.user, args),
+        Command::Routines(args) => routines::run(&config, &cli.user, args),
     }
 }
 
 /// The kinds of automation sources and notifiers the binary offers.
-fn automation_kinds() -> AutomationRegistry {
+/// The kinds of automation sources and notifiers the binary offers: the
+/// built-in ones, and `routines`, which reads the routines kept where
+/// `config` says.
+fn automation_kinds(config: &AppConfig) -> Result<AutomationRegistry> {
     let mut registry = AutomationRegistry::new();
     register_builtin_automation(&mut registry);
-    registry
+    let routines = config.routines.directory();
+    registry.register_source("routines", move |spec| {
+        let root = match &routines {
+            Ok(root) => root.clone(),
+            Err(error) => bail!("{error:#}"),
+        };
+        Ok(Arc::new(RoutineSource::new(root, spec.options)?))
+    });
+    Ok(registry)
 }
 
 async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -> Result<()> {
@@ -485,15 +503,9 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
         config.webhook.allow_unauthenticated = true;
     }
     let client = connect_provider(&config, config.default_provider())?;
+    let kinds = automation_kinds(&config)?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
-    let served = webhook::serve(
-        config,
-        client,
-        Arc::clone(&mcp),
-        registry,
-        automation_kinds(),
-    )
-    .await;
+    let served = webhook::serve(config, client, Arc::clone(&mcp), registry, kinds).await;
     // Close MCP connections after jobs have stopped, even on failure.
     mcp.shutdown().await;
     served

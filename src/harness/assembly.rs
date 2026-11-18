@@ -11,8 +11,8 @@ use crate::{
     config::AppConfig,
     infrastructure::{
         character::CharacterStore, chronotope::Chronotope, objectives::ObjectiveBook,
-        project::read_project_instructions, skills::SkillLibrary, tools::register_builtin_tools,
-        user_memory::MemoryBook,
+        project::read_project_instructions, routines::RoutineBook, skills::SkillLibrary,
+        tools::register_builtin_tools, user_memory::MemoryBook,
     },
 };
 use anyhow::Result;
@@ -22,13 +22,14 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Harness {
     /// The built-in tools, with those of the raw history, skills, the
-    /// character, memory, and objectives when they are enabled.
+    /// character, memory, objectives, and routines when they are enabled.
     pub registry: ToolRegistry,
     pub history: Option<Arc<Chronotope>>,
     pub skills: Option<Arc<SkillLibrary>>,
     pub character: Option<Arc<CharacterStore>>,
     pub memory: Option<Arc<MemoryBook>>,
     pub objectives: Option<Arc<ObjectiveBook>>,
+    pub routines: Option<Arc<RoutineBook>>,
 }
 
 impl Harness {
@@ -51,6 +52,7 @@ impl Harness {
             character: None,
             memory: None,
             objectives: None,
+            routines: None,
         }
     }
 
@@ -64,6 +66,7 @@ impl Harness {
         let character = CharacterStore::from_settings(&config.character, &registry)?;
         let memory = MemoryBook::from_settings(&config.memory, &registry)?;
         let objectives = ObjectiveBook::from_settings(&config.objectives, &registry)?;
+        let routines = RoutineBook::from_settings(&config.routines, &registry)?;
         Ok(Self {
             registry,
             history,
@@ -71,11 +74,12 @@ impl Harness {
             character,
             memory,
             objectives,
+            routines,
         })
     }
 
-    /// Append the user's character, memory, and objectives, the project
-    /// instructions of
+    /// Append the user's character, memory, objectives, and routines, the
+    /// project instructions of
     /// the workspace (such as `AGENTS.md`), and the list of the user's skills
     /// to the instructions of `profile`. It reads files, so call it off the
     /// async runtime where that matters. Returns warnings about the files
@@ -96,6 +100,11 @@ impl Harness {
         if let Some(objectives) = &self.objectives {
             if let Err(error) = profile.append_objectives(objectives) {
                 warnings.push(format!("left out the objectives: {error:#}"));
+            }
+        }
+        if let Some(routines) = &self.routines {
+            if let Err(error) = profile.append_routines(routines) {
+                warnings.push(format!("left out the routines: {error:#}"));
             }
         }
         if let Some(workspace) = &profile.context.workspace {
@@ -168,6 +177,7 @@ mod tests {
             character: Some(Arc::new(store)),
             memory: None,
             objectives: None,
+            routines: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {
@@ -212,6 +222,7 @@ mod tests {
             character: Some(Arc::new(CharacterStore::new(characters.path()))),
             memory: None,
             objectives: None,
+            routines: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {

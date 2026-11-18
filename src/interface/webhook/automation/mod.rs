@@ -259,9 +259,14 @@ async fn act(automation: &Automation, state: &Arc<WebhookState>, event: Automati
     }
 }
 
-/// The longest a timer sleeps before it looks at the clock again, so a
-/// changed clock or a machine waking from sleep is noticed.
-const MAX_TIMER_SLEEP: Duration = Duration::from_secs(60);
+/// The longest a timer sleeps before it looks at the clock and the source
+/// again, so a changed clock, a machine waking from sleep, or a time added
+/// to the source is noticed.
+const MAX_TIMER_SLEEP: Duration = if cfg!(test) {
+    Duration::from_millis(500)
+} else {
+    Duration::from_secs(60)
+};
 /// A time missed by more than this (the machine slept, or the server was
 /// busy) is skipped instead of handled late.
 const MAX_TIMER_LATENESS_SECS: u64 = 300;
@@ -276,14 +281,18 @@ pub(in crate::interface::webhook) fn start_timers(state: &Arc<WebhookState>) {
         return;
     };
     let now = unix_now();
-    for (name, source) in &automation.sources {
-        let Some(next) = source.next_fire(now) else {
-            continue;
-        };
-        println!(
-            "automation: source '{name}' fires next at {}",
-            local_time(next)
-        );
+    for (name, source) in automation
+        .sources
+        .iter()
+        .filter(|(_, source)| source.timed())
+    {
+        match source.next_fire(now) {
+            Some(next) => println!(
+                "automation: source '{name}' fires next at {}",
+                local_time(next)
+            ),
+            None => println!("automation: source '{name}' has no time set yet"),
+        }
         let (state, name, source) = (Arc::clone(state), name.clone(), Arc::clone(source));
         let mut tasks = state
             .tasks
@@ -304,18 +313,19 @@ async fn run_timer(state: &Arc<WebhookState>, name: &str, source: &dyn EventSour
         // A clock set back would put `after` in the future and skip the
         // times until it caught up; counting from now instead may meet a
         // handled time again, which its key turns into a duplicate.
-        let Some(next) = source.next_fire(after.min(unix_now())) else {
-            return;
-        };
         let now = unix_now();
-        if now < next {
-            let wait = Duration::from_secs(next - now).min(MAX_TIMER_SLEEP);
+        let next = source.next_fire(after.min(now));
+        if next.is_none_or(|next| now < next) {
+            let wait = next
+                .map_or(MAX_TIMER_SLEEP, |next| Duration::from_secs(next - now))
+                .min(MAX_TIMER_SLEEP);
             tokio::select! {
                 () = tokio::time::sleep(wait) => {}
                 _ = shutdown.changed() => return,
             }
             continue;
         }
+        let Some(next) = next else { continue };
         if now - next > MAX_TIMER_LATENESS_SECS {
             // Count from now, so missed times are never handled in a burst.
             println!(

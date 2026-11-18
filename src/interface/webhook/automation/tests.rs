@@ -700,6 +700,10 @@ impl EventSource for EverySecond {
         Err(Rejection::invalid("timer only"))
     }
 
+    fn timed(&self) -> bool {
+        true
+    }
+
     fn next_fire(&self, after: u64) -> Option<u64> {
         Some(after + 1)
     }
@@ -780,4 +784,49 @@ fn schedules_are_built_from_the_config() {
         problem("[sources.morning]\nkind = 'schedule'\ncron = 'every morning'")
             .contains("invalid cron pattern")
     );
+}
+
+/// A reminder set up for a moment from now fires through the `routines`
+/// source and its rule.
+#[tokio::test]
+async fn routines_fire_at_their_time() {
+    let routines = tempfile::tempdir().unwrap();
+    let book = crate::infrastructure::routines::RoutineBook::new(routines.path());
+    let root = routines.path().to_path_buf();
+    let mut registry = builtin();
+    registry.register_source("routines", move |spec| {
+        Ok(Arc::new(
+            crate::infrastructure::routines::RoutineSource::new(root.clone(), spec.options)?,
+        ))
+    });
+    let setup = setup_with(
+        &registry,
+        "[sources.routines]\nkind = 'routines'",
+        "[[rules]]\nname = 'reminders'\nsources = ['routines']\nkinds = ['reminder']\naction = 'notify'\nnotify = ['phone']",
+        r#"{"action": "notify", "priority": "normal", "summary": "Time to water the plants.", "reason": "a reminder"}"#,
+    )
+    .await;
+    super::start_timers(&setup.state);
+    // Set up after the server started: the timer looks again on its own.
+    book.create(
+        "default",
+        crate::domain::routine::RoutineKind::Reminder,
+        "Water the plants",
+        "Water the plants.",
+        None,
+        Some(unix_now() + 2),
+    )
+    .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(70), async {
+        loop {
+            if let Some(first) = setup.received.lock().unwrap().first().cloned() {
+                return first;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the reminder did not fire");
+    assert_eq!(received["title"], "Water the plants");
+    crate::interface::webhook::shutdown_jobs(&setup.state).await;
 }

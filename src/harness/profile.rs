@@ -4,7 +4,7 @@
 use super::{
     instructions::{
         append_character, append_memory, append_objectives, append_project_instructions,
-        append_skills,
+        append_routines, append_skills,
     },
     settings::AgentConfig,
 };
@@ -17,13 +17,14 @@ use crate::{
         environment::EnvironmentConfig,
         objective::{OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
         policy::UserPolicy,
+        routine::{ROUTINE_CREATE_NAME, ROUTINE_DELETE_NAME},
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
         tool::{ToolContext, TOOL_SEARCH_NAME},
         user_memory::{MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
     },
     infrastructure::{
-        character::CharacterStore, objectives::ObjectiveBook, skills::SkillLibrary,
-        user_memory::MemoryBook,
+        automation::schedule::local_time, character::CharacterStore, objectives::ObjectiveBook,
+        routines::RoutineBook, skills::SkillLibrary, user_memory::MemoryBook,
     },
 };
 use anyhow::{Context, Result};
@@ -178,6 +179,8 @@ impl ExecutionProfile {
             OBJECTIVE_SET_NAME,
             OBJECTIVE_LOG_NAME,
             OBJECTIVE_READ_NAME,
+            ROUTINE_CREATE_NAME,
+            ROUTINE_DELETE_NAME,
         ]);
     }
 
@@ -186,6 +189,50 @@ impl ExecutionProfile {
     /// small, so the instructions mention them only when they can be loaded.
     fn can_search(&self) -> bool {
         !self.policy.is_disabled(TOOL_SEARCH_NAME)
+    }
+
+    /// Tell the run the current time and its user's upcoming routines in
+    /// `book`. Setting up and removing are mentioned only when their tools
+    /// are allowed and can be approved. Nothing is added when the run keeps
+    /// out personal context.
+    pub fn append_routines(&mut self, book: &RoutineBook) -> Result<()> {
+        if !self.personal_context {
+            return Ok(());
+        }
+        let available = |name: &str| {
+            self.policy.is_allowed(name)
+                && !self.policy.is_disabled(name)
+                && self.approval_mode != ApprovalMode::Deny
+        };
+        let now = crate::application::clock::unix_now();
+        let upcoming: Vec<String> = book
+            .upcoming(&self.context.user_id, now)?
+            .into_iter()
+            .map(|(at, routine)| {
+                let repeat = match &routine.cron {
+                    Some(pattern) => format!("repeats \"{pattern}\""),
+                    None => "once".into(),
+                };
+                format!(
+                    "[{}] {} {} at {} ({repeat}): {}",
+                    routine.id,
+                    routine.kind.name(),
+                    routine.title,
+                    local_time(at),
+                    crate::domain::text::cut(&routine.task.replace('\n', " "), 120)
+                )
+            })
+            .collect();
+        append_routines(
+            &mut self.settings.instructions,
+            &chrono::Local::now()
+                .format("%Y-%m-%d %H:%M %:z (%A)")
+                .to_string(),
+            &upcoming,
+            available(ROUTINE_CREATE_NAME),
+            available(ROUTINE_DELETE_NAME),
+        );
+        Ok(())
     }
 
     /// Tell the run about its user's objectives in `book`. Creating and
@@ -424,6 +471,8 @@ mod tests {
             OBJECTIVE_SET_NAME,
             OBJECTIVE_LOG_NAME,
             OBJECTIVE_READ_NAME,
+            ROUTINE_CREATE_NAME,
+            ROUTINE_DELETE_NAME,
         ] {
             assert!(untrusted.policy.is_disabled(name), "{name}");
         }
@@ -490,5 +539,50 @@ mod tests {
         untrusted.without_personal_context();
         untrusted.append_objectives(&book).unwrap();
         assert_eq!(untrusted.settings.instructions, base);
+    }
+
+    #[test]
+    fn instructions_give_the_time_and_upcoming_routines() {
+        let root = tempfile::tempdir().unwrap();
+        let book = RoutineBook::new(root.path());
+        let profile = |approval_mode| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy: UserPolicy::default(),
+            context: ToolContext {
+                user_id: "default".into(),
+                ..ToolContext::default()
+            },
+            approval_mode,
+            personal_context: true,
+        };
+        let mut empty = profile(ApprovalMode::Ask);
+        let base = empty.settings.instructions.clone();
+        empty.append_routines(&book).unwrap();
+        let added = &empty.settings.instructions[base.len()..];
+        assert!(
+            added.starts_with("\n\n# Routines\nThe current local time is 20"),
+            "{added}"
+        );
+        assert!(added.contains(ROUTINE_CREATE_NAME) && added.ends_with("No routine is set up."));
+
+        book.create(
+            "default",
+            crate::domain::routine::RoutineKind::Task,
+            "Weekly review",
+            "Sum up my week.",
+            Some("0 17 * * FRI"),
+            None,
+        )
+        .unwrap();
+        let mut denied = profile(ApprovalMode::Deny);
+        denied.append_routines(&book).unwrap();
+        let added = &denied.settings.instructions[base.len()..];
+        assert!(added.contains("\n- [r1] task Weekly review at "), "{added}");
+        assert!(
+            added.ends_with("(repeats \"0 17 * * FRI\"): Sum up my week."),
+            "{added}"
+        );
+        assert!(!added.contains(ROUTINE_CREATE_NAME), "{added}");
     }
 }
