@@ -1,7 +1,7 @@
 //! The page: a header with the session's state and controls, and below it
 //! either the form that starts a session or the session itself.
 
-use crate::{api, chat::Chat, setup};
+use crate::{api, chat::Chat, home, setup};
 use naui::{
     web::WebWidgetExt, Align, Button, DialogButtons, DialogResponse, Label, Length, Orientation,
     Padding, ProgressBar, Sizing, Stack, Tasks, TextColor, TextStyle, Ui,
@@ -24,6 +24,8 @@ pub struct App {
     end: Button,
     /// Opens the list of sessions.
     list: Button,
+    /// Opens the home page.
+    home: Button,
     /// Holds the form or the session.
     content: Stack,
     /// What the server offers for new sessions, once read.
@@ -69,11 +71,14 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
     end.set_tooltip(Some("このセッションと保存した会話を削除します"));
     let list = ui.button("セッション一覧")?;
     list.set_tooltip(Some("ほかのセッションを開くか、新しく始めます"));
+    let home = ui.button("ホーム")?;
+    home.set_tooltip(Some("フィード・目標・予定・スペース・覚えていること"));
     header.append(&brand);
     header.append(&summary);
     header.append(&status);
     header.append(&busy);
     header.append(&stop);
+    header.append(&home);
     header.append(&list);
     header.append(&end);
 
@@ -95,6 +100,7 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
         stop: stop.clone(),
         end: end.clone(),
         list: list.clone(),
+        home: home.clone(),
         content,
         options: RefCell::new(None),
         chat: RefCell::new(None),
@@ -119,6 +125,13 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
         move || {
             let app = Rc::clone(&app);
             app.clone().spawn(async move { app.show_sessions().await });
+        }
+    });
+    home.on_click({
+        let app = Rc::clone(&app);
+        move || {
+            let app = Rc::clone(&app);
+            app.clone().spawn(async move { app.show_home().await });
         }
     });
     let started = Rc::clone(&app);
@@ -148,6 +161,29 @@ impl App {
             }
             Ok(_) => self.show_setup(None),
             Err(error) => self.show_setup(Some(Message::error(error))),
+        }
+    }
+
+    /// The home page: the feed, objectives, routines, spaces, and what is
+    /// remembered.
+    pub async fn show_home(self: Rc<Self>) {
+        let view = self.next_view();
+        let home = api::get("/api/home").await;
+        if self.view.get() != view {
+            return;
+        }
+        self.chat.borrow_mut().take();
+        self.show_header(None);
+        self.content.clear();
+        let built = match home {
+            Ok(home) => home::build(&self, &home).map(|page| self.content.append(&page)),
+            Err(error) => self.ui.label(&error).map(|label| {
+                label.set_color(TextColor::Danger);
+                self.content.append(&label);
+            }),
+        };
+        if let Err(error) = built {
+            web_sys::console::error_1(&error.to_string().into());
         }
     }
 
@@ -300,6 +336,7 @@ impl App {
                 self.summary.set_tooltip(workspace);
                 self.set_running(status["running"].as_bool().unwrap_or(false));
                 self.list.set_visible(true);
+                self.home.set_visible(true);
             }
             None => {
                 self.summary.set_text("");
@@ -309,6 +346,7 @@ impl App {
                 self.stop.set_visible(false);
                 self.end.set_visible(false);
                 self.list.set_visible(true);
+                self.home.set_visible(true);
             }
         }
     }

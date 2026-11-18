@@ -335,6 +335,7 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/sessions/{id}/cancel", post(cancel_turn))
         .route("/sessions/{id}/approvals/{approval}", post(answer_approval))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/home", get(home))
         .route("/feed", get(list_feed))
         .route("/spaces", get(list_spaces))
         .route("/feed/{item}", post(update_feed_item))
@@ -567,6 +568,59 @@ async fn delete_session(State(state): State<Arc<WebState>>, Path(id): Path<Strin
             StatusCode::NO_CONTENT.into_response()
         }
         None => session_not_found(),
+    }
+}
+
+/// What the home page shows: the character, what is remembered, active
+/// objectives, upcoming routines, the feed's open items, and the spaces.
+/// Each is `null` when its feature is disabled; one that cannot be read
+/// carries its error instead.
+async fn home(State(state): State<Arc<WebState>>) -> Response {
+    let harness = state.harness.clone();
+    let user = state.user.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        let part = |result: anyhow::Result<serde_json::Value>| {
+            result.unwrap_or_else(|error| json!({"error": format!("{error:#}")}))
+        };
+        let now = crate::application::clock::unix_now();
+        json!({
+            "character": harness.character.as_ref().map(|store| part(
+                store.read(&user).map(|character| json!(character))
+            )),
+            "memory": harness.memory.as_ref().map(|book| part(
+                book.facts(&user).map(|facts| json!(facts))
+            )),
+            "objectives": harness.objectives.as_ref().map(|book| part(book.list(&user).map(|list| {
+                json!(list
+                    .iter()
+                    .filter(|objective| objective.status == crate::domain::objective::Status::Active)
+                    .map(|objective| json!({"id": objective.id, "summary": objective.summary()}))
+                    .collect::<Vec<_>>())
+            }))),
+            "routines": harness.routines.as_ref().map(|book| part(book.upcoming(&user, now).map(|list| {
+                json!(list
+                    .iter()
+                    .take(10)
+                    .map(|(at, routine)| json!({
+                        "id": routine.id,
+                        "kind": routine.kind.name(),
+                        "title": routine.title,
+                        "at": crate::infrastructure::automation::schedule::local_time(*at),
+                    }))
+                    .collect::<Vec<_>>())
+            }))),
+            "feed": harness.feed.as_ref().map(|feed| part(feed.items(&user).map(|items| {
+                json!(items.into_iter().filter(|item| !item.done).take(30).collect::<Vec<_>>())
+            }))),
+            "spaces": harness.spaces.as_ref().map(|spaces| part(
+                spaces.list(&user).map(|list| json!(list))
+            )),
+        })
+    })
+    .await;
+    match built {
+        Ok(home) => Json(home).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

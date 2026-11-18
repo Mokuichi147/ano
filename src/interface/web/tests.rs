@@ -852,3 +852,37 @@ async fn spaces_are_served_isolated_with_their_data() {
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{missing}");
     }
 }
+
+/// The home page gets each enabled feature's part, and `null` for the
+/// others.
+#[tokio::test]
+async fn the_home_page_gets_what_is_enabled() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let memory = tempfile::tempdir().unwrap();
+    let feed = tempfile::tempdir().unwrap();
+    crate::infrastructure::user_memory::MemoryBook::new(memory.path())
+        .save("default", "Likes green tea.")
+        .unwrap();
+    let server = Server::start_with(&api, None, |harness| {
+        harness.memory = Some(Arc::new(
+            crate::infrastructure::user_memory::MemoryBook::new(memory.path()),
+        ));
+        harness.feed = Some(Arc::new(crate::infrastructure::feed::Feed::new(
+            feed.path(),
+        )));
+    })
+    .await;
+    let home: Value = server
+        .request(reqwest::Method::GET, "/api/home")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(home["memory"], json!(["Likes green tea."]));
+    assert_eq!(home["feed"], json!([]));
+    for disabled in ["character", "objectives", "routines", "spaces"] {
+        assert!(home[disabled].is_null(), "{disabled}: {home}");
+    }
+}

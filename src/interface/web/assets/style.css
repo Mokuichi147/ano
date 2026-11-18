@@ -58,7 +58,14 @@ body {
 .topbar > .summary { flex-shrink: 1; }
 /* The list of sessions: one full-width row each, the title first. */
 .sessions { max-width: 760px; width: 100%; box-sizing: border-box; margin: 0 auto; overflow-y: auto; }
-.sessions .session-item { justify-content: flex-start; text-align: left; white-space: normal; box-sizing: border-box; max-width: 100%; }
+.home { max-width: 760px; width: 100%; box-sizing: border-box; margin: 0 auto; overflow-y: auto; }
+/* The page scrolls; its rows keep their height. */
+.home > *, .sessions > * { flex-shrink: 0; }
+.home .home-title { font-size: 1.4em; }
+.home .home-section { margin-top: 14px; font-size: 1.1em; }
+.home .feed-item { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-sizing: border-box; }
+.home .feed-actions { flex-wrap: wrap; }
+.home .session-item, .sessions .session-item { justify-content: flex-start; text-align: left; white-space: normal; box-sizing: border-box; max-width: 100%; }
 .summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .status { font-size: 13px; white-space: nowrap; }
 /* Moves while a turn runs. */
@@ -133,4 +140,6 @@ body {
 /* A phone's header also holds the stop button while a turn runs. */
 @media (max-width: 480px) {
   .busy { width: 32px !important; }
+  /* Room for the buttons; the session's folder and model are in its list. */
+  .topbar > .summary { display: none; }
 }
