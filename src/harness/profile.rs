@@ -4,7 +4,7 @@
 use super::{
     instructions::{
         append_character, append_feed, append_memory, append_objectives,
-        append_project_instructions, append_routines, append_skills,
+        append_project_instructions, append_routines, append_skills, append_spaces,
     },
     settings::AgentConfig,
 };
@@ -20,12 +20,13 @@ use crate::{
         policy::UserPolicy,
         routine::{ROUTINE_CREATE_NAME, ROUTINE_DELETE_NAME},
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
+        space::{SPACE_DATA_NAME, SPACE_READ_NAME, SPACE_SAVE_NAME},
         tool::{ToolContext, TOOL_SEARCH_NAME},
         user_memory::{MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
     },
     infrastructure::{
         automation::schedule::local_time, character::CharacterStore, objectives::ObjectiveBook,
-        routines::RoutineBook, skills::SkillLibrary, user_memory::MemoryBook,
+        routines::RoutineBook, skills::SkillLibrary, spaces::Spaces, user_memory::MemoryBook,
     },
 };
 use anyhow::{Context, Result};
@@ -184,6 +185,9 @@ impl ExecutionProfile {
             ROUTINE_DELETE_NAME,
             FEED_POST_NAME,
             FEED_READ_NAME,
+            SPACE_SAVE_NAME,
+            SPACE_READ_NAME,
+            SPACE_DATA_NAME,
         ]);
     }
 
@@ -192,6 +196,26 @@ impl ExecutionProfile {
     /// small, so the instructions mention them only when they can be loaded.
     fn can_search(&self) -> bool {
         !self.policy.is_disabled(TOOL_SEARCH_NAME)
+    }
+
+    /// Tell the run about the user's spaces in `spaces`, when it may build
+    /// them and keeps personal context.
+    pub fn append_spaces(&mut self, spaces: &Spaces) -> Result<()> {
+        let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
+        if !self.personal_context
+            || ![SPACE_SAVE_NAME, SPACE_READ_NAME, SPACE_DATA_NAME]
+                .iter()
+                .all(|name| available(name))
+        {
+            return Ok(());
+        }
+        let listed: Vec<String> = spaces
+            .list(&self.context.user_id)?
+            .into_iter()
+            .map(|space| format!("{}: {}", space.name, space.title))
+            .collect();
+        append_spaces(&mut self.settings.instructions, &listed);
+        Ok(())
     }
 
     /// Tell the run about the user's feed, when it may post to it and keeps
@@ -489,6 +513,9 @@ mod tests {
             ROUTINE_DELETE_NAME,
             FEED_POST_NAME,
             FEED_READ_NAME,
+            SPACE_SAVE_NAME,
+            SPACE_READ_NAME,
+            SPACE_DATA_NAME,
         ] {
             assert!(untrusted.policy.is_disabled(name), "{name}");
         }

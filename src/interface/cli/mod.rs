@@ -20,6 +20,7 @@ mod provider;
 mod routines;
 mod run;
 mod skills;
+mod spaces;
 mod tools;
 
 pub use approval::InteractiveApproval;
@@ -109,6 +110,8 @@ enum Command {
     Routines(routines::RoutinesArgs),
     /// Read the feed of ideas, articles, and reports, and rate items.
     Feed(feed::FeedArgs),
+    /// List and remove the spaces the agent built for you.
+    Spaces(spaces::SpacesArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -489,6 +492,7 @@ pub async fn run() -> Result<()> {
         Command::Objectives(args) => objectives::run(&config, &cli.user, args),
         Command::Routines(args) => routines::run(&config, &cli.user, args),
         Command::Feed(args) => feed::run(&config, &cli.user, args),
+        Command::Spaces(args) => spaces::run(&config, &cli.user, args),
     }
 }
 

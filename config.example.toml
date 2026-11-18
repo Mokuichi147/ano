@@ -286,6 +286,12 @@ enabled = false
 enabled = false
 # dir = "~/notes/ano-feed"
 
+[spaces]
+# 頼まれてエージェントが作る小さなページ（トラッカー・プランナーなど）。ano web の /spaces/<name> で、
+# ほかから切り離して（通信できない状態で）表示します。データは定期実行の作業で更新できます。
+enabled = false
+# dir = "~/notes/ano-spaces"
+
 # Webhook callers and `ano run --environment NAME` select names declared here.
 # Relative workspace paths and MCP cwd paths resolve from this config directory;
 # a leading ~ expands to the home directory. Without a workspace, CLI runs use

@@ -87,14 +87,14 @@ impl Server {
 
     /// A server that keeps sessions in `saved` and opens those kept there.
     async fn start_saving(api_url: &str, saved: Option<&std::path::Path>) -> Self {
-        Self::start_with(api_url, saved, None).await
+        Self::start_with(api_url, saved, |_| {}).await
     }
 
-    /// `start_saving`, with the user's feed kept in `feed`.
+    /// `start_saving`, with the harness changed by `configure`.
     async fn start_with(
         api_url: &str,
         saved: Option<&std::path::Path>,
-        feed: Option<&std::path::Path>,
+        configure: impl FnOnce(&mut Harness),
     ) -> Self {
         let config = AppConfig::parse(&format!(
             "[agent]\nprovider = 'fake'\n[providers.fake]\nbase_url = '{api_url}'\nmodel = 'fake-model'\nstream = false\nmax_retries = 0"
@@ -114,7 +114,7 @@ impl Server {
             .unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let mut harness = Harness::bare(registry);
-        harness.feed = feed.map(|dir| Arc::new(crate::infrastructure::feed::Feed::new(dir)));
+        configure(&mut harness);
         let state = Arc::new(WebState {
             harness,
             config,
@@ -738,7 +738,10 @@ async fn the_page_reads_and_rates_the_feed() {
             Some("Plan a walk"),
         )
         .unwrap();
-    let server = Server::start_with(&api, None, Some(dir.path())).await;
+    let server = Server::start_with(&api, None, |harness| {
+        harness.feed = Some(Arc::new(crate::infrastructure::feed::Feed::new(dir.path())));
+    })
+    .await;
     let feed: Value = server
         .request(reqwest::Method::GET, "/api/feed")
         .send()
@@ -759,4 +762,70 @@ async fn the_page_reads_and_rates_the_feed() {
     );
     let missing = server.post("/api/feed/f9", json!({"rating": 1})).await;
     assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A space is served isolated: no origin, nothing to connect to, with its
+/// data given to its scripts.
+#[tokio::test]
+async fn spaces_are_served_isolated_with_their_data() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let spaces = crate::infrastructure::spaces::Spaces::new(dir.path());
+    spaces
+        .save(
+            "default",
+            "habits",
+            "習慣",
+            "<html><head></head><body><script>document.body.textContent = ANO_SPACE.data.days</script></body></html>",
+            Some(&json!({"days": 3})),
+        )
+        .unwrap();
+    let server = Server::start_with(&api, None, |harness| {
+        harness.spaces = Some(Arc::new(crate::infrastructure::spaces::Spaces::new(
+            dir.path(),
+        )));
+    })
+    .await;
+    let listed: Value = server
+        .request(reqwest::Method::GET, "/api/spaces")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["spaces"][0]["name"], "habits");
+
+    let page = server
+        .request(reqwest::Method::GET, "/spaces/habits")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let policy = page
+        .headers()
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    // Its scripts run with no origin and may not connect anywhere, so they
+    // cannot reach /api with the page's cookie.
+    assert!(policy.starts_with("sandbox allow-scripts"), "{policy}");
+    assert!(!policy.contains("allow-same-origin"), "{policy}");
+    assert!(policy.contains("connect-src 'none'"), "{policy}");
+    let html = page.text().await.unwrap();
+    assert!(
+        html.contains(r#"window.ANO_SPACE = {"name":"habits","title":"習慣","data":{"days":3}};"#),
+        "{html}"
+    );
+
+    for missing in ["/spaces/none", "/spaces/..%2Fx"] {
+        let response = server
+            .request(reqwest::Method::GET, missing)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{missing}");
+    }
 }

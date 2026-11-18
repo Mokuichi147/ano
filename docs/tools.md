@@ -26,6 +26,9 @@
 | `routine_delete` | ルーティンを消す。呼び出しごとに承認が必要 | `[routines]` |
 | `feed_post` | 提案・記事・報告をユーザーのフィードに残す（[詳細](agent-runtime.md#フィードfeed_post--feed_read)） | `[feed]` |
 | `feed_read` | フィードの最近の項目を、評価と済みとともに読む | `[feed]` |
+| `space_save` | スペース（小さなページ）を作る・置き換える（[詳細](agent-runtime.md#スペースspace_save--space_read--space_data_set)） | `[spaces]` |
+| `space_read` | スペースのページとデータを読む、または一覧する | `[spaces]` |
+| `space_data_set` | スペースのデータを置き換える | `[spaces]` |
 | `character_update` | キャラクター（名前・タグライン・性格と口調）を作る・一部を変える。呼び出しごとに承認が必要（[詳細](agent-runtime.md#キャラクターcharacter_update)） | `[character]` |
 | `history_search` / `history_get` / `history_context` / `history_conversations` | chronotope に保存した会話・ツール履歴の原文を検索し、発言 ID から前後ごと読む | `[history]` |
 | `task_plan` | 作業計画の読み書き（[詳細](agent-runtime.md#作業計画と完了判定)） | 常時 |

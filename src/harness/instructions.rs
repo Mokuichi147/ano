@@ -7,6 +7,7 @@ use crate::domain::{
     objective::{active_summaries, OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
     routine::{MAX_ROUTINE_INDEX_BYTES, ROUTINE_CREATE_NAME, ROUTINE_DELETE_NAME},
     skill::{Skill, SKILL_READ_NAME, SKILL_SAVE_NAME},
+    space::{SPACE_DATA_NAME, SPACE_READ_NAME, SPACE_SAVE_NAME},
     tool::TOOL_SEARCH_NAME,
     user_memory::{recent_facts, MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
 };
@@ -196,6 +197,22 @@ pub fn append_feed(instructions: &mut String, can_read: bool) {
         ));
     }
     instructions.push_str(" Post a few good items rather than many.");
+}
+
+/// Tell the model about spaces: the user's (`name: title`, most recently
+/// updated first) and how to build and update them.
+pub fn append_spaces(instructions: &mut String, spaces: &[String]) {
+    instructions.push_str(&format!(
+        "\n\n# Spaces\nSpaces are small pages you build for the user, such as a habit tracker, a weekly planner, or a board, shown in ano web. When the user asks for one, build it with {SPACE_SAVE_NAME}: one HTML page with inline CSS and JavaScript that renders window.ANO_SPACE.data and fits a phone screen. It runs isolated: it cannot load or send anything, so put everything it shows in its data. To change one, read it with {SPACE_READ_NAME} first; to refresh what it shows, replace its data with {SPACE_DATA_NAME}."
+    ));
+    if spaces.is_empty() {
+        instructions.push_str("\n\nNo space exists yet.");
+        return;
+    }
+    instructions.push_str("\n\nThe user's spaces:");
+    for space in spaces.iter().take(30) {
+        instructions.push_str(&format!("\n- {space}"));
+    }
 }
 
 /// Append project instructions read from the workspace. Each source is

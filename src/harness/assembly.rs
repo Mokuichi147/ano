@@ -12,7 +12,7 @@ use crate::{
     infrastructure::{
         character::CharacterStore, chronotope::Chronotope, feed::Feed, objectives::ObjectiveBook,
         project::read_project_instructions, routines::RoutineBook, skills::SkillLibrary,
-        tools::register_builtin_tools, user_memory::MemoryBook,
+        spaces::Spaces, tools::register_builtin_tools, user_memory::MemoryBook,
     },
 };
 use anyhow::Result;
@@ -22,8 +22,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Harness {
     /// The built-in tools, with those of the raw history, skills, the
-    /// character, memory, objectives, routines, and the feed when they are
-    /// enabled.
+    /// character, memory, objectives, routines, the feed, and spaces when
+    /// they are enabled.
     pub registry: ToolRegistry,
     pub history: Option<Arc<Chronotope>>,
     pub skills: Option<Arc<SkillLibrary>>,
@@ -32,6 +32,7 @@ pub struct Harness {
     pub objectives: Option<Arc<ObjectiveBook>>,
     pub routines: Option<Arc<RoutineBook>>,
     pub feed: Option<Arc<Feed>>,
+    pub spaces: Option<Arc<Spaces>>,
 }
 
 impl Harness {
@@ -56,6 +57,7 @@ impl Harness {
             objectives: None,
             routines: None,
             feed: None,
+            spaces: None,
         }
     }
 
@@ -71,6 +73,7 @@ impl Harness {
         let objectives = ObjectiveBook::from_settings(&config.objectives, &registry)?;
         let routines = RoutineBook::from_settings(&config.routines, &registry)?;
         let feed = Feed::from_settings(&config.feed, &registry)?;
+        let spaces = Spaces::from_settings(&config.spaces, &registry)?;
         Ok(Self {
             registry,
             history,
@@ -80,6 +83,7 @@ impl Harness {
             objectives,
             routines,
             feed,
+            spaces,
         })
     }
 
@@ -114,6 +118,11 @@ impl Harness {
         }
         if self.feed.is_some() {
             profile.append_feed();
+        }
+        if let Some(spaces) = &self.spaces {
+            if let Err(error) = profile.append_spaces(spaces) {
+                warnings.push(format!("left out the spaces: {error:#}"));
+            }
         }
         if let Some(workspace) = &profile.context.workspace {
             let sources = read_project_instructions(workspace, &profile.project_instructions)?;
@@ -187,6 +196,7 @@ mod tests {
             objectives: None,
             routines: None,
             feed: None,
+            spaces: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {
@@ -233,6 +243,7 @@ mod tests {
             objectives: None,
             routines: None,
             feed: None,
+            spaces: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {

@@ -336,6 +336,7 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/sessions/{id}/approvals/{approval}", post(answer_approval))
         .route("/sessions/{id}/events", get(session_events))
         .route("/feed", get(list_feed))
+        .route("/spaces", get(list_spaces))
         .route("/feed/{item}", post(update_feed_item))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
@@ -353,6 +354,7 @@ fn router(state: Arc<WebState>) -> Router {
             "/assets/pkg/ano_web_ui_bg.wasm",
             get(|| asset("application/wasm", UI_WASM)),
         )
+        .route("/spaces/{name}", get(space_page))
         .nest("/api", api)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -364,10 +366,13 @@ async fn security_headers(request: Request, next: Next) -> Response {
     }
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
+    // Spaces set their own, stricter policy.
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -583,6 +588,55 @@ struct FeedItemUpdate {
     /// 1, -1, or 0 to clear.
     rating: Option<i8>,
     done: Option<bool>,
+}
+
+/// The user's spaces, most recently updated first; empty when spaces are
+/// disabled.
+async fn list_spaces(State(state): State<Arc<WebState>>) -> Response {
+    let Some(spaces) = state.harness.spaces.clone() else {
+        return Json(json!({"enabled": false, "spaces": []})).into_response();
+    };
+    let user = state.user.clone();
+    match tokio::task::spawn_blocking(move || spaces.list(&user)).await {
+        Ok(Ok(list)) => Json(json!({"enabled": true, "spaces": list})).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}")),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// A space, isolated: the policy gives it no origin (so it cannot use the
+/// session's cookie or the API) and lets it connect nowhere, so its scripts
+/// see only the data the page carries.
+const SPACE_POLICY: &str = "sandbox allow-scripts allow-forms allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'none'";
+
+async fn space_page(
+    State(state): State<Arc<WebState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if !state.access.admits(peer, &headers) {
+        return (StatusCode::UNAUTHORIZED, Html(LOCKED_HTML)).into_response();
+    }
+    let Some(spaces) = state.harness.spaces.clone() else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let user = state.user.clone();
+    let read = tokio::task::spawn_blocking(move || spaces.read(&user, &name)).await;
+    match read {
+        Ok(Ok(Some((info, html, data)))) => (
+            [
+                (header::CONTENT_SECURITY_POLICY, SPACE_POLICY),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            Html(crate::infrastructure::spaces::render_page(
+                &info, &html, &data,
+            )),
+        )
+            .into_response(),
+        Ok(Ok(None)) | Ok(Err(_)) => StatusCode::NOT_FOUND.into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 /// Rate an item of the feed, or mark it done.

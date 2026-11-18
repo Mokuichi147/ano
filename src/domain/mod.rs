@@ -20,6 +20,7 @@ pub mod provider;
 pub mod routine;
 pub mod session;
 pub mod skill;
+pub mod space;
 pub mod text;
 pub mod tool;
 pub mod usage;

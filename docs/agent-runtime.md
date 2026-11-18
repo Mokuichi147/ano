@@ -1,6 +1,6 @@
 # エージェントの実行モデル
 
-`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶・目標・フィードについて説明します。
+`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶・目標・フィード・スペースについて説明します。
 
 - [実行ループと上限](#実行ループと上限)
 - [回答のストリーミング](#回答のストリーミング)
@@ -17,6 +17,7 @@
 - [記憶（memory_save / memory_forget）](#記憶memory_save--memory_forget)
 - [目標（objective_set / objective_log / objective_read）](#目標objective_set--objective_log--objective_read)
 - [フィード（feed_post / feed_read）](#フィードfeed_post--feed_read)
+- [スペース（space_save / space_read / space_data_set）](#スペースspace_save--space_read--space_data_set)
 
 ## 実行ループと上限
 
@@ -429,4 +430,20 @@ environment = "reader"                  # web_fetch を許し、approval_mode = 
 - 実行の instructions には、フィードの使い方だけを短く載せます（項目そのものは載せません）。
 - 保存先は `<dir>/<ユーザー>/feed.json` です（新しい 200 件まで）。`ano feed` で一覧、`ano feed rate f3 up`（`down`・`none`）で評価、`ano feed done f3` で済みにできます。
 - 信頼できないイベントから始まった作業では、`feed_*` を使わせません。
+
+## スペース（space_save / space_read / space_data_set）
+
+スペースは、頼まれてエージェントが作る小さなページです（習慣のトラッカー、週間プランナー、イベントの一覧など）。`ano web` の `/spaces/<name>` で開きます。定期実行の作業でデータを更新すれば、開くたびに新しい内容が見られます。`[spaces] enabled = true` で有効になります。
+
+```toml
+[spaces]
+enabled = true
+# dir = "~/notes/ano-spaces"   # 省略時は OS 標準のデータディレクトリ
+```
+
+- **作り方。** 「毎日の運動を記録できるトラッカーを作って」のように頼むと、モデルが `space_save` で1枚の HTML（CSS と JavaScript はページ内に書く）とデータ（JSON、64 KiB まで）を保存します。ページは `window.ANO_SPACE.data` を読んで表示します。直すときは `space_read` で読んでから保存し直し、表示する中身だけを変えるときは `space_data_set` でデータを置き換えます。
+- **隔離。** スペースは `ano web` の画面と切り離して表示します。CSP の `sandbox` でオリジンを持たないページとして動かすので、`ano web` の Cookie も API も使えません。`connect-src 'none'` などで外部への通信と読み込みもすべて禁じるため、ページのスクリプトが読めるのは埋め込まれたデータだけです。データはサーバーがページに埋め込み、`</script>` で抜け出せないようにエスケープします。
+- **今の制約。** ページの中で付けたチェックやメモは保存されません（ページを開き直すと戻ります）。記録を残したいものは、会話で頼んでデータを更新させてください。
+- 保存先は `<dir>/<ユーザー>/<name>/`（`index.html`・`data.json`・`space.json`）で、ユーザーごとに 30 件まで、ページは 200 KiB までです。名前は英小文字・数字・ハイフンです。`ano spaces` で一覧、`ano spaces remove <name>` で削除できます。
+- 実行の instructions には、作り方と、ユーザーのスペースの名前と題名を載せます。`space_*` は承認なしで使えます（ページは隔離されるため）。信頼できないイベントから始まった作業では、`space_*` を使わせません。
 

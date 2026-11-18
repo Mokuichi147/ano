@@ -32,6 +32,7 @@ use crate::{
         openai::{ApiSettings, ProviderSettings},
         routines::RoutineSettings,
         skills::SkillSettings,
+        spaces::SpaceSettings,
         user_memory::MemorySettings,
     },
     interface::webhook::{AutomationSettings, WebhookSettings},
@@ -146,6 +147,8 @@ pub struct AppConfig {
     pub routines: RoutineSettings,
     /// Ideas, articles, and reports the agent leaves for the user.
     pub feed: FeedSettings,
+    /// Small pages the agent builds for the user, shown in `ano web`.
+    pub spaces: SpaceSettings,
 }
 
 impl AppConfig {
@@ -223,6 +226,9 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(dir) = &mut self.spaces.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid spaces.dir")?;
         }
         if let Some(dir) = &mut self.feed.dir {
             *dir = resolve_path(dir, directory, home).context("invalid feed.dir")?;
