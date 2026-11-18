@@ -12,6 +12,9 @@ use std::{
 };
 
 const META_FILE: &str = "meta.json";
+/// Marks a folder whose session was deleted but whose files could not all
+/// be removed yet (Windows keeps files open while they are in use).
+const DELETED_FILE: &str = "deleted";
 const CONVERSATION_FILE: &str = "conversation.json";
 /// What was said, one JSON object per line: `{"role": "user" | "assistant",
 /// "text": ...}`. The conversation file holds more, such as internal
@@ -89,6 +92,14 @@ impl SavedSessions {
         let mut sessions: Vec<SavedMeta> = entries
             .flatten()
             .filter(|entry| entry.path().is_dir())
+            .filter(|entry| {
+                // Finish a deletion an earlier run could not complete.
+                if entry.path().join(DELETED_FILE).exists() {
+                    std::fs::remove_dir_all(entry.path()).ok();
+                    return false;
+                }
+                true
+            })
             .filter_map(|entry| {
                 let path = entry.path().join(META_FILE);
                 let read = std::fs::read(&path)
@@ -153,9 +164,15 @@ impl SavedSessions {
             .collect())
     }
 
-    /// Delete the files of the session `id`.
+    /// Delete the files of the session `id`. The folder is marked deleted
+    /// first, so a folder that cannot be removed now is never opened again,
+    /// and is removed at the next start.
     pub(super) fn remove(&self, id: &str) -> Result<()> {
         let folder = self.folder(id)?;
+        if folder.is_dir() {
+            std::fs::write(folder.join(DELETED_FILE), b"")
+                .with_context(|| format!("failed to mark {} deleted", folder.display()))?;
+        }
         match std::fs::remove_dir_all(&folder) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
@@ -204,6 +221,12 @@ mod tests {
         saved.remove("0b-2").unwrap();
         saved.remove("0b-2").unwrap();
         assert_eq!(saved.list().len(), 1);
+        // A folder marked deleted, whose files could not all be removed,
+        // is never listed and is removed when the list is read.
+        saved.write_meta(&meta("0d-4", 1)).unwrap();
+        std::fs::write(dir.path().join("default/0d-4/deleted"), "").unwrap();
+        assert_eq!(saved.list().len(), 1);
+        assert!(!dir.path().join("default/0d-4").exists());
         assert!(saved.conversation_path("../x").is_err());
         assert!(SavedSessions::new(dir.path(), "../x").is_err());
     }
