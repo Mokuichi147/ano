@@ -345,12 +345,20 @@ pub fn render_page(info: &SpaceInfo, html: &str, data: &Value) -> String {
         .replace("</", "<\\/")
         .replace("<!--", "<\\!--");
     let script = format!("<script>window.ANO_SPACE = {given};</script>");
+    // Right after the head's start tag, which may have attributes; without
+    // one, at the start. ASCII lowercasing keeps byte offsets.
     let lower = html.to_ascii_lowercase();
-    match lower.find("<head>") {
-        Some(index) => {
-            let at = index + "<head>".len();
-            format!("{}{script}{}", &html[..at], &html[at..])
-        }
+    let head_end = lower
+        .match_indices("<head")
+        .find(|(index, _)| {
+            matches!(
+                lower.as_bytes().get(index + "<head".len()),
+                Some(b'>' | b' ' | b'\t' | b'\n' | b'\r' | b'/')
+            )
+        })
+        .and_then(|(index, _)| lower[index..].find('>').map(|end| index + end + 1));
+    match head_end {
+        Some(at) => format!("{}{script}{}", &html[..at], &html[at..]),
         None => format!("{script}{html}"),
     }
 }
@@ -421,6 +429,18 @@ mod tests {
         );
         assert!(!page.contains("</script><script>alert(1)"), "{page}");
         assert!(page.contains("<\\/script>"), "{page}");
+        let attributes = render_page(
+            &info,
+            "<!doctype html><html><head lang=\"ja\"><title>x</title></head></html>",
+            &Value::Null,
+        );
+        assert!(
+            attributes.starts_with("<!doctype html><html><head lang=\"ja\"><script>"),
+            "{attributes}"
+        );
+        // <header> is not the head.
+        let header = render_page(&info, "<header>x</header>", &Value::Null);
+        assert!(header.starts_with("<script>"), "{header}");
         let bare = render_page(&info, "<p>hi</p>", &Value::Null);
         assert!(bare.starts_with("<script>window.ANO_SPACE = ") && bare.ends_with("<p>hi</p>"));
     }
