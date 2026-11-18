@@ -734,7 +734,12 @@ async fn execute_job(
     let profile = tokio::task::spawn_blocking(move || {
         // A broken character or skill file is left out; it must not fail
         // the job.
-        harness.add_instructions(&mut profile).map(|_| profile)
+        harness.add_instructions(&mut profile).map(|warnings| {
+            for warning in warnings {
+                eprintln!("warning: {warning}");
+            }
+            profile
+        })
     })
     .await
     .context("instructions task failed")??;

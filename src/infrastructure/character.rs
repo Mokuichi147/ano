@@ -170,7 +170,7 @@ impl CharacterStore {
                 "properties": {
                     "name": {"type": "string", "description": "The name you go by. Required when no character exists yet."},
                     "tagline": {"type": "string", "description": "One line that sums the character up. An empty string clears it."},
-                    "soul": {"type": "string", "description": "The whole new soul in Markdown: personality, tone, and manner of speaking, at most 4 KiB. Read the current one in the instructions and rewrite it rather than appending. An empty string clears it."}
+                    "soul": {"type": "string", "description": "The whole new soul in Markdown: personality, tone, and manner of speaking, at most 4 KiB. Rewrite the current one rather than appending: the latest character_update result in this conversation, otherwise the one in the instructions. An empty string clears it."}
                 },
                 "additionalProperties": false
             }),

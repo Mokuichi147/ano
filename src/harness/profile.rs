@@ -255,11 +255,11 @@ mod tests {
         let mut run = profile("default", UserPolicy::default(), ApprovalMode::Ask);
         run.append_character(&store);
         let added = &run.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Character\n"), "{added}");
         assert!(
-            added.starts_with("\n\n# Character\nYou are ミラ\n"),
+            added.ends_with("\n\nName: ミラ\n\n敬語を使わず、短く話す。"),
             "{added}"
         );
-        assert!(added.contains("敬語を使わず、短く話す。"), "{added}");
         assert!(added.contains(CHARACTER_UPDATE_NAME), "{added}");
 
         // The character stays, but changing it is not offered.
@@ -270,7 +270,7 @@ mod tests {
         );
         restricted.append_character(&store);
         let added = &restricted.settings.instructions[base.len()..];
-        assert!(added.contains("You are ミラ"), "{added}");
+        assert!(added.contains("Name: ミラ"), "{added}");
         assert!(!added.contains(CHARACTER_UPDATE_NAME), "{added}");
 
         std::fs::create_dir(root.path().join("broken")).unwrap();

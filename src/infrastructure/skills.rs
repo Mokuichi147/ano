@@ -20,11 +20,9 @@ use crate::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    io::ErrorKind,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{io::ErrorKind, path::PathBuf, sync::Arc};
+
+pub use crate::infrastructure::fs::display_path;
 
 const SKILL_FILE: &str = "SKILL.md";
 
@@ -297,18 +295,10 @@ fn render_skill_file(skill: &Skill) -> Result<String> {
     Ok(format!("---\n{frontmatter}---\n\n{}\n", skill.body))
 }
 
-/// Show `path` relative to the home directory when it is inside it.
-pub fn display_path(path: &Path) -> String {
-    match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf))
-    {
-        Some(relative) => format!("~/{}", relative.display()),
-        None => path.display().to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn skill(name: &str) -> Skill {
         Skill::new(

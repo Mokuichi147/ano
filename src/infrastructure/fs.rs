@@ -29,6 +29,15 @@ pub(crate) fn user_directory(root: &Path, user: &str) -> Result<PathBuf> {
     Ok(root.join(user))
 }
 
+/// Show `path` relative to the home directory when it is inside it.
+pub fn display_path(path: &Path) -> String {
+    match std::env::home_dir().and_then(|home| path.strip_prefix(home).ok().map(Path::to_path_buf))
+    {
+        Some(relative) => format!("~/{}", relative.display()),
+        None => path.display().to_string(),
+    }
+}
+
 /// Replace a file in one rename, leaving the previous file intact on failure.
 /// Temporary files live beside the destination so the rename stays on one volume.
 pub(crate) fn atomic_write(

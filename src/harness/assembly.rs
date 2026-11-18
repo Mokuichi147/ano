@@ -153,7 +153,7 @@ mod tests {
         let instructions = &profile.settings.instructions;
         assert!(instructions.starts_with(&config.settings.instructions));
         let character = instructions
-            .find("# Character\nYou are Mira: A curious partner.\n")
+            .find("\n\nName: Mira\nTagline: A curious partner.\n\nSpeaks warmly.")
             .unwrap();
         let project = instructions
             .find("# Project instructions from AGENTS.md\n")

@@ -3,7 +3,7 @@
 use crate::{
     config::AppConfig,
     domain::character::CharacterUpdate,
-    infrastructure::{character::CharacterStore, skills::display_path},
+    infrastructure::{character::CharacterStore, fs::display_path},
 };
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -70,10 +70,12 @@ pub(super) fn run(config: &AppConfig, user: &str, args: CharacterArgs) -> Result
             soul_file,
         } => {
             let soul = match soul_file {
-                Some(file) => Some(
-                    std::fs::read_to_string(&file)
-                        .with_context(|| format!("failed to read {}", file.display()))?,
-                ),
+                Some(file) => {
+                    let text = std::fs::read_to_string(&file)
+                        .with_context(|| format!("failed to read {}", file.display()))?;
+                    // Editors on Windows may start the file with a byte order mark.
+                    Some(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string())
+                }
                 None => soul,
             };
             let (character, saved) = store.update(

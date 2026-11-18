@@ -105,8 +105,8 @@ async fn runs_take_on_the_character_and_change_it_with_approval() {
     assert_eq!(requests.len(), 2);
     let instructions = requests[0]["instructions"].as_str().unwrap();
     assert!(
-        instructions.contains("# Character\nYou are Mira\n")
-            && instructions.contains("Speaks warmly."),
+        instructions.contains("# Character\n")
+            && instructions.contains("\n\nName: Mira\n\nSpeaks warmly."),
         "{instructions}"
     );
     // Every field is optional, which a strict schema cannot express.
