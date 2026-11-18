@@ -56,6 +56,9 @@ body {
 .topbar { background: var(--surface); border-bottom: 1px solid var(--border); flex-shrink: 0; }
 .topbar > * { flex-shrink: 0; white-space: nowrap; }
 .topbar > .summary { flex-shrink: 1; }
+/* The list of sessions: one full-width row each, the title first. */
+.sessions { max-width: 760px; width: 100%; box-sizing: border-box; margin: 0 auto; overflow-y: auto; }
+.sessions .session-item { justify-content: flex-start; text-align: left; white-space: normal; box-sizing: border-box; max-width: 100%; }
 .summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
 .status { font-size: 13px; white-space: nowrap; }
 /* Moves while a turn runs. */

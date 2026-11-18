@@ -1,6 +1,6 @@
 use super::{
-    access::Access, close_sessions, router, serve, session::TurnRefused, startup_message,
-    WebOptions, WebState, MAX_SESSIONS, TOKEN_ENV,
+    access::Access, close_sessions, restore_sessions, router, saved::SavedSessions, serve,
+    session::TurnRefused, startup_message, WebOptions, WebState, MAX_SESSIONS, TOKEN_ENV,
 };
 use crate::{
     application::registry::ToolRegistry, config::AppConfig, domain::tool::ToolDefinition,
@@ -82,6 +82,11 @@ struct Server {
 
 impl Server {
     async fn start(api_url: &str) -> Self {
+        Self::start_saving(api_url, None).await
+    }
+
+    /// A server that keeps sessions in `saved` and opens those kept there.
+    async fn start_saving(api_url: &str, saved: Option<&std::path::Path>) -> Self {
         let config = AppConfig::parse(&format!(
             "[agent]\nprovider = 'fake'\n[providers.fake]\nbase_url = '{api_url}'\nmodel = 'fake-model'\nstream = false\nmax_retries = 0"
         ))
@@ -108,9 +113,11 @@ impl Server {
             workspace_root: None,
             access: Access::new(Some(TOKEN.into()), 1),
             sessions: RwLock::default(),
+            saved: saved.map(|dir| Arc::new(SavedSessions::new(dir, "default").unwrap())),
             creating: tokio::sync::Mutex::new(()),
             turns: Mutex::new(JoinSet::new()),
         });
+        restore_sessions(&state).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let app = router(Arc::clone(&state)).into_make_service_with_connect_info::<SocketAddr>();
@@ -335,10 +342,20 @@ async fn a_session_works_in_its_folder_and_asks_the_page_for_approval() {
     assert_eq!(session["allow_writes"], true);
     assert_eq!(session["running"], false);
     assert!(session["model"].as_str().unwrap().contains("fake-model"));
+    // Sessions open side by side.
     let second = server
         .post("/api/sessions", json!({"workspace": folder.path()}))
         .await;
-    assert_eq!(second.status(), StatusCode::CONFLICT);
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let listed: Value = server
+        .request(reqwest::Method::GET, "/api/sessions")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 2);
 
     // A plain turn: the answer arrives as rendered Markdown.
     let sent = server
@@ -575,6 +592,7 @@ async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
                 user: "default".into(),
                 token: Some(token.into()),
                 authenticate: true,
+                sessions_dir: None,
             },
         )
     };
@@ -604,4 +622,80 @@ fn the_printed_urls_need_the_token_only_from_other_machines() {
         message("192.168.1.5:8787", None),
         "ano web UI: http://192.168.1.5:8787/"
     );
+}
+
+/// A saved session is open again after the server restarts, with its title
+/// and what was said, and continues its conversation; deleting it removes
+/// its files.
+#[tokio::test]
+async fn saved_sessions_survive_a_restart() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let saved = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let id = {
+        let server = Server::start_saving(&api, Some(saved.path())).await;
+        let created = server
+            .post("/api/sessions", json!({"workspace": folder.path()}))
+            .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let session: Value = created.json().await.unwrap();
+        assert_eq!(session["saved"], true);
+        let id = session["id"].as_str().unwrap().to_string();
+        server
+            .post(
+                &format!("/api/sessions/{id}/messages"),
+                json!({"text": "hello\nmore"}),
+            )
+            .await;
+        server.wait_for(&id, "turn_finished", 1).await;
+        close_sessions(&server.state).await;
+        id
+    };
+    assert!(saved
+        .path()
+        .join("default")
+        .join(&id)
+        .join("conversation.json")
+        .is_file());
+
+    let server = Server::start_saving(&api, Some(saved.path())).await;
+    let listed: Value = server
+        .request(reqwest::Method::GET, "/api/sessions")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session = &listed[0];
+    assert_eq!(session["id"], id.as_str());
+    assert_eq!(session["title"], "hello");
+    assert_eq!(
+        session["workspace"],
+        json!(std::fs::canonicalize(folder.path()).unwrap())
+    );
+    let restored = server.state.session(&id).unwrap();
+    let (backlog, _) = restored.log.subscribe(0);
+    let kinds: Vec<Value> = backlog
+        .iter()
+        .map(|event| serde_json::from_str::<Value>(&event.data).unwrap()["type"].clone())
+        .collect();
+    assert_eq!(kinds, [json!("user_message"), json!("message")]);
+
+    // The conversation goes on from where it was.
+    server
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({"text": "again"}),
+        )
+        .await;
+    let events = server.wait_for(&id, "turn_finished", 1).await;
+    assert_eq!(events.last().unwrap()["usage"]["responses"], 2);
+
+    server
+        .request(reqwest::Method::DELETE, &format!("/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(!saved.path().join("default").join(&id).exists());
 }

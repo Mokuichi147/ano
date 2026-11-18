@@ -276,7 +276,7 @@ impl AcpSession {
             &self.base,
             &mut conversation.connections,
             &mut conversation.agent,
-            &mut conversation.store,
+            conversation.store.as_mut(),
             |reviewer| {
                 approval_factory(&self.mode, self.fixed_mode, &self.ask_user, &reviewer)
                     .build(reviewer)

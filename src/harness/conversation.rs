@@ -27,7 +27,9 @@ use tokio::sync::{oneshot, OwnedMutexGuard};
 /// What a turn needs exclusively: one turn runs at a time.
 pub struct Conversation {
     pub agent: Agent,
-    pub store: MemoryConversation,
+    /// Where the conversation is kept: in memory, or in a session file for
+    /// clients that keep conversations across restarts.
+    pub store: Box<dyn ConversationStore>,
     pub context: ToolContext,
     /// The provider and model in use.
     pub selection: ModelSelection,
@@ -82,10 +84,31 @@ impl Opening {
         })
     }
 
+    /// What a store of this conversation must be bound to: its user,
+    /// environment, workspace, and endpoint.
+    pub fn binding(&self) -> &SessionBinding {
+        &self.binding
+    }
+
     /// Build the conversation's agent, whose calls that need approval are
-    /// answered as `approval` says; `wire` adds the client's listeners.
+    /// answered as `approval` says; `wire` adds the client's listeners. The
+    /// conversation is kept in memory.
     pub fn open(
         self,
+        harness: &Harness,
+        mcp: Arc<dyn McpGateway>,
+        approval: &ApprovalFactory,
+        wire: impl FnOnce(Agent) -> Agent,
+    ) -> Conversation {
+        let store = Box::new(MemoryConversation::new(self.binding.clone()));
+        self.open_in(store, harness, mcp, approval, wire)
+    }
+
+    /// `open`, keeping the conversation in `store`, which is bound to
+    /// `binding()` and may hold earlier turns to continue from.
+    pub fn open_in(
+        self,
+        store: Box<dyn ConversationStore>,
         harness: &Harness,
         mcp: Arc<dyn McpGateway>,
         approval: &ApprovalFactory,
@@ -96,12 +119,11 @@ impl Opening {
             models,
             selection,
             connections,
-            binding,
             ..
         } = self;
         Conversation {
             agent: wire(harness.agent(&profile, models, mcp, approval)),
-            store: MemoryConversation::new(binding),
+            store,
             context: profile.context,
             selection,
             connections,
@@ -282,7 +304,7 @@ impl Turn {
         let outcome = tokio::select! {
             biased;
             _ = cancelled => None,
-            result = agent.run_in_session(request, store) => Some(result),
+            result = agent.run_in_session(request, store.as_mut()) => Some(result),
         };
         let outcome = match outcome {
             Some(Ok(result)) => TurnOutcome::Completed(Box::new(result)),
@@ -323,7 +345,7 @@ mod tests {
         let binding = SessionBinding::new(&context, "http://127.0.0.1:9/v1").unwrap();
         Turns::new(Conversation {
             agent,
-            store: MemoryConversation::new(binding),
+            store: Box::new(MemoryConversation::new(binding)),
             context,
             selection: config.select_model(&[]).unwrap(),
             connections: Connections::default(),

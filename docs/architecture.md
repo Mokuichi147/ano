@@ -171,7 +171,7 @@ src/
 └── interface/
     ├── cli/                clap による CLI（run・chat・tools・session・serve・web）、進捗表示、端末での承認
     ├── acp/                ano acp（Agent Client Protocol のセッション・イベントの変換・エディタでの承認）
-    ├── web/                ano web のサーバー（セッション・SSE のイベント・ブラウザでの承認・Markdown の HTML 化）と、埋め込む画面
+    ├── web/                ano web のサーバー（セッションとその保存・SSE のイベント・ブラウザでの承認・Markdown の HTML 化）と、埋め込む画面
     └── webhook/            署名付き Webhook、ジョブ管理、自動化（automation/: 登録された種類のソースを動かし、振り分け・通知する）
 
 web-ui/                     ano web の画面。naui の DOM バックエンドで組み立てる wasm（build.sh で src/interface/web/assets/pkg/ へ出力）

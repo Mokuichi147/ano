@@ -22,6 +22,8 @@ pub struct App {
     busy: ProgressBar,
     stop: Button,
     end: Button,
+    /// Opens the list of sessions.
+    list: Button,
     /// Holds the form or the session.
     content: Stack,
     /// What the server offers for new sessions, once read.
@@ -63,12 +65,16 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
     stop.set_tooltip(Some(
         "実行中のターンを止めます（入力欄で Esc でも止まります）",
     ));
-    let end = ui.button("セッションを終了")?;
+    let end = ui.button("削除")?;
+    end.set_tooltip(Some("このセッションと保存した会話を削除します"));
+    let list = ui.button("セッション一覧")?;
+    list.set_tooltip(Some("ほかのセッションを開くか、新しく始めます"));
     header.append(&brand);
     header.append(&summary);
     header.append(&status);
     header.append(&busy);
     header.append(&stop);
+    header.append(&list);
     header.append(&end);
 
     let content = ui.stack(Orientation::Vertical)?;
@@ -88,6 +94,7 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
         busy,
         stop: stop.clone(),
         end: end.clone(),
+        list: list.clone(),
         content,
         options: RefCell::new(None),
         chat: RefCell::new(None),
@@ -107,6 +114,13 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
         let app = Rc::clone(&app);
         move || app.confirm_end()
     });
+    list.on_click({
+        let app = Rc::clone(&app);
+        move || {
+            let app = Rc::clone(&app);
+            app.clone().spawn(async move { app.show_sessions().await });
+        }
+    });
     let started = Rc::clone(&app);
     app.spawn(async move { started.resume().await });
     Ok(())
@@ -121,15 +135,95 @@ impl App {
         self.chat.borrow().clone()
     }
 
-    /// Open the server's session, or the form when there is none.
+    /// Open the session used last (the one this page had open, when it is
+    /// still there), or the form when there is none.
     pub async fn resume(self: Rc<Self>) {
+        let current = self.chat().map(|chat| chat.id().to_string());
         match api::get("/api/sessions").await {
             Ok(Value::Array(sessions)) if !sessions.is_empty() => {
-                self.open_session(&sessions[0]);
+                let open = current
+                    .and_then(|id| sessions.iter().find(|session| session["id"] == id.as_str()))
+                    .unwrap_or(&sessions[0]);
+                self.open_session(open);
             }
             Ok(_) => self.show_setup(None),
             Err(error) => self.show_setup(Some(Message::error(error))),
         }
+    }
+
+    /// The sessions on the server, most recently used first, to open one or
+    /// start another.
+    pub async fn show_sessions(self: Rc<Self>) {
+        let view = self.next_view();
+        let sessions = api::get("/api/sessions").await;
+        if self.view.get() != view {
+            return;
+        }
+        self.chat.borrow_mut().take();
+        self.show_header(None);
+        self.content.clear();
+        if let Err(error) = self.build_sessions(sessions) {
+            web_sys::console::error_1(&error.to_string().into());
+        }
+    }
+
+    fn build_sessions(self: &Rc<Self>, sessions: Result<Value, String>) -> naui::Result<()> {
+        let ui = &self.ui;
+        let page = ui.stack(Orientation::Vertical)?;
+        page.set_spacing(8.0);
+        page.set_padding(Padding::all(16.0));
+        page.set_align(Align::Fill);
+        page.add_class("sessions");
+        let heading = ui.label("セッション")?;
+        heading.set_style(TextStyle::Heading);
+        page.append(&heading);
+        let new = ui.button("＋ 新しいセッション")?;
+        new.on_click({
+            let app = Rc::clone(self);
+            move || app.show_setup(None)
+        });
+        page.append(&new);
+        match sessions {
+            Ok(Value::Array(sessions)) => {
+                if sessions.is_empty() {
+                    let none = ui.label("まだセッションはありません。")?;
+                    none.set_color(TextColor::Secondary);
+                    page.append(&none);
+                }
+                for session in sessions {
+                    let title = session["title"]
+                        .as_str()
+                        .filter(|title| !title.is_empty())
+                        .unwrap_or("（まだ会話なし）");
+                    let folder = session["workspace"]
+                        .as_str()
+                        .map_or("（作業フォルダなし）", folder_name);
+                    let running = if session["running"].as_bool() == Some(true) {
+                        "  ·  実行中"
+                    } else {
+                        ""
+                    };
+                    let button = ui.button(&format!("{title}　—　{folder}{running}"))?;
+                    button.set_tooltip(session["model"].as_str());
+                    button.add_class("session-item");
+                    button.on_click({
+                        let app = Rc::clone(self);
+                        move || app.open_session(&session)
+                    });
+                    page.append(&button);
+                }
+            }
+            Ok(_) => {}
+            Err(error) => {
+                let label = ui.label(&error)?;
+                label.set_color(TextColor::Danger);
+                label.set_selectable(true);
+                page.append(&label);
+            }
+        }
+        self.content.append(&page);
+        new.request_focus();
+        Ok(())
     }
 
     /// Show the form that starts a session, with `message` above its button.
@@ -205,7 +299,7 @@ impl App {
                 self.summary.set_text(&format!("{folder}  ·  {model}"));
                 self.summary.set_tooltip(workspace);
                 self.set_running(status["running"].as_bool().unwrap_or(false));
-                self.end.set_visible(true);
+                self.list.set_visible(true);
             }
             None => {
                 self.summary.set_text("");
@@ -214,6 +308,7 @@ impl App {
                 self.busy.set_visible(false);
                 self.stop.set_visible(false);
                 self.end.set_visible(false);
+                self.list.set_visible(true);
             }
         }
     }
@@ -223,6 +318,8 @@ impl App {
             .set_text(if running { "実行中…" } else { "待機中" });
         self.busy.set_visible(running);
         self.stop.set_visible(running);
+        // A phone's header has no room for both; stop the turn first.
+        self.end.set_visible(!running);
     }
 
     /// Show what the model is doing while a turn runs.
@@ -232,15 +329,15 @@ impl App {
 
     fn confirm_end(self: &Rc<Self>) {
         let Some(chat) = self.chat() else { return };
-        let Ok(dialog) = self.ui.dialog("セッションを終了しますか？") else {
+        let Ok(dialog) = self.ui.dialog("このセッションを削除しますか？") else {
             return;
         };
         dialog.set_message(if chat.is_running() {
-            "実行中のターンを中断して終了します。会話は残りません。"
+            "実行中のターンを中断して削除します。保存した会話も消え、元に戻せません。"
         } else {
-            "会話は残りません。"
+            "保存した会話も消え、元に戻せません。ほかのセッションを開くには「セッション一覧」を使います。"
         });
-        dialog.set_buttons(DialogButtons::new().primary("終了").cancel("キャンセル"));
+        dialog.set_buttons(DialogButtons::new().primary("削除").cancel("キャンセル"));
         let app = Rc::clone(self);
         dialog.on_response(move |response| {
             if response != DialogResponse::Primary {
@@ -250,11 +347,11 @@ impl App {
             let path = format!("/api/sessions/{}", chat.id());
             app.clone().spawn(async move {
                 match api::delete(&path).await {
-                    Ok(_) => app.show_setup(None),
+                    Ok(_) => app.clone().spawn(async move { app.show_sessions().await }),
                     Err(error) => {
                         if let Some(chat) = app.chat() {
                             chat.notice(
-                                &format!("終了できませんでした: {error}"),
+                                &format!("削除できませんでした: {error}"),
                                 TextColor::Danger,
                             );
                         }
@@ -277,13 +374,6 @@ impl Message {
         Self {
             text,
             color: TextColor::Danger,
-        }
-    }
-
-    pub fn notice(text: &str) -> Self {
-        Self {
-            text: text.to_string(),
-            color: TextColor::Secondary,
         }
     }
 }

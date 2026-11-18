@@ -12,6 +12,7 @@ mod access;
 mod approval;
 mod events;
 mod markdown;
+mod saved;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -37,6 +38,7 @@ use axum::{
 };
 use events::Outgoing;
 use futures::StreamExt;
+use saved::SavedSessions;
 use serde::Deserialize;
 use serde_json::json;
 use session::{MissingWorkspace, NewSession, TurnRefused, WebSession, Workbench};
@@ -50,9 +52,8 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::broadcast::error::RecvError, task::JoinSet};
 
-/// Sessions that may exist at the same time. Running several in parallel
-/// is the next step; the API and the session table already allow it.
-const MAX_SESSIONS: usize = 1;
+/// Sessions that may exist at the same time, saved ones included.
+const MAX_SESSIONS: usize = 50;
 /// Longest message the page may send.
 const MAX_MESSAGE_BYTES: usize = 100_000;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,7 +91,12 @@ pub struct WebOptions {
     pub token: Option<String>,
     /// Off, anyone who reaches the server may use it without the token.
     pub authenticate: bool,
+    /// Where sessions are kept across restarts; `None` keeps them in memory
+    /// only, so they end with the server.
+    pub sessions_dir: Option<PathBuf>,
 }
+
+pub use saved::default_sessions_dir;
 
 struct WebState {
     harness: Harness,
@@ -102,12 +108,25 @@ struct WebState {
     workspace_root: Option<PathBuf>,
     access: Access,
     sessions: RwLock<BTreeMap<String, Arc<WebSession>>>,
+    /// Where sessions are kept, when they are.
+    saved: Option<Arc<SavedSessions>>,
     /// Serializes session creation, so the limit holds.
     creating: tokio::sync::Mutex<()>,
     turns: Mutex<JoinSet<()>>,
 }
 
 impl WebState {
+    fn workbench(&self) -> Workbench<'_> {
+        Workbench {
+            config: &self.config,
+            harness: &self.harness,
+            mcp: &self.mcp,
+            user: &self.user,
+            default_workspace: &self.default_workspace,
+            workspace_root: self.workspace_root.as_deref(),
+        }
+    }
+
     fn session(&self, id: &str) -> Option<Arc<WebSession>> {
         self.sessions
             .read()
@@ -166,6 +185,11 @@ pub async fn serve(
             options.workspace.display()
         );
     }
+    let saved = options
+        .sessions_dir
+        .as_deref()
+        .map(|dir| SavedSessions::new(dir, &options.user).map(Arc::new))
+        .transpose()?;
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to listen on {address}"))?;
@@ -179,9 +203,11 @@ pub async fn serve(
         default_workspace,
         access: Access::new(token, local.port()),
         sessions: RwLock::default(),
+        saved,
         creating: tokio::sync::Mutex::new(()),
         turns: Mutex::new(JoinSet::new()),
     });
+    restore_sessions(&state).await;
     println!(
         "{}\nCtrl+C stops the server.",
         startup_message(local, state.access.token())
@@ -223,6 +249,41 @@ pub async fn serve(
         turns.abort_all();
     }
     served
+}
+
+/// Open the saved sessions again, most recently used first, up to the
+/// limit. A session that cannot be opened (its folder is gone, or its
+/// endpoint changed) is reported and left on disk.
+async fn restore_sessions(state: &WebState) {
+    let Some(saved) = &state.saved else {
+        return;
+    };
+    let list = saved.list();
+    let mut restored = 0;
+    for meta in list.into_iter().take(MAX_SESSIONS) {
+        let id = meta.id.clone();
+        match WebSession::open(
+            state.workbench(),
+            meta.request.clone(),
+            Some(Arc::clone(saved)),
+            Some(meta),
+        )
+        .await
+        {
+            Ok(session) => {
+                restored += 1;
+                state
+                    .sessions
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(id, session);
+            }
+            Err(error) => eprintln!("warning: cannot restore web session {id}: {error:#}"),
+        }
+    }
+    if restored > 0 {
+        println!("ano web: restored {restored} saved sessions");
+    }
 }
 
 /// Where to open the UI. A browser on this machine needs no token; other
@@ -424,12 +485,14 @@ async fn options(State(state): State<Arc<WebState>>) -> Response {
     .into_response()
 }
 
+/// The sessions, most recently used first.
 async fn list_sessions(State(state): State<Arc<WebState>>) -> Response {
-    let sessions: Vec<_> = state
+    let mut sessions: Vec<_> = state
         .sessions()
         .iter()
         .map(|session| session.status())
         .collect();
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.info.updated_at_unix));
     Json(sessions).into_response()
 }
 
@@ -441,18 +504,10 @@ async fn create_session(
     if state.sessions().len() >= MAX_SESSIONS {
         return error_response(
             StatusCode::CONFLICT,
-            "only one session can be open for now; end the current session first",
+            &format!("{MAX_SESSIONS} sessions are open; delete one first"),
         );
     }
-    let bench = Workbench {
-        config: &state.config,
-        harness: &state.harness,
-        mcp: &state.mcp,
-        user: &state.user,
-        default_workspace: &state.default_workspace,
-        workspace_root: state.workspace_root.as_deref(),
-    };
-    match WebSession::open(bench, request).await {
+    match WebSession::open(state.workbench(), request, state.saved.clone(), None).await {
         Ok(session) => {
             let status = session.status();
             state
@@ -498,6 +553,9 @@ async fn delete_session(State(state): State<Arc<WebState>>, Path(id): Path<Strin
     match removed {
         Some(session) => {
             session.end().await;
+            if let Err(error) = session.forget() {
+                eprintln!("warning: {error:#}");
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         None => session_not_found(),

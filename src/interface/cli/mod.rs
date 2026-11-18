@@ -328,6 +328,20 @@ struct WebArgs {
         help = "Let sessions choose any folder as their working folder, not only --workspace and the folders inside it"
     )]
     allow_any_workspace: bool,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "no_save",
+        help = "Where sessions are kept across restarts (defaults to web-sessions in the OS data directory)"
+    )]
+    sessions_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Keep sessions in memory only, so they end with the server"
+    )]
+    no_save: bool,
 }
 
 #[derive(Debug, Args)]
@@ -523,6 +537,16 @@ async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegis
         token: std::env::var(web::TOKEN_ENV).ok(),
         authenticate: !args.no_auth,
         any_workspace: args.allow_any_workspace,
+        sessions_dir: if args.no_save {
+            None
+        } else {
+            Some(match args.sessions_dir {
+                Some(dir) => dir,
+                None => web::default_sessions_dir().context(
+                    "cannot find the OS data directory; pass --sessions-dir or --no-save",
+                )?,
+            })
+        },
     };
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = web::serve(config, Arc::clone(&mcp), registry, options).await;
