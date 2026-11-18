@@ -11,6 +11,7 @@ mod history;
 mod mcp;
 mod memory;
 mod model;
+mod objectives;
 mod output;
 mod preset;
 mod prompt;
@@ -99,6 +100,8 @@ enum Command {
     Character(character::CharacterArgs),
     /// List, add, and forget the facts ano remembers about you.
     Memory(memory::MemoryArgs),
+    /// List, add, and track your long-term objectives.
+    Objectives(objectives::ObjectivesArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -460,6 +463,7 @@ pub async fn run() -> Result<()> {
         Command::Skills(args) => skills::run(&config, &cli.user, args),
         Command::Character(args) => character::run(&config, &cli.user, args),
         Command::Memory(args) => memory::run(&config, &cli.user, args),
+        Command::Objectives(args) => objectives::run(&config, &cli.user, args),
     }
 }
 

@@ -1,6 +1,6 @@
 # エージェントの実行モデル
 
-`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶について説明します。
+`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶・目標について説明します。
 
 - [実行ループと上限](#実行ループと上限)
 - [回答のストリーミング](#回答のストリーミング)
@@ -15,6 +15,7 @@
 - [スキル（skill_read / skill_save）](#スキルskill_read--skill_save)
 - [キャラクター（character_update）](#キャラクターcharacter_update)
 - [記憶（memory_save / memory_forget）](#記憶memory_save--memory_forget)
+- [目標（objective_set / objective_log / objective_read）](#目標objective_set--objective_log--objective_read)
 
 ## 実行ループと上限
 
@@ -352,4 +353,37 @@ ano memory forget 2 5           # 一覧の番号で削除
 - **第三者の入力では使いません。** [自動化](automation.md)で信頼できないイベント（`trust = "untrusted"`）から始まった作業には、記憶を載せず、`memory_save`・`memory_forget` も使わせません。Issue などに埋め込まれた指示で、ユーザーについての情報を外へ送らせないためです。同じ理由で、過去の会話を読む `history_*`（[chronotope の会話履歴](chronotope-history.md)）と、以後の実行に残るものを書く `character_update`・`skill_save` も使わせません。
 - `memory_save` と `memory_forget` は `tool_search` を経ずに常に公開します。`allowed_tools` を指定した環境では `memory_*` を加えてください。
 - 会話の途中で保存した事実は、tool の結果としてモデルに伝わり、instructions に載るのは次の会話からです。
+
+## 目標（objective_set / objective_log / objective_read）
+
+目標は、ユーザーが数週間から数か月かけて取り組むこと（習慣・貯金・学習など）と、その進捗の記録です。会話がまたがっても続き、エージェントは進んでいる目標を踏まえて次の一歩を提案し、報告された進捗を記録します。`[objectives] enabled = true` で有効になります。
+
+1回の実行の完了条件である[ゴール](#ゴールと完了条件)（`--goal`・`/goal`）とは別のものです。ゴールはその作業が終わったかを確かめるための条件で、目標は作業をまたいで追いかけるものです。
+
+```toml
+[objectives]
+enabled = true
+# dir = "~/notes/ano-objectives"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**中身。** 各目標は、id（`o1` のように振られ、消しても使い回しません）、タイトル、カテゴリ（health・money などの自由な一語）、理由、状態（`active`・`paused`・`done`・`dropped`）、次の一歩、期日、数値の目標（値と単位）、進捗の記録（日時・一文・そのときの値）を持ちます。
+
+```sh
+ano objectives                                                    # 進行中と保留中の一覧（--all で終わったものも）
+ano objectives add "貯金" --category money --target 100000 --unit 円 --due 2026-12-31
+ano objectives log o1 "今月は3万円貯めた" --value 30000             # 進捗の記録
+ano objectives set o1 --next-step "スマホのプランを見直す"           # 一部の変更
+ano objectives set o1 --status done
+ano objectives show o1                                            # 進捗の記録を含めて表示
+ano objectives remove o1
+```
+
+**参照。** 実行の開始時に、進行中（`active`）の目標を、更新の新しい順に1行ずつ `# Objectives` として載せます（合計 3 KiB まで）。各行には、数値の目標に対する今の値、期日、次の一歩、最後の進捗を含めます。全体や進捗の記録は `objective_read` で読めます。
+
+**作成と記録。** ユーザーが時間をかけて達成したいことを話すと、エージェントは目標にすることを提案し、理由や目標の数値・日付をいくつか質問して具体的にし、最初の一歩を添えて `objective_set` で作ります。進捗を報告されたら `objective_log` で記録します（数値の目標があれば、増えた分ではなくその時点の値を記録します）。
+
+- **作成と変更（`objective_set`）には承認が必要です。** 目標は以後のすべての実行に載るためです。進捗の記録（`objective_log`）と読み取り（`objective_read`）は承認なしで行います。承認モードが `deny` の実行では、作成と変更についての指示を省きます。
+- **第三者の入力では使いません。** 信頼できないイベントから始まった[自動化](automation.md)の作業には、目標を載せず、`objective_*` も使わせません。
+- 保存先は `<dir>/<ユーザー>/objectives.json` です（JSON。目標は 100 件、進捗は目標ごとに新しい 200 件まで）。`dir` を省略した場合の場所は、macOS は `~/Library/Application Support/ano/objectives`、Linux は `$XDG_DATA_HOME/ano/objectives`（既定 `~/.local/share/ano/objectives`）、Windows は `%APPDATA%\ano\data\objectives` です。
+- `objective_*` は `tool_search` を経ずに常に公開します。`allowed_tools` を指定した環境では `objective_*` を加えてください。`objective_read` を使えない実行には目標を載せません。
 

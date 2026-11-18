@@ -27,6 +27,7 @@ use crate::{
     infrastructure::{
         character::CharacterSettings,
         chronotope::HistorySettings,
+        objectives::ObjectiveSettings,
         openai::{ApiSettings, ProviderSettings},
         skills::SkillSettings,
         user_memory::MemorySettings,
@@ -136,6 +137,8 @@ pub struct AppConfig {
     pub character: CharacterSettings,
     /// Facts about the user that conversations save and later runs read.
     pub memory: MemorySettings,
+    /// The user's long-term objectives and the progress toward them.
+    pub objectives: ObjectiveSettings,
 }
 
 impl AppConfig {
@@ -213,6 +216,9 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(dir) = &mut self.objectives.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid objectives.dir")?;
         }
         if let Some(dir) = &mut self.memory.dir {
             *dir = resolve_path(dir, directory, home).context("invalid memory.dir")?;

@@ -2,7 +2,10 @@
 //! itself, into the settings of one run.
 
 use super::{
-    instructions::{append_character, append_memory, append_project_instructions, append_skills},
+    instructions::{
+        append_character, append_memory, append_objectives, append_project_instructions,
+        append_skills,
+    },
     settings::AgentConfig,
 };
 use crate::{
@@ -12,12 +15,16 @@ use crate::{
         approval::ApprovalMode,
         character::CHARACTER_UPDATE_NAME,
         environment::EnvironmentConfig,
+        objective::{OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
         policy::UserPolicy,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
         tool::ToolContext,
         user_memory::{MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
     },
-    infrastructure::{character::CharacterStore, skills::SkillLibrary, user_memory::MemoryBook},
+    infrastructure::{
+        character::CharacterStore, objectives::ObjectiveBook, skills::SkillLibrary,
+        user_memory::MemoryBook,
+    },
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -168,7 +175,32 @@ impl ExecutionProfile {
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
             SKILL_SAVE_NAME,
+            OBJECTIVE_SET_NAME,
+            OBJECTIVE_LOG_NAME,
+            OBJECTIVE_READ_NAME,
         ]);
+    }
+
+    /// Tell the run about its user's objectives in `book`. Creating and
+    /// changing are mentioned only when `objective_set` is allowed and can
+    /// be approved, recording progress when `objective_log` is allowed.
+    /// Nothing is added when the run keeps out personal context or cannot
+    /// read objectives.
+    pub fn append_objectives(&mut self, book: &ObjectiveBook) -> Result<()> {
+        let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
+        if !self.personal_context || !available(OBJECTIVE_READ_NAME) {
+            return Ok(());
+        }
+        let can_set = available(OBJECTIVE_SET_NAME) && self.approval_mode != ApprovalMode::Deny;
+        let can_log = available(OBJECTIVE_LOG_NAME);
+        let objectives = book.list(&self.context.user_id)?;
+        append_objectives(
+            &mut self.settings.instructions,
+            &objectives,
+            can_set,
+            can_log,
+        );
+        Ok(())
     }
 
     /// Tell the run what `book` remembers about its user. Saving is
@@ -379,8 +411,59 @@ mod tests {
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
             SKILL_SAVE_NAME,
+            OBJECTIVE_SET_NAME,
+            OBJECTIVE_LOG_NAME,
+            OBJECTIVE_READ_NAME,
         ] {
             assert!(untrusted.policy.is_disabled(name), "{name}");
         }
+    }
+
+    #[test]
+    fn instructions_list_active_objectives_and_how_to_help_with_them() {
+        let root = tempfile::tempdir().unwrap();
+        let book = ObjectiveBook::new(root.path());
+        let profile = |policy: UserPolicy, approval_mode| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext {
+                user_id: "default".into(),
+                ..ToolContext::default()
+            },
+            approval_mode,
+            personal_context: true,
+        };
+        let mut empty = profile(UserPolicy::default(), ApprovalMode::Ask);
+        let base = empty.settings.instructions.clone();
+        empty.append_objectives(&book).unwrap();
+        let added = &empty.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Objectives\n"), "{added}");
+        assert!(added.ends_with("No objective is active."), "{added}");
+        assert!(added.contains(OBJECTIVE_SET_NAME) && added.contains(OBJECTIVE_LOG_NAME));
+
+        book.create(
+            "default",
+            &crate::domain::objective::ObjectiveChange {
+                title: Some("Read 12 books".into()),
+                next_step: Some("Pick the first book".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut denied = profile(UserPolicy::default(), ApprovalMode::Deny);
+        denied.append_objectives(&book).unwrap();
+        let added = &denied.settings.instructions[base.len()..];
+        assert!(
+            added.ends_with("\n- [o1] Read 12 books; next: Pick the first book"),
+            "{added}"
+        );
+        assert!(!added.contains(OBJECTIVE_SET_NAME), "{added}");
+        assert!(added.contains(OBJECTIVE_LOG_NAME), "{added}");
+
+        let mut untrusted = profile(UserPolicy::default(), ApprovalMode::Ask);
+        untrusted.without_personal_context();
+        untrusted.append_objectives(&book).unwrap();
+        assert_eq!(untrusted.settings.instructions, base);
     }
 }

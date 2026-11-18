@@ -259,6 +259,15 @@ enabled = false
 # Linux は $XDG_DATA_HOME/ano/memory（既定 ~/.local/share/ano/memory）、Windows は %APPDATA%\ano\data\memory）。
 # dir = "~/notes/ano-memory"
 
+[objectives]
+# ユーザーが時間をかけて取り組む目標（習慣・貯金・学習など）と進捗を記録し、進行中のものを以後の実行に載せます。
+# 既定は無効です。作成と変更は承認が必要で、`ano objectives` で一覧・追加・記録できます。
+# 1回の実行の完了条件である --goal とは別のものです。
+enabled = false
+# 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/objectives、
+# Linux は $XDG_DATA_HOME/ano/objectives（既定 ~/.local/share/ano/objectives）、Windows は %APPDATA%\ano\data\objectives）。
+# dir = "~/notes/ano-objectives"
+
 # Webhook callers and `ano run --environment NAME` select names declared here.
 # Relative workspace paths and MCP cwd paths resolve from this config directory;
 # a leading ~ expands to the home directory. Without a workspace, CLI runs use

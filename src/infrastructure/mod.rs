@@ -16,6 +16,7 @@ pub mod login_shell;
 pub mod mcp;
 pub mod mcp_oauth;
 pub mod memory_store;
+pub mod objectives;
 pub mod openai;
 pub mod project;
 pub mod session_store;
