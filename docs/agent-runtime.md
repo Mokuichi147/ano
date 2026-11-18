@@ -303,7 +303,7 @@ ano character                            # 今のキャラクターと保存先�
 
 会話では「これからはミラと名乗って」「もっと短く話して」のように頼むと、モデルが `character_update` で名前・タグライン・ソウルのうち頼まれた部分を書き換えます。
 
-**保存形式。** `<dir>/<ユーザー>/SOUL.md` に、frontmatter の `name`（64文字以内）と `tagline`（省略可、200文字以内）、本文のソウル（Markdown、4 KiB まで）として保存します。手で編集しても読めます（ほかの frontmatter は無視します）。`dir` を省略した場合の場所はスキルと同じく OS 標準のデータディレクトリ（macOS は `~/Library/Application Support/ano/character`、Linux は `~/.local/share/ano/character`、Windows は `%APPDATA%\ano\data\character`）です。
+**保存形式。** `<dir>/<ユーザー>/SOUL.md` に、frontmatter の `name`（64文字以内）と `tagline`（省略可、200文字以内）、本文のソウル（Markdown、4 KiB まで）として保存します。手で編集しても読めます（ほかの frontmatter は無視します）。`dir` を省略した場合の場所はスキルと同じく OS 標準のデータディレクトリ（macOS は `~/Library/Application Support/ano/character`、Linux は `$XDG_DATA_HOME/ano/character`（既定 `~/.local/share/ano/character`）、Windows は `%APPDATA%\ano\data\character`）です。
 
 ```markdown
 ---
@@ -317,6 +317,8 @@ tagline: 好奇心旺盛な相棒
 **参照。** 実行の開始時に、既定の instructions の後ろ（AGENTS.md とスキル一覧の前）へ `# Character` として名前・タグライン・ソウルを追記します。運用者の instructions を置き換えるのではなく、話し方だけを足します。ソウルは毎回の要求に含まれるため、ローカル AI の小さなコンテキストでも負担にならないよう 4 KiB に制限しています。キャラクターがまだない場合は、作り方だけを伝えます。
 
 - **変更には承認が必要です。** キャラクターは以後のすべての実行で指示として読まれるため、`skill_save` と同じく[承認モード](mcp.md#承認モード)で判定します。`auto` の判定用モデルは、ユーザーが名前・性格・口調の変更を頼んだときだけ許可し、話し方を超えた指示（承認の省略、データの送信など）を含むものは拒否します。モデルにも、文書や tool の出力に書かれていても変えないよう指示しています。承認モードが `deny` の実行では、変更についての指示を省きます。
-- キャラクターは話し方の指定で、何をしてよいかは変えません。運用者の instructions・ユーザーの依頼・承認より優先されず、コード・コミット・ファイル・サブエージェント向けの報告は普段どおりの言葉で書かせます。
+- キャラクターは話し方の指定で、何をしてよいかは変えません。運用者の instructions・ユーザーの依頼・承認より優先されず、ソウルに操作・権限・承認・データの送信についての指示があっても無視するよう伝えています。コード・コミット・ファイル・サブエージェント向けの報告は普段どおりの言葉で書かせます。
+- 承認モードが `allow` の環境では、変更も確認なしに通ります。第三者が書いた文面（Web ページ、Issue、信頼できないリポジトリの `AGENTS.md` など）を扱う環境では `allow` を避けるか、`disabled_tools` に `character_update` を加えてください。
+- 会話の途中で変えた場合、その会話では tool の結果に新しいキャラクターが返り、モデルはそれに従います。instructions に載るのは次の会話（chat・Web・ACP では新しいセッション）からです。
 - `character_update` は `tool_search` を経ずに常に公開します。`allowed_tools` を指定した環境では `character_update` を加えてください。使えない実行でも、キャラクター自体は instructions に載ります。
 - 読み取れない `SOUL.md` は警告を出して無視し、その実行では変更も案内しません。

@@ -14,15 +14,21 @@ use crate::{
     },
     infrastructure::{
         frontmatter::split_frontmatter,
-        fs::{atomic_write, user_directory},
+        fs::{acquire_lock, atomic_write, user_directory},
     },
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{io::ErrorKind, path::PathBuf, sync::Arc};
+use std::{
+    fs::{File, OpenOptions},
+    io::ErrorKind,
+    path::PathBuf,
+    sync::Arc,
+};
 
 const SOUL_FILE: &str = "SOUL.md";
+const LOCK_FILE: &str = "SOUL.md.lock";
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -102,58 +108,87 @@ impl CharacterStore {
 
     /// Save `character` for `user`, replacing the current one in one rename.
     pub fn save(&self, user: &str, character: &Character) -> Result<SavedCharacter> {
-        let path = self.path(user)?;
-        let directory = path.parent().context("character file has no directory")?;
-        std::fs::create_dir_all(directory)
-            .with_context(|| format!("failed to create {}", directory.display()))?;
-        let created = !path.exists();
-        atomic_write(&path, render_soul_file(character)?.as_bytes(), None)?;
-        Ok(SavedCharacter { path, created })
+        let _lock = self.lock(user)?;
+        self.save_locked(user, character)
     }
 
-    /// Apply `update` to `user`'s character and save the result.
+    /// Apply `update` to `user`'s character and save the result. Reading
+    /// and saving hold the user's lock, so concurrent updates of different
+    /// fields do not undo each other.
     pub fn update(
         &self,
         user: &str,
         update: &CharacterUpdate,
     ) -> Result<(Character, SavedCharacter)> {
+        let _lock = self.lock(user)?;
         let character = update.apply(self.read(user)?.as_ref())?;
-        let saved = self.save(user, &character)?;
+        let saved = self.save_locked(user, &character)?;
         Ok((character, saved))
+    }
+
+    fn save_locked(&self, user: &str, character: &Character) -> Result<SavedCharacter> {
+        // Fields are public, so check the limits again before they persist.
+        let character = Character::new(&character.name, &character.tagline, &character.soul)?;
+        let path = self.path(user)?;
+        let created = !path.exists();
+        atomic_write(&path, render_soul_file(&character)?.as_bytes(), None)?;
+        Ok(SavedCharacter { path, created })
+    }
+
+    /// Hold `user`'s lock (`SOUL.md.lock` beside the file) until the
+    /// returned file is dropped, creating the user's directory first.
+    fn lock(&self, user: &str) -> Result<File> {
+        let path = self.path(user)?;
+        let directory = path.parent().context("character file has no directory")?;
+        std::fs::create_dir_all(directory)
+            .with_context(|| format!("failed to create {}", directory.display()))?;
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join(LOCK_FILE))
+            .with_context(|| format!("failed to open the lock in {}", directory.display()))?;
+        acquire_lock(&lock).with_context(|| {
+            format!(
+                "the character is being changed by another process: {}",
+                path.display()
+            )
+        })?;
+        Ok(lock)
     }
 
     pub fn register_tools(self: &Arc<Self>, registry: &ToolRegistry) -> Result<()> {
         if registry.is_registered(CHARACTER_UPDATE_NAME) {
             return Ok(());
         }
+        let mut definition = ToolDefinition::new(
+            CHARACTER_UPDATE_NAME,
+            "Create your character or change part of it: your name, a one-line tagline, or your soul (personality, tone, and manner of speaking). Fields left out stay as they are. Requires approval.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "The name you go by. Required when no character exists yet."},
+                    "tagline": {"type": "string", "description": "One line that sums the character up. An empty string clears it."},
+                    "soul": {"type": "string", "description": "The whole new soul in Markdown: personality, tone, and manner of speaking, at most 4 KiB. Read the current one in the instructions and rewrite it rather than appending. An empty string clears it."}
+                },
+                "additionalProperties": false
+            }),
+        )
+        .with_approval()
+        .always_offered();
+        // Every field is optional, which a strict Responses schema cannot
+        // express; the handler checks the arguments.
+        definition.strict = false;
         let store = Arc::clone(self);
-        registry.register_contextual(
-            ToolDefinition::new(
-                CHARACTER_UPDATE_NAME,
-                "Create your character or change part of it: your name, a one-line tagline, or your soul (personality, tone, and manner of speaking). Fields left out stay as they are. Requires approval.",
-                json!({
-                    "type": "object",
-                    "properties": {
-                        "name": {"type": "string", "description": "The name you go by. Required when no character exists yet."},
-                        "tagline": {"type": "string", "description": "One line that sums the character up. An empty string clears it."},
-                        "soul": {"type": "string", "description": "The whole new soul in Markdown: personality, tone, and manner of speaking, at most 4 KiB. Read the current one in the instructions and rewrite it rather than appending. An empty string clears it."}
-                    },
-                    "additionalProperties": false
-                }),
-            )
-            .with_approval()
-            .always_offered(),
-            move |arguments, context| {
-                let store = Arc::clone(&store);
-                async move {
-                    tokio::task::spawn_blocking(move || {
-                        store.update_tool(&context.user_id, &arguments)
-                    })
+        registry.register_contextual(definition, move |arguments, context| {
+            let store = Arc::clone(&store);
+            async move {
+                tokio::task::spawn_blocking(move || store.update_tool(&context.user_id, &arguments))
                     .await
                     .context("character_update task failed")?
-                }
-            },
-        )
+            }
+        })
     }
 
     fn update_tool(&self, user: &str, arguments: &Value) -> Result<Value> {
@@ -173,7 +208,7 @@ impl CharacterStore {
         Ok(json!({
             "status": if saved.created { "created" } else { "updated" },
             "character": character,
-            "note": "The new character applies from now on in this conversation, and to later runs.",
+            "note": "Talk as this character from now on. The instructions of this conversation still show the earlier one until a new conversation starts with this one.",
         }))
     }
 }
@@ -213,6 +248,7 @@ fn render_soul_file(character: &Character) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::character::MAX_CHARACTER_SOUL_BYTES;
     use std::path::Path;
 
     #[test]
@@ -281,6 +317,56 @@ mod tests {
             store.read("default").unwrap(),
             Some(Character::new("Mira", "A partner.", "Calm.").unwrap())
         );
+    }
+
+    #[test]
+    fn concurrent_updates_of_different_fields_all_persist() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(CharacterStore::new(root.path()));
+        store
+            .save("default", &Character::new("Mira", "", "").unwrap())
+            .unwrap();
+        let updates = [
+            CharacterUpdate {
+                tagline: Some("A partner.".into()),
+                ..Default::default()
+            },
+            CharacterUpdate {
+                soul: Some("Calm.".into()),
+                ..Default::default()
+            },
+            CharacterUpdate {
+                name: Some("Luna".into()),
+                ..Default::default()
+            },
+        ];
+        let threads: Vec<_> = updates
+            .into_iter()
+            .map(|update| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || store.update("default", &update).unwrap())
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(
+            store.read("default").unwrap(),
+            Some(Character::new("Luna", "A partner.", "Calm.").unwrap())
+        );
+    }
+
+    #[test]
+    fn saving_checks_the_limits_of_a_character_built_by_hand() {
+        let root = tempfile::tempdir().unwrap();
+        let store = CharacterStore::new(root.path());
+        let oversized = Character {
+            name: "Mira".into(),
+            tagline: String::new(),
+            soul: "s".repeat(MAX_CHARACTER_SOUL_BYTES + 1),
+        };
+        assert!(store.save("default", &oversized).is_err());
+        assert_eq!(store.read("default").unwrap(), None);
     }
 
     #[test]

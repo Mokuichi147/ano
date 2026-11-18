@@ -109,12 +109,14 @@ async fn runs_take_on_the_character_and_change_it_with_approval() {
             && instructions.contains("Speaks warmly."),
         "{instructions}"
     );
+    // Every field is optional, which a strict schema cannot express.
     let offered = requests[0]["tools"]
         .as_array()
         .unwrap()
         .iter()
-        .any(|tool| tool["name"] == "character_update");
-    assert!(offered);
+        .find(|tool| tool["name"] == "character_update")
+        .unwrap();
+    assert_eq!(offered["strict"], false, "{offered}");
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(
         result["events"].as_array().unwrap().iter().any(|event| {

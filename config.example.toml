@@ -247,7 +247,7 @@ enabled = false
 # `ano character set --name ...` か、会話で「〜と名乗って」と頼むと作れます（変更は承認が必要）。
 enabled = false
 # 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/character、
-# Linux は ~/.local/share/ano/character、Windows は %APPDATA%\ano\data\character）。
+# Linux は $XDG_DATA_HOME/ano/character（既定 ~/.local/share/ano/character）、Windows は %APPDATA%\ano\data\character）。
 # ユーザーごとに <dir>/<user>/SOUL.md へ保存します。
 # dir = "~/notes/ano-character"
 
