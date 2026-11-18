@@ -53,12 +53,7 @@ fn state() -> WebhookState {
         .environments
         .insert("default".into(), Default::default());
     WebhookState {
-        harness: Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-            character: None,
-        },
+        harness: Harness::bare(ToolRegistry::new()),
         config,
         client: Arc::new(OpenAiClient::new("test", "http://127.0.0.1:1234/v1")),
         connections: Default::default(),

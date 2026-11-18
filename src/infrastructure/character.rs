@@ -14,18 +14,13 @@ use crate::{
     },
     infrastructure::{
         frontmatter::split_frontmatter,
-        fs::{acquire_lock, atomic_write, user_directory},
+        fs::{atomic_write, lock_in, user_directory},
     },
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{
-    fs::{File, OpenOptions},
-    io::ErrorKind,
-    path::PathBuf,
-    sync::Arc,
-};
+use std::{fs::File, io::ErrorKind, path::PathBuf, sync::Arc};
 
 const SOUL_FILE: &str = "SOUL.md";
 const LOCK_FILE: &str = "SOUL.md.lock";
@@ -140,22 +135,12 @@ impl CharacterStore {
     fn lock(&self, user: &str) -> Result<File> {
         let path = self.path(user)?;
         let directory = path.parent().context("character file has no directory")?;
-        std::fs::create_dir_all(directory)
-            .with_context(|| format!("failed to create {}", directory.display()))?;
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(directory.join(LOCK_FILE))
-            .with_context(|| format!("failed to open the lock in {}", directory.display()))?;
-        acquire_lock(&lock).with_context(|| {
+        lock_in(directory, LOCK_FILE).with_context(|| {
             format!(
                 "the character is being changed by another process: {}",
                 path.display()
             )
-        })?;
-        Ok(lock)
+        })
     }
 
     pub fn register_tools(self: &Arc<Self>, registry: &ToolRegistry) -> Result<()> {

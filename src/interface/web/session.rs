@@ -387,12 +387,7 @@ mod tests {
         default_workspace: &Path,
         request: NewSession,
     ) -> Result<(ExecutionProfile, ModelSelection, Vec<ModelRequest>)> {
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-            character: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let bench = Workbench {
             config,
@@ -411,12 +406,7 @@ mod tests {
             AppConfig::parse("[environments.gone]\nworkspace = '/nonexistent-ano-test'").unwrap();
         let root = tempfile::tempdir().unwrap();
         let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-            character: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let resolve = |request: NewSession| {
             let bench = Workbench {
@@ -474,12 +464,7 @@ mod tests {
         std::fs::create_dir(root.path().join("project")).unwrap();
         let outside = tempfile::tempdir().unwrap();
         let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-            character: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let resolve = |workspace_root: Option<&Path>, request: NewSession| {
             let bench = Workbench {

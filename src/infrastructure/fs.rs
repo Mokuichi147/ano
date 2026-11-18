@@ -38,6 +38,24 @@ pub fn display_path(path: &Path) -> String {
     }
 }
 
+/// Create `directory` if needed and hold the lock file `name` in it until
+/// the returned file is dropped. Threads and processes wait for each other
+/// briefly, then give up with an error.
+pub(crate) fn lock_in(directory: &Path, name: &str) -> Result<File> {
+    std::fs::create_dir_all(directory)
+        .with_context(|| format!("failed to create {}", directory.display()))?;
+    let path = directory.join(name);
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    acquire_lock(&lock).with_context(|| format!("{} is held by another writer", path.display()))?;
+    Ok(lock)
+}
+
 /// Replace a file in one rename, leaving the previous file intact on failure.
 /// Temporary files live beside the destination so the rename stays on one volume.
 pub(crate) fn atomic_write(

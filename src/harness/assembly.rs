@@ -37,6 +37,18 @@ impl Harness {
         Self::with_registry(registry, config)
     }
 
+    /// A harness with only the tools of `registry`: no raw history, skills,
+    /// or character. For tests that build their own.
+    #[cfg(test)]
+    pub(crate) fn bare(registry: ToolRegistry) -> Self {
+        Self {
+            registry,
+            history: None,
+            skills: None,
+            character: None,
+        }
+    }
+
     /// Set up the raw history and skills that `config` enables, adding their
     /// tools to `registry`, which holds the other tools. The raw history
     /// needs its token, so callers set it up only once the rest of a command

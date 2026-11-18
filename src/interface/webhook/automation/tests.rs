@@ -156,12 +156,7 @@ async fn setup_with(
         context_window: None,
     });
     let state = Arc::new(WebhookState {
-        harness: Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-            character: None,
-        },
+        harness: Harness::bare(ToolRegistry::new()),
         config,
         client: api.clone(),
         connections: Default::default(),

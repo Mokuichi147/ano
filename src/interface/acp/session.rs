@@ -650,12 +650,7 @@ mod tests {
         options: &AcpOptions,
         cwd: &Path,
     ) -> Result<(ExecutionProfile, ModelSelection, Vec<ModelRequest>)> {
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-            character: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let bench = Workbench {
             config,

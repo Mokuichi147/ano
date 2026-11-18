@@ -100,12 +100,7 @@ impl Server {
             .unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let state = Arc::new(WebState {
-            harness: Harness {
-                registry,
-                history: None,
-                skills: None,
-                character: None,
-            },
+            harness: Harness::bare(registry),
             config,
             mcp: Arc::new(McpPool::new(Vec::new())),
             user: "default".into(),
