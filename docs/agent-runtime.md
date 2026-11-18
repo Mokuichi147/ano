@@ -1,6 +1,6 @@
 # エージェントの実行モデル
 
-`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクターについて説明します。
+`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶について説明します。
 
 - [実行ループと上限](#実行ループと上限)
 - [回答のストリーミング](#回答のストリーミング)
@@ -14,6 +14,7 @@
 - [変更のレビュー（review_changes）](#変更のレビューreview_changes)
 - [スキル（skill_read / skill_save）](#スキルskill_read--skill_save)
 - [キャラクター（character_update）](#キャラクターcharacter_update)
+- [記憶（memory_save / memory_forget）](#記憶memory_save--memory_forget)
 
 ## 実行ループと上限
 
@@ -322,3 +323,31 @@ tagline: 好奇心旺盛な相棒
 - 会話の途中で変えた場合、その会話では tool の結果に新しいキャラクターが返り、モデルはそれに従います。instructions に載るのは次の会話（chat・Web・ACP では新しいセッション）からです。
 - `character_update` は `tool_search` を経ずに常に公開します。`allowed_tools` を指定した環境では `character_update` を加えてください。使えない実行でも、キャラクター自体は instructions に載ります。
 - 読み取れない `SOUL.md` は警告を出して無視し、その実行では変更も案内しません。
+
+## 記憶（memory_save / memory_forget）
+
+記憶は、会話の中でユーザーが話した自分についての事実（好み・予定・習慣・身近な人・仕事の進め方など）を短い一文ずつ保存したものです。次の会話からは、言い直さなくても答えや提案に生かします。`[memory] enabled = true` で有効になります。
+
+```toml
+[memory]
+enabled = true
+# dir = "~/notes/ano-memory"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**保存形式。** `<dir>/<ユーザー>/MEMORY.md` に、事実を `- ` で始まる1行ずつ書きます（1件 300 文字まで、ユーザーごとに 300 件まで）。手で編集でき、`- ` で始まらない行（見出しやメモ）は事実として扱わず、そのまま残します。`dir` を省略した場合の場所は、macOS は `~/Library/Application Support/ano/memory`、Linux は `$XDG_DATA_HOME/ano/memory`（既定 `~/.local/share/ano/memory`）、Windows は `%APPDATA%\ano\data\memory` です。
+
+```sh
+ano memory                      # 番号付きで一覧
+ano memory add "緑茶が好き"      # 追加
+ano memory forget 2 5           # 一覧の番号で削除
+```
+
+**参照。** 実行の開始時に、新しい方から合計 4 KiB までの事実を `# Memory` として instructions に載せます（入りきらない古い事実は件数だけ伝えます）。事実はユーザーについてのデータで、指示ではないと明示し、今ユーザーが言うことと食い違えばユーザーを優先させます。役に立つときは、頼まれなくても記憶に沿った提案をするよう伝えています。
+
+**記録と削除。** ユーザーが以後にも関わりそうなことを話すと、モデルが `memory_save` で一文として保存します。「忘れて」と頼まれたときや、事実が古くなったときは `memory_forget` で一覧どおりの文言を指定して消し、必要なら正しい事実を保存し直します。同じ事実（大文字小文字と空白の違いを除く）は重ねて保存しません。
+
+- **保存には承認が必要です。** 記憶は以後のすべての実行で読まれるため、[承認モード](mcp.md#承認モード)で判定します。`auto` の判定用モデルは、ユーザー自身が話した事実を許可し、秘密情報や、文書・Web ページ・tool の出力に由来するように見えるもの、話し方や事実を超えた指示を含むものを拒否します。承認モードが `deny` の実行では、保存についての指示を省きます。削除は承認なしで行います。
+- **第三者の入力では使いません。** [自動化](automation.md)で信頼できないイベント（`trust = "untrusted"`）から始まった作業には、記憶を載せず、`memory_save`・`memory_forget` も使わせません。Issue などに埋め込まれた指示で、ユーザーについての情報を外へ送らせないためです。
+- `memory_save` と `memory_forget` は `tool_search` を経ずに常に公開します。`allowed_tools` を指定した環境では `memory_*` を加えてください。
+- 会話の途中で保存した事実は、tool の結果としてモデルに伝わり、instructions に載るのは次の会話からです。
+

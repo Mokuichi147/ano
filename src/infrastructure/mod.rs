@@ -21,3 +21,4 @@ pub mod project;
 pub mod session_store;
 pub mod skills;
 pub mod tools;
+pub mod user_memory;

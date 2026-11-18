@@ -18,6 +18,7 @@ use crate::{
     },
     infrastructure::{
         automation::register_builtin_automation, automation_store::AutomationStore, mcp::McpPool,
+        user_memory::MemoryBook,
     },
     interface::webhook::{
         jobs::JobState, post_event, signature::HmacSha256, unix_now, WebhookState,
@@ -130,6 +131,24 @@ async fn setup_with(
     rules: &str,
     triage: &str,
 ) -> Setup {
+    setup_with_harness(
+        registry,
+        extra,
+        rules,
+        triage,
+        Harness::bare(ToolRegistry::new()),
+    )
+    .await
+}
+
+/// `setup_with`, with the agents built by `harness`.
+async fn setup_with_harness(
+    registry: &AutomationRegistry,
+    extra: &str,
+    rules: &str,
+    triage: &str,
+    harness: Harness,
+) -> Setup {
     let (url, received) = notifier_server().await;
     let settings: AutomationSettings = toml::from_str(&format!(
         "[sources.reports]\nkind = 'webhook'\ntrust = 'trusted'\n\n[notifiers.phone]\nkind = 'webhook'\nurl = '{url}'\n\n{extra}\n\n{rules}"
@@ -156,7 +175,7 @@ async fn setup_with(
         context_window: None,
     });
     let state = Arc::new(WebhookState {
-        harness: Harness::bare(ToolRegistry::new()),
+        harness,
         config,
         client: api.clone(),
         connections: Default::default(),
@@ -304,6 +323,77 @@ async fn runs_tell_the_user_through_notify_user_and_on_completion() {
     let input = first["input"].to_string();
     assert!(input.contains("Read the report and notify me"), "{input}");
     assert!(input.contains("DAU: 700"), "{input}");
+}
+
+/// Runs started by the user's own reports see what is remembered about the
+/// user; runs started by text a third party wrote see neither the memory
+/// nor the tools that change it.
+#[tokio::test]
+async fn only_runs_of_trusted_events_see_the_memory() {
+    let memory = tempfile::tempdir().unwrap();
+    let book = Arc::new(MemoryBook::new(memory.path()));
+    book.save("default", "Reads reports on Monday mornings.")
+        .unwrap();
+    let registry = ToolRegistry::new();
+    book.register_tools(&registry).unwrap();
+    let mut harness = Harness::bare(registry);
+    harness.memory = Some(book);
+    let setup = setup_with_harness(
+        &builtin(),
+        "[sources.posted]\nkind = 'webhook'",
+        "[[rules]]\nname = 'weekly'\naction = 'run'\ntask = 'Summarize it.'\nenvironment = 'coding'\nnotify = ['phone']\nnotify_on = ['completed']",
+        "unused",
+        harness,
+    )
+    .await;
+    for (source, title) in [("reports", "Own report"), ("posted", "Posted report")] {
+        let (status, _) = post_signed(
+            &setup.state,
+            source,
+            json!({"kind": "report", "key": title, "title": title, "body": "DAU: 700"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let jobs = setup.state.jobs.read().await;
+            if jobs.len() == 2 && jobs.values().all(|job| job.snapshot.status.is_finished()) {
+                return;
+            }
+            drop(jobs);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the jobs did not finish");
+
+    let calls = setup.api.agent_calls.lock().unwrap();
+    let job = |title: &str| {
+        calls
+            .iter()
+            .find(|call| call["input"].to_string().contains(title))
+            .unwrap()
+            .clone()
+    };
+    let offers = |call: &Value, name: &str| {
+        call["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == name)
+    };
+    let own = job("Own report");
+    let instructions = own["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("- Reads reports on Monday mornings."),
+        "{instructions}"
+    );
+    assert!(offers(&own, "memory_forget"));
+    let third_party = job("Posted report");
+    let instructions = third_party["instructions"].as_str().unwrap();
+    assert!(!instructions.contains("# Memory"), "{instructions}");
+    assert!(!offers(&third_party, "memory_save") && !offers(&third_party, "memory_forget"));
 }
 
 #[tokio::test]

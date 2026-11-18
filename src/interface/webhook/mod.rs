@@ -27,6 +27,7 @@ use crate::{
     },
     config::AppConfig,
     domain::{
+        automation::Trust,
         plan::{RunOutcome, TaskGoal},
         text::cut,
     },
@@ -722,6 +723,11 @@ async fn execute_job(
         if trigger.rule.allows_notify_user(&trigger.event) {
             instructions.push(' ');
             instructions.push_str(NOTIFY_INSTRUCTIONS);
+        }
+        // Text a third party wrote could ask the agent to send what it
+        // knows about the user somewhere.
+        if trigger.event.trust != Trust::Trusted {
+            profile.without_personal_context();
         }
     }
     let base = [state.config.environment_request(&spec.environment)?];

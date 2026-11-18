@@ -2,7 +2,7 @@
 //! itself, into the settings of one run.
 
 use super::{
-    instructions::{append_character, append_project_instructions, append_skills},
+    instructions::{append_character, append_memory, append_project_instructions, append_skills},
     settings::AgentConfig,
 };
 use crate::{
@@ -15,8 +15,9 @@ use crate::{
         policy::UserPolicy,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
         tool::ToolContext,
+        user_memory::{MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
     },
-    infrastructure::{character::CharacterStore, skills::SkillLibrary},
+    infrastructure::{character::CharacterStore, skills::SkillLibrary, user_memory::MemoryBook},
 };
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -32,6 +33,9 @@ pub struct ExecutionProfile {
     pub policy: UserPolicy,
     pub context: ToolContext,
     pub approval_mode: ApprovalMode,
+    /// Whether the run may see what is known about the user, such as their
+    /// memory. Off for runs started by content that third parties wrote.
+    pub personal_context: bool,
 }
 
 /// What a run that names no configured environment may do, as its command
@@ -69,6 +73,7 @@ impl ExecutionProfile {
                 checks: Default::default(),
             },
             approval_mode: permissions.approval_mode.unwrap_or(base.approval_mode),
+            personal_context: true,
         }
     }
 
@@ -119,6 +124,7 @@ impl ExecutionProfile {
                 checks: environment.checks.clone(),
             },
             approval_mode: environment.effective_approval_mode(),
+            personal_context: true,
         }
     }
 
@@ -143,6 +149,37 @@ impl ExecutionProfile {
             can_update,
         );
         problem
+    }
+
+    /// Keep what is known about the user out of this run: its memory, and
+    /// the tools that read or change it. For runs started by content that
+    /// third parties wrote, which could ask the agent to send it somewhere.
+    pub fn without_personal_context(&mut self) {
+        self.personal_context = false;
+        self.policy = self
+            .policy
+            .with_extra_disabled([MEMORY_SAVE_NAME, MEMORY_FORGET_NAME]);
+    }
+
+    /// Tell the run what `book` remembers about its user. Saving is
+    /// mentioned only when `memory_save` is allowed and can be approved,
+    /// forgetting when `memory_forget` is allowed. Nothing is added when the
+    /// run keeps out personal context.
+    pub fn append_memory(&mut self, book: &MemoryBook) -> Result<()> {
+        if !self.personal_context {
+            return Ok(());
+        }
+        let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
+        let can_save = available(MEMORY_SAVE_NAME) && self.approval_mode != ApprovalMode::Deny;
+        let can_forget = available(MEMORY_FORGET_NAME);
+        let facts = book.facts(&self.context.user_id)?;
+        append_memory(
+            &mut self.settings.instructions,
+            &facts,
+            can_save,
+            can_forget,
+        );
+        Ok(())
     }
 
     /// Tell the run about its user's skills in `library`, when it may read
@@ -195,6 +232,7 @@ mod tests {
                 ..ToolContext::default()
             },
             approval_mode,
+            personal_context: true,
         };
 
         let mut run = profile(UserPolicy::default(), ApprovalMode::Ask);
@@ -233,6 +271,7 @@ mod tests {
                 ..ToolContext::default()
             },
             approval_mode,
+            personal_context: true,
         };
 
         // Without a character, the run only learns how to create one.
@@ -278,5 +317,50 @@ mod tests {
         let mut broken = profile("broken", UserPolicy::default(), ApprovalMode::Ask);
         assert!(broken.append_character(&store).is_some());
         assert_eq!(broken.settings.instructions, base);
+    }
+
+    #[test]
+    fn instructions_list_remembered_facts_unless_personal_context_is_kept_out() {
+        let root = tempfile::tempdir().unwrap();
+        let book = MemoryBook::new(root.path());
+        let profile = |policy: UserPolicy, approval_mode| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext {
+                user_id: "default".into(),
+                ..ToolContext::default()
+            },
+            approval_mode,
+            personal_context: true,
+        };
+
+        let mut empty = profile(UserPolicy::default(), ApprovalMode::Ask);
+        let base = empty.settings.instructions.clone();
+        empty.append_memory(&book).unwrap();
+        let added = &empty.settings.instructions[base.len()..];
+        assert!(
+            added.contains("# Memory\n") && added.ends_with("Nothing is remembered yet."),
+            "{added}"
+        );
+        assert!(
+            added.contains(MEMORY_SAVE_NAME) && added.contains(MEMORY_FORGET_NAME),
+            "{added}"
+        );
+
+        book.save("default", "Prefers green tea.").unwrap();
+        let mut run = profile(UserPolicy::default(), ApprovalMode::Deny);
+        run.append_memory(&book).unwrap();
+        let added = &run.settings.instructions[base.len()..];
+        assert!(added.ends_with("\n- Prefers green tea."), "{added}");
+        assert!(!added.contains(MEMORY_SAVE_NAME), "{added}");
+        assert!(added.contains(MEMORY_FORGET_NAME), "{added}");
+
+        let mut untrusted = profile(UserPolicy::default(), ApprovalMode::Ask);
+        untrusted.without_personal_context();
+        untrusted.append_memory(&book).unwrap();
+        assert_eq!(untrusted.settings.instructions, base);
+        assert!(untrusted.policy.is_disabled(MEMORY_SAVE_NAME));
+        assert!(untrusted.policy.is_disabled(MEMORY_FORGET_NAME));
     }
 }

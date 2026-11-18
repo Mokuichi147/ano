@@ -11,7 +11,7 @@ use crate::{
     config::AppConfig,
     infrastructure::{
         character::CharacterStore, chronotope::Chronotope, project::read_project_instructions,
-        skills::SkillLibrary, tools::register_builtin_tools,
+        skills::SkillLibrary, tools::register_builtin_tools, user_memory::MemoryBook,
     },
 };
 use anyhow::Result;
@@ -20,12 +20,13 @@ use std::sync::Arc;
 /// The tools and stores the agents of one process share.
 #[derive(Clone)]
 pub struct Harness {
-    /// The built-in tools, with those of the raw history, skills, and the
-    /// character when they are enabled.
+    /// The built-in tools, with those of the raw history, skills, the
+    /// character, and memory when they are enabled.
     pub registry: ToolRegistry,
     pub history: Option<Arc<Chronotope>>,
     pub skills: Option<Arc<SkillLibrary>>,
     pub character: Option<Arc<CharacterStore>>,
+    pub memory: Option<Arc<MemoryBook>>,
 }
 
 impl Harness {
@@ -46,6 +47,7 @@ impl Harness {
             history: None,
             skills: None,
             character: None,
+            memory: None,
         }
     }
 
@@ -57,24 +59,32 @@ impl Harness {
         let history = Chronotope::from_settings(&config.history, &registry)?;
         let skills = SkillLibrary::from_settings(&config.skills, &registry)?;
         let character = CharacterStore::from_settings(&config.character, &registry)?;
+        let memory = MemoryBook::from_settings(&config.memory, &registry)?;
         Ok(Self {
             registry,
             history,
             skills,
             character,
+            memory,
         })
     }
 
-    /// Append the user's character, the project instructions of the
-    /// workspace (such as `AGENTS.md`), and the list of the user's skills to
-    /// the instructions of `profile`. It reads files, so call it off the
+    /// Append the user's character and memory, the project instructions of
+    /// the workspace (such as `AGENTS.md`), and the list of the user's skills
+    /// to the instructions of `profile`. It reads files, so call it off the
     /// async runtime where that matters. Returns warnings about the files
-    /// that were left out: a broken character or skills.
+    /// that were left out: a broken character, an unreadable memory, or
+    /// skills.
     pub fn add_instructions(&self, profile: &mut ExecutionProfile) -> Result<Vec<String>> {
         let mut warnings = Vec::new();
         if let Some(character) = &self.character {
             if let Some(problem) = profile.append_character(character) {
                 warnings.push(format!("ignored the character: {problem}"));
+            }
+        }
+        if let Some(memory) = &self.memory {
+            if let Err(error) = profile.append_memory(memory) {
+                warnings.push(format!("left out the memory: {error:#}"));
             }
         }
         if let Some(workspace) = &profile.context.workspace {
@@ -145,6 +155,7 @@ mod tests {
             history: None,
             skills: Some(Arc::new(library)),
             character: Some(Arc::new(store)),
+            memory: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {
@@ -157,6 +168,7 @@ mod tests {
                 ..Default::default()
             },
             approval_mode: ApprovalMode::Ask,
+            personal_context: true,
         };
 
         let problems = harness.add_instructions(&mut profile).unwrap();
@@ -186,6 +198,7 @@ mod tests {
             history: None,
             skills: None,
             character: Some(Arc::new(CharacterStore::new(characters.path()))),
+            memory: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {
@@ -197,6 +210,7 @@ mod tests {
                 ..Default::default()
             },
             approval_mode: ApprovalMode::Ask,
+            personal_context: true,
         };
 
         let warnings = harness.add_instructions(&mut profile).unwrap();

@@ -13,6 +13,7 @@
 | `ano automation list` / `ano automation notify NAME [MESSAGE]` | 自動化のソース・ルール・通知先を表示し、通知先へテストを送ります（[`ano automation`](automation.md#ano-automation)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](chronotope-history.md)） |
 | `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](agent-runtime.md#スキルskill_read--skill_save)） |
+| `ano memory` / `ano memory add` / `ano memory forget` | 記憶した事実を番号付きで一覧し、追加・削除します（[記憶](agent-runtime.md#記憶memory_save--memory_forget)） |
 | `ano character` / `ano character set` | キャラクターを表示し、`set --name`・`--tagline`・`--soul`（`--soul-file`）で作成・変更します（[キャラクター](agent-runtime.md#キャラクターcharacter_update)） |
 | `ano mcp tools [LABEL]` | MCP server に接続して提供される tool をすべて表示し、設定で有効なものに印を付けます（[tool の確認と有効化](mcp.md#tool-の確認と有効化)） |
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |

@@ -20,3 +20,4 @@ pub mod skill;
 pub mod text;
 pub mod tool;
 pub mod usage;
+pub mod user_memory;

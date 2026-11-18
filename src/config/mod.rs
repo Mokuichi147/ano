@@ -29,6 +29,7 @@ use crate::{
         chronotope::HistorySettings,
         openai::{ApiSettings, ProviderSettings},
         skills::SkillSettings,
+        user_memory::MemorySettings,
     },
     interface::webhook::{AutomationSettings, WebhookSettings},
 };
@@ -133,6 +134,8 @@ pub struct AppConfig {
     pub skills: SkillSettings,
     /// The name and personality the agent takes on with its user.
     pub character: CharacterSettings,
+    /// Facts about the user that conversations save and later runs read.
+    pub memory: MemorySettings,
 }
 
 impl AppConfig {
@@ -210,6 +213,9 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(dir) = &mut self.memory.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid memory.dir")?;
         }
         if let Some(dir) = &mut self.character.dir {
             *dir = resolve_path(dir, directory, home).context("invalid character.dir")?;
