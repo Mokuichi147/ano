@@ -41,11 +41,13 @@ fn ano(directory: &std::path::Path) -> Command {
     command
 }
 
-/// A run reads the feed and posts an idea without approval; `ano feed`
-/// lists it, rates it, and marks it done.
+/// A run loads `feed_read` with `tool_search` (it is not offered up front,
+/// to keep requests small), reads the feed, and posts an idea without
+/// approval; `ano feed` lists it, rates it, and marks it done.
 #[tokio::test]
 async fn runs_post_ideas_that_the_user_rates() {
     let (endpoint, requests) = mock_responses(vec![
+        json!([{"type": "function_call", "call_id": "search", "name": "tool_search", "arguments": "{\"query\":\"feed_read\"}"}]),
         json!([{"type": "function_call", "call_id": "read", "name": "feed_read", "arguments": "{\"limit\":10}"}]),
         json!([{"type": "function_call", "call_id": "post", "name": "feed_post",
                 "arguments": json!({"kind": "idea", "title": "朝の散歩", "body": "よく眠れないと話していたので。", "action": "近所の20分の散歩コースを考えて"}).to_string()}]),
@@ -77,7 +79,16 @@ async fn runs_post_ideas_that_the_user_rates() {
     let requests = requests.lock().unwrap().clone();
     let instructions = requests[0]["instructions"].as_str().unwrap();
     assert!(instructions.contains("# Feed\n"), "{instructions}");
-    let read = requests[1]["input"].to_string();
+    let offered = |turn: usize, name: &str| {
+        requests[turn]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == name)
+    };
+    assert!(offered(0, "feed_post") && !offered(0, "feed_read"));
+    assert!(offered(1, "feed_read"));
+    let read = requests[2]["input"].to_string();
     assert!(read.contains("items"), "{read}");
 
     let listed = ano(directory.path()).args(["feed"]).output().await.unwrap();

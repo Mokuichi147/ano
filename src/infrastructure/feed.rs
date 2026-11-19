@@ -224,8 +224,7 @@ impl Feed {
                         "required": ["limit"],
                         "additionalProperties": false
                     }),
-                )
-                .always_offered(),
+                ),
                 move |arguments, context| {
                     let feed = Arc::clone(&feed);
                     async move {
