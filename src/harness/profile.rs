@@ -18,7 +18,7 @@ use crate::{
         objective::{OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
         policy::UserPolicy,
         skill::{SKILL_READ_NAME, SKILL_SAVE_NAME},
-        tool::ToolContext,
+        tool::{ToolContext, TOOL_SEARCH_NAME},
         user_memory::{MEMORY_FORGET_NAME, MEMORY_SAVE_NAME},
     },
     infrastructure::{
@@ -181,10 +181,18 @@ impl ExecutionProfile {
         ]);
     }
 
+    /// Whether the run can load tools with `tool_search`. The tools that only
+    /// read what a feature keeps are not offered up front, to keep requests
+    /// small, so the instructions mention them only when they can be loaded.
+    fn can_search(&self) -> bool {
+        !self.policy.is_disabled(TOOL_SEARCH_NAME)
+    }
+
     /// Tell the run about its user's objectives in `book`. Creating and
     /// changing are mentioned only when `objective_set` is allowed and can
-    /// be approved, recording progress when `objective_log` is allowed.
-    /// Nothing is added when the run keeps out personal context or cannot
+    /// be approved, recording progress when `objective_log` is allowed, and
+    /// reading the whole list when `objective_read` can be loaded. Nothing
+    /// is added when the run keeps out personal context or cannot
     /// read objectives.
     pub fn append_objectives(&mut self, book: &ObjectiveBook) -> Result<()> {
         let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
@@ -193,12 +201,14 @@ impl ExecutionProfile {
         }
         let can_set = available(OBJECTIVE_SET_NAME) && self.approval_mode != ApprovalMode::Deny;
         let can_log = available(OBJECTIVE_LOG_NAME);
+        let can_read = self.can_search();
         let objectives = book.list(&self.context.user_id)?;
         append_objectives(
             &mut self.settings.instructions,
             &objectives,
             can_set,
             can_log,
+            can_read,
         );
         Ok(())
     }
@@ -441,6 +451,21 @@ mod tests {
         assert!(added.starts_with("\n\n# Objectives\n"), "{added}");
         assert!(added.ends_with("No objective is active."), "{added}");
         assert!(added.contains(OBJECTIVE_SET_NAME) && added.contains(OBJECTIVE_LOG_NAME));
+        assert!(
+            added.contains(&format!(
+                "load {OBJECTIVE_READ_NAME} with {TOOL_SEARCH_NAME}"
+            )),
+            "{added}"
+        );
+        // Without tool_search, objective_read cannot be loaded.
+        let mut unsearchable = profile(
+            UserPolicy::default().with_extra_disabled([TOOL_SEARCH_NAME]),
+            ApprovalMode::Ask,
+        );
+        unsearchable.append_objectives(&book).unwrap();
+        let added = &unsearchable.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Objectives\n"), "{added}");
+        assert!(!added.contains(OBJECTIVE_READ_NAME), "{added}");
 
         book.create(
             "default",

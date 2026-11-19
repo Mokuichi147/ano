@@ -386,5 +386,5 @@ ano objectives remove o1
 - **作成と変更（`objective_set`）には承認が必要です。** 目標は以後のすべての実行に載るためです。進捗の記録（`objective_log`）と読み取り（`objective_read`）は承認なしで行います。承認モードが `deny` の実行では、作成と変更についての指示を省きます。
 - **第三者の入力では使いません。** 信頼できないイベントから始まった[自動化](automation.md)の作業には、目標を載せず、`objective_*` も使わせません。
 - 保存先は `<dir>/<ユーザー>/objectives.json` です（JSON。目標は 100 件、進捗は目標ごとに新しい 200 件まで）。`dir` を省略した場合の場所は、macOS は `~/Library/Application Support/ano/objectives`、Linux は `$XDG_DATA_HOME/ano/objectives`（既定 `~/.local/share/ano/objectives`）、Windows は `%APPDATA%\ano\data\objectives` です。
-- `objective_set` と `objective_log` は `tool_search` を経ずに常に公開します。`objective_read` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます（進行中の目標は instructions に載っているため、ほとんどの会話では不要です）。`allowed_tools` を指定した環境では `objective_*` を加えてください。`objective_read` を使えない実行には目標を載せません。
+- `objective_set` と `objective_log` は `tool_search` を経ずに常に公開します。`objective_read` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます（進行中の目標は instructions に載っているため、ほとんどの会話では不要です。`tool_search` を無効にした実行では、`objective_read` の案内を省きます）。`allowed_tools` を指定した環境では `objective_*` を加えてください。`objective_read` を使えない実行には目標を載せません。
 

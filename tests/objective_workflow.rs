@@ -126,7 +126,12 @@ async fn runs_see_objectives_and_track_progress() {
     assert!(!tools
         .iter()
         .any(|offered| offered["name"] == "objective_read"));
-    assert!(instructions.contains("objective_read"), "{instructions}");
+    // It is listed among the tools tool_search can load.
+    let catalog = instructions
+        .split_once("# Tools you can load\n")
+        .map(|(_, catalog)| catalog)
+        .unwrap_or_else(|| panic!("no tool catalog: {instructions}"));
+    assert!(catalog.contains("objective_read"), "{catalog}");
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(
         result["events"].as_array().unwrap().iter().any(|event| {
