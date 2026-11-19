@@ -425,7 +425,7 @@ task = "記憶にある興味に合う新しい記事を web_fetch で探し、�
 environment = "reader"                  # web_fetch を許し、approval_mode = "auto" の環境
 ```
 
-- `feed_post`（残す）と `feed_read`（最近の項目を評価・済みとともに読む）は承認なしで使えます。残すのはユーザーに見せる項目で、以後の実行の instructions には載せません。`feed_read` で読んだ項目は、作業の中ではデータとして扱います。`feed_post` は `tool_search` を経ずに常に公開し、`feed_read` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます。
+- `feed_post`（残す）と `feed_read`（最近の項目を評価・済みとともに読む）は承認なしで使えます。残すのはユーザーに見せる項目で、以後の実行の instructions には載せません。`feed_read` で読んだ項目は、作業の中ではデータとして扱います。`feed_post` は `tool_search` を経ずに常に公開し、`feed_read` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます（`tool_search` を無効にした実行では、投稿前に読む案内を省きます）。
 - 実行の instructions には、フィードの使い方だけを短く載せます（項目そのものは載せません）。
 - 保存先は `<dir>/<ユーザー>/feed.json` です（新しい 200 件まで）。`ano feed` で一覧、`ano feed rate f3 up`（`down`・`none`）で評価、`ano feed done f3` で済みにできます。
 - 信頼できないイベントから始まった作業では、`feed_*` を使わせません。

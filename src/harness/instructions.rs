@@ -186,10 +186,16 @@ pub fn append_routines(
 
 /// Tell the model about the user's feed: where ideas, articles, and
 /// reports go, and that the user's ratings say what they like.
-pub fn append_feed(instructions: &mut String) {
+pub fn append_feed(instructions: &mut String, can_read: bool) {
     instructions.push_str(&format!(
-        "\n\n# Feed\nThe user has a feed in ano web's home for things to look at later. When the user asks for ideas, suggestions, or articles to read later, or a task tells you to, leave them there with {FEED_POST_NAME}: an idea comes with the request that would carry it out (its action), an article with its URL, and work done on your own as a short report. Before posting, read recent items with {FEED_READ_NAME} to avoid repeats and to follow the user's ratings: more like those rated 1, fewer like those rated -1. Post a few good items rather than many."
+        "\n\n# Feed\nThe user has a feed in ano web's home for things to look at later. When the user asks for ideas, suggestions, or articles to read later, or a task tells you to, leave them there with {FEED_POST_NAME}: an idea comes with the request that would carry it out (its action), an article with its URL, and work done on your own as a short report."
     ));
+    if can_read {
+        instructions.push_str(&format!(
+            " Before posting, load {FEED_READ_NAME} with {TOOL_SEARCH_NAME} and read recent items, to avoid repeats and to follow the user's ratings: more like those rated 1, fewer like those rated -1."
+        ));
+    }
+    instructions.push_str(" Post a few good items rather than many.");
 }
 
 /// Append project instructions read from the workspace. Each source is

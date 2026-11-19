@@ -195,11 +195,13 @@ impl ExecutionProfile {
     }
 
     /// Tell the run about the user's feed, when it may post to it and keeps
-    /// personal context.
+    /// personal context. Reading recent items first is mentioned only when
+    /// `feed_read` can be loaded.
     pub fn append_feed(&mut self) {
         let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
-        if self.personal_context && available(FEED_POST_NAME) && available(FEED_READ_NAME) {
-            append_feed(&mut self.settings.instructions);
+        if self.personal_context && available(FEED_POST_NAME) {
+            let can_read = available(FEED_READ_NAME) && self.can_search();
+            append_feed(&mut self.settings.instructions, can_read);
         }
     }
 
@@ -602,5 +604,38 @@ mod tests {
             "{added}"
         );
         assert!(!added.contains(ROUTINE_CREATE_NAME), "{added}");
+    }
+
+    #[test]
+    fn feed_instructions_mention_reading_only_when_it_can_be_loaded() {
+        let profile = |policy: UserPolicy| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext::default(),
+            approval_mode: ApprovalMode::Ask,
+            personal_context: true,
+        };
+        let mut searchable = profile(UserPolicy::default());
+        let base = searchable.settings.instructions.clone();
+        searchable.append_feed();
+        let added = &searchable.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Feed\n"), "{added}");
+        assert!(
+            added.contains(&format!("load {FEED_READ_NAME} with {TOOL_SEARCH_NAME}")),
+            "{added}"
+        );
+
+        let mut unsearchable =
+            profile(UserPolicy::default().with_extra_disabled([TOOL_SEARCH_NAME]));
+        unsearchable.append_feed();
+        let added = &unsearchable.settings.instructions[base.len()..];
+        assert!(added.contains(FEED_POST_NAME), "{added}");
+        assert!(!added.contains(FEED_READ_NAME), "{added}");
+
+        let mut untrusted = profile(UserPolicy::default());
+        untrusted.without_personal_context();
+        untrusted.append_feed();
+        assert_eq!(untrusted.settings.instructions, base);
     }
 }
