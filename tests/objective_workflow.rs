@@ -113,18 +113,20 @@ async fn runs_see_objectives_and_track_progress() {
             && instructions.contains("\n- [o1] Save money (money); target 100000 yen"),
         "{instructions}"
     );
-    for tool in ["objective_set", "objective_log", "objective_read"] {
-        let offered = requests[0]["tools"]
-            .as_array()
-            .unwrap()
+    let tools = requests[0]["tools"].as_array().unwrap();
+    for tool in ["objective_set", "objective_log"] {
+        let offered = tools
             .iter()
             .find(|offered| offered["name"] == tool)
             .unwrap_or_else(|| panic!("{tool} is not offered"));
         // Optional fields cannot be expressed in a strict schema.
-        if tool != "objective_read" {
-            assert_eq!(offered["strict"], false, "{offered}");
-        }
+        assert_eq!(offered["strict"], false, "{offered}");
     }
+    // Reading is rare and loaded through tool_search, to keep requests small.
+    assert!(!tools
+        .iter()
+        .any(|offered| offered["name"] == "objective_read"));
+    assert!(instructions.contains("objective_read"), "{instructions}");
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(
         result["events"].as_array().unwrap().iter().any(|event| {

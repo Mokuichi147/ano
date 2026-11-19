@@ -272,8 +272,7 @@ impl ObjectiveBook {
                         "required": ["id"],
                         "additionalProperties": false
                     }),
-                )
-                .always_offered(),
+                ),
                 move |arguments, context| {
                     let book = Arc::clone(&book);
                     async move {
