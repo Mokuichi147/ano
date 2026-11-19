@@ -268,8 +268,7 @@ impl Spaces {
                         "required": ["name"],
                         "additionalProperties": false
                     }),
-                )
-                .always_offered(),
+                ),
                 move |arguments, context| {
                     let spaces = Arc::clone(&spaces);
                     async move {
@@ -305,8 +304,7 @@ impl Spaces {
                     "required": ["name", "data"],
                     "additionalProperties": false
                 }),
-            )
-            .always_offered();
+            );
             definition.strict = false;
             registry.register_contextual(definition, move |arguments, context| {
                 let spaces = Arc::clone(&spaces);
