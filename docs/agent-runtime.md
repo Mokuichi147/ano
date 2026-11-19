@@ -445,5 +445,5 @@ enabled = true
 - **隔離。** `/spaces/<name>` は外枠のページで、スペースの中身はその中の iframe（`sandbox="allow-scripts allow-forms allow-modals"`、中身は `/spaces/<name>/frame`）に表示します。中身は CSP の `sandbox` でオリジンを持たないページとして動くので、`ano web` の Cookie も API も使えず、`connect-src 'none'` などで通信と外部からの読み込みも禁じます。外枠の CSP（`default-src 'self'`）が iframe を外部のサイトへ遷移させないので、データを URL に載せて持ち出すこともできません。ポップアップと最上位のページの遷移も許しません。データはサーバーが中身に埋め込み、`</script>` で抜け出せないようにエスケープします。
 - **今の制約。** ページの中で付けたチェックやメモは保存されません（ページを開き直すと戻ります）。記録を残したいものは、会話で頼んでデータを更新させてください。
 - 保存先は `<dir>/<ユーザー>/<name>/`（`index.html`・`data.json`・`space.json`）で、ユーザーごとに 30 件まで、ページは 200 KiB までです。名前は英小文字・数字・ハイフンです。`ano spaces` で一覧、`ano spaces remove <name>` で削除できます。
-- 実行の instructions には、作り方と、ユーザーのスペースの名前と題名を載せます。`space_*` は承認なしで使えます（ページは隔離されるため）。`space_save` は `tool_search` を経ずに常に公開し、`space_read` と `space_data_set` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます。信頼できないイベントから始まった作業では、`space_*` を使わせません。
+- 実行の instructions には、作り方と、ユーザーのスペースの名前と題名を載せます。`space_*` は承認なしで使えます（ページは隔離されるため）。`space_save` は `tool_search` を経ずに常に公開し、`space_read` と `space_data_set` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます。データだけを更新するときに `space_save` でページごと作り直さないよう、instructions で伝えます（`tool_search` を無効にした実行では、既存のスペースを記憶から作り直さないよう伝えます）。信頼できないイベントから始まった作業では、`space_*` を使わせません。
 

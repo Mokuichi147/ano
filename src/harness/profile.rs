@@ -199,22 +199,21 @@ impl ExecutionProfile {
     }
 
     /// Tell the run about the user's spaces in `spaces`, when it may build
-    /// them and keeps personal context.
+    /// them and keeps personal context. Changing existing spaces is
+    /// mentioned only when `space_read` and `space_data_set` can be loaded.
     pub fn append_spaces(&mut self, spaces: &Spaces) -> Result<()> {
         let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
-        if !self.personal_context
-            || ![SPACE_SAVE_NAME, SPACE_READ_NAME, SPACE_DATA_NAME]
-                .iter()
-                .all(|name| available(name))
-        {
+        if !self.personal_context || !available(SPACE_SAVE_NAME) {
             return Ok(());
         }
+        let can_change =
+            available(SPACE_READ_NAME) && available(SPACE_DATA_NAME) && self.can_search();
         let listed: Vec<String> = spaces
             .list(&self.context.user_id)?
             .into_iter()
             .map(|space| format!("{}: {}", space.name, space.title))
             .collect();
-        append_spaces(&mut self.settings.instructions, &listed);
+        append_spaces(&mut self.settings.instructions, &listed, can_change);
         Ok(())
     }
 
@@ -664,5 +663,44 @@ mod tests {
         untrusted.without_personal_context();
         untrusted.append_feed();
         assert_eq!(untrusted.settings.instructions, base);
+    }
+
+    #[test]
+    fn space_instructions_mention_changing_only_when_it_can_be_loaded() {
+        let root = tempfile::tempdir().unwrap();
+        let spaces = Spaces::new(root.path());
+        let profile = |policy: UserPolicy| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext {
+                user_id: "default".into(),
+                ..ToolContext::default()
+            },
+            approval_mode: ApprovalMode::Ask,
+            personal_context: true,
+        };
+        let mut searchable = profile(UserPolicy::default());
+        let base = searchable.settings.instructions.clone();
+        searchable.append_spaces(&spaces).unwrap();
+        let added = &searchable.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Spaces\n"), "{added}");
+        for name in [SPACE_READ_NAME, SPACE_DATA_NAME] {
+            assert!(
+                added.contains(&format!("load {name} with {TOOL_SEARCH_NAME}")),
+                "{added}"
+            );
+        }
+
+        let mut unsearchable =
+            profile(UserPolicy::default().with_extra_disabled([TOOL_SEARCH_NAME]));
+        unsearchable.append_spaces(&spaces).unwrap();
+        let added = &unsearchable.settings.instructions[base.len()..];
+        assert!(added.contains(SPACE_SAVE_NAME), "{added}");
+        assert!(
+            !added.contains(SPACE_READ_NAME) && !added.contains(SPACE_DATA_NAME),
+            "{added}"
+        );
+        assert!(added.contains("cannot read existing spaces"), "{added}");
     }
 }

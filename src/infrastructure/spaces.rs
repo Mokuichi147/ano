@@ -214,7 +214,7 @@ impl Spaces {
             let spaces = Arc::clone(self);
             let mut definition = ToolDefinition::new(
                 SPACE_SAVE_NAME,
-                "Create a space, a small page for the user such as a tracker, planner, or board, or replace one's page. It is shown in ano web, isolated: its scripts cannot connect anywhere and read only their data from window.ANO_SPACE.data.",
+                "Create a space, a small page for the user such as a tracker, planner, or board, or replace one's page. It is shown in ano web, isolated: its scripts cannot connect anywhere and read only their data from window.ANO_SPACE.data. To refresh only the data of an existing space, use space_data_set instead, which keeps its page.",
                 json!({
                     "type": "object",
                     "properties": {

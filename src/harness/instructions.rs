@@ -201,10 +201,19 @@ pub fn append_feed(instructions: &mut String, can_read: bool) {
 
 /// Tell the model about spaces: the user's (`name: title`, most recently
 /// updated first) and how to build and update them.
-pub fn append_spaces(instructions: &mut String, spaces: &[String]) {
+pub fn append_spaces(instructions: &mut String, spaces: &[String], can_change: bool) {
     instructions.push_str(&format!(
-        "\n\n# Spaces\nSpaces are small pages you build for the user, such as a habit tracker, a weekly planner, or a board, shown in ano web. When the user asks for one, build it with {SPACE_SAVE_NAME}: one HTML page with inline CSS and JavaScript that renders window.ANO_SPACE.data and fits a phone screen. It runs isolated: it cannot load or send anything, so put everything it shows in its data. To change one, read it with {SPACE_READ_NAME} first; to refresh what it shows, replace its data with {SPACE_DATA_NAME}."
+        "\n\n# Spaces\nSpaces are small pages you build for the user, such as a habit tracker, a weekly planner, or a board, shown in ano web. When the user asks for one, build it with {SPACE_SAVE_NAME}: one HTML page with inline CSS and JavaScript that renders window.ANO_SPACE.data and fits a phone screen. It runs isolated: it cannot load or send anything, so put everything it shows in its data."
     ));
+    if can_change {
+        instructions.push_str(&format!(
+            " To change an existing space, load {SPACE_READ_NAME} with {TOOL_SEARCH_NAME}, read the space, and save the changed page with {SPACE_SAVE_NAME}. To refresh only what it shows, for example from a scheduled task, load {SPACE_DATA_NAME} with {TOOL_SEARCH_NAME} and replace its data; never rebuild the page with {SPACE_SAVE_NAME} for that, since what the page looked like would be lost."
+        ));
+    } else {
+        instructions.push_str(&format!(
+            " This run cannot read existing spaces, so do not rebuild one with {SPACE_SAVE_NAME} from memory; tell the user to ask in a conversation that can."
+        ));
+    }
     if spaces.is_empty() {
         instructions.push_str("\n\nNo space exists yet.");
         return;
