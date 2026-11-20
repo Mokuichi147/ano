@@ -118,8 +118,13 @@ impl Agent {
         for (_, outcome) in outcomes {
             let outcome = outcome?;
             continuation.extend(outcome.continuation);
-            if outcome.selection.is_some() {
-                selection = outcome.selection;
+            // Searches in one response add up: a model that loads two
+            // capabilities side by side needs both in the next step.
+            if let Some(found) = outcome.selection {
+                match &mut selection {
+                    Some(selected) => ActiveTools::merge(selected, found),
+                    None => selection = Some(found),
+                }
             }
         }
         Ok((continuation, selection))

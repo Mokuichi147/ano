@@ -556,6 +556,38 @@ async fn tool_search_selection_applies_after_the_round() {
 }
 
 #[tokio::test]
+async fn searches_in_one_response_add_up() {
+    let agent = agent(
+        registry_with(&[
+            ("read_file", "Read a file"),
+            ("send_email", "Send an email"),
+        ]),
+        Vec::new(),
+    );
+    let items = vec![
+        json!({"type": "function_call", "call_id": "first", "name": "tool_search", "arguments": "{\"query\": \"read file\"}"}),
+        json!({"type": "function_call", "call_id": "second", "name": "tool_search", "arguments": "{\"query\": \"send email\"}"}),
+    ];
+
+    let (_, selection) = with_scope(&ActiveTools::default(), async |scope| {
+        agent.handle_output_items(&items, scope, None).await
+    })
+    .await
+    .unwrap();
+    let selection = selection.unwrap();
+    assert!(
+        selection.local.contains("read_file"),
+        "{:?}",
+        selection.local
+    );
+    assert!(
+        selection.local.contains("send_email"),
+        "{:?}",
+        selection.local
+    );
+}
+
+#[tokio::test]
 async fn rejects_unselected_calls_and_executes_selected_calls_over_http() {
     let server = mock_responses(vec![
         json!({"id": "unselected", "status": "completed", "output": calls(&["record_action"])}),
@@ -2613,4 +2645,27 @@ fn tool_selection_is_restored_from_the_last_search_only() {
     assert_eq!(active.direct_mcp, ["mcp__web__search".to_string()].into());
     assert_eq!(active.responses_mcp["remote"], ["list"]);
     assert!(ActiveTools::from_history(&[]).local.is_empty());
+
+    // Two searches of one response come back together; a later response's
+    // search replaces them.
+    let call = |id: &str| json!({"type":"function_call","call_id":id,"name":"tool_search","arguments":"{}"});
+    let output = |id: &str, name: &str| json!({"type":"function_call_output","call_id":id,"output":json!({"tools":[{"kind":"local","name":name}]}).to_string()});
+    let mut history = vec![
+        json!({"role":"user","content":"read and send"}),
+        json!({"type":"reasoning","summary":[]}),
+        call("a"),
+        call("b"),
+        output("a", "read_file"),
+        output("b", "send_email"),
+    ];
+    let active = ActiveTools::from_history(&history);
+    assert_eq!(
+        active.local,
+        ["read_file".to_string(), "send_email".to_string()].into()
+    );
+    history.extend([call("c"), output("c", "list_files")]);
+    assert_eq!(
+        ActiveTools::from_history(&history).local,
+        ["list_files".to_string()].into()
+    );
 }

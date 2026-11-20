@@ -20,7 +20,8 @@ const MAX_TOOL_CATALOG_BYTES: usize = 8 * 1024;
 /// followed by '…'.
 const MAX_DESCRIPTION_CHARS: usize = 240;
 
-/// Tools loaded by the most recent `tool_search`.
+/// Tools loaded by the most recent `tool_search`, or by all the searches of
+/// the most recent response that called it.
 #[derive(Default)]
 pub(super) struct ActiveTools {
     pub local: BTreeSet<String>,
@@ -31,30 +32,72 @@ pub(super) struct ActiveTools {
 }
 
 impl ActiveTools {
-    /// The selection of the last `tool_search` in a conversation's history,
-    /// so a new turn can still call the tools that earlier turns loaded.
-    /// Without it the model sees its past calls but not the tools, and may
-    /// announce a capability it can no longer call. Policy and availability
-    /// are checked again when the request's tools are built.
+    /// Add the tools of `other`, as when one response searched twice.
+    pub(super) fn merge(&mut self, other: ActiveTools) {
+        self.local.extend(other.local);
+        self.direct_mcp.extend(other.direct_mcp);
+        for (label, names) in other.responses_mcp {
+            let selected = self.responses_mcp.entry(label).or_default();
+            for name in names {
+                if !selected.contains(&name) {
+                    selected.push(name);
+                }
+            }
+        }
+    }
+
+    /// The selection of the last response that called `tool_search` in a
+    /// conversation's history (all its searches together), so a new turn can
+    /// still call the tools that earlier turns loaded. Without it the model
+    /// sees its past calls but not the tools, and may announce a capability
+    /// it can no longer call. Policy and availability are checked again when
+    /// the request's tools are built.
     pub(super) fn from_history(history: &[Value]) -> Self {
-        let searches: BTreeSet<&str> = history
+        let is_search =
+            |item: &Value| item["type"] == "function_call" && item["name"] == TOOL_SEARCH_NAME;
+        let Some(last) = history.iter().rposition(is_search) else {
+            return Self::default();
+        };
+        // The items of one response sit together, before the outputs of its
+        // calls and the next input.
+        let in_response =
+            |item: &Value| item["type"] != "function_call_output" && item["role"] != "user";
+        let start = history[..last]
             .iter()
-            .filter(|item| item["type"] == "function_call" && item["name"] == TOOL_SEARCH_NAME)
+            .rposition(|item| !in_response(item))
+            .map_or(0, |index| index + 1);
+        let end = history[last..]
+            .iter()
+            .position(|item| !in_response(item))
+            .map_or(history.len(), |index| last + index);
+        let searches: BTreeSet<&str> = history[start..end]
+            .iter()
+            .filter(|item| is_search(item))
             .filter_map(|item| item["call_id"].as_str())
             .collect();
-        let Some(results) = history.iter().rev().find_map(|item| {
+        let mut active = Self::default();
+        for item in &history[end..] {
             if item["type"] != "function_call_output"
                 || !item["call_id"]
                     .as_str()
                     .is_some_and(|id| searches.contains(id))
             {
-                return None;
+                continue;
             }
-            let output: Value = serde_json::from_str(item["output"].as_str()?).ok()?;
-            output["tools"].as_array().cloned()
-        }) else {
-            return Self::default();
-        };
+            let Some(results) = item["output"]
+                .as_str()
+                .and_then(|output| serde_json::from_str::<Value>(output).ok())
+                .and_then(|output| output["tools"].as_array().cloned())
+            else {
+                continue;
+            };
+            active.merge(Self::from_results(&results));
+        }
+        active
+    }
+
+    /// The selection that the results of one search make.
+    fn from_results(results: &[Value]) -> Self {
         let mut active = Self::default();
         for result in results {
             let Some(name) = result["name"].as_str() else {
