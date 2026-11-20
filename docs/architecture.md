@@ -108,6 +108,7 @@ src/
 │   ├── routine.rs          リマインダーと定期作業の検証
 │   ├── feed.rs             フィードの項目（提案・記事・報告）の検証
 │   ├── space.rs            スペースの名前・題名・ページの検証
+│   ├── agenda.rs           予定の候補の tool 名と上限
 │   ├── environment.rs      実行環境と検証コマンドの設定
 │   ├── text.rs             上限付きの文字列の切り詰め
 │   └── github.rs           git remote の URL から GitHub のリポジトリ名を読む
@@ -128,9 +129,9 @@ src/
 │   ├── clock.rs            現在時刻（Unix 秒）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── harness/
-│   ├── mod.rs              Harness（組み込み tool・原文履歴・スキル・キャラクター・記憶・目標・ルーティン・フィード・スペースの登録と、実行ごとの Agent の組み立て）
+│   ├── mod.rs              Harness（組み込み tool・原文履歴・スキル・キャラクター・記憶・目標・ルーティン・フィード・スペース・予定の候補の登録と、実行ごとの Agent の組み立て）
 │   ├── settings.rs         config.toml の [agent]（実行ループの設定と、AGENTS.md・承認・接続先・ロールの設定）
-│   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、キャラクター・記憶・目標・ルーティン・フィード・スペース・AGENTS.md・スキル一覧の追記
+│   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、キャラクター・記憶・目標・ルーティン・フィード・スペース・予定の候補・AGENTS.md・スキル一覧の追記
 │   ├── profile.rs          実行環境（または実行環境を使わない実行の権限）から1回の実行設定を解決（ExecutionProfile）
 │   ├── models.rs           接続先のクライアントと、メインのエージェント・ロールのモデルの解決、会話中のモデルの切り替え
 │   ├── conversation.rs     クライアントがターンごとに進める会話（ano web・ano acp で共有。開始・中断・終了）
@@ -154,6 +155,7 @@ src/
 │   ├── routines.rs         routines.json の読み書き、routine_create・routine_delete、自動化のソース routines
 │   ├── feed.rs             feed.json の読み書きと feed_post・feed_read
 │   ├── spaces.rs           スペースの読み書き、space_save・space_read・space_data_set、データを埋め込んだページ
+│   ├── agenda.rs           agenda_suggest（chronotope-core で話した時刻を基準に予定の時刻を読み、フィードに候補を残す）
 │   ├── frontmatter.rs      YAML frontmatter 付き Markdown の分割（SKILL.md・SOUL.md）
 │   ├── fs.rs               原子的なファイル置き換えと、ユーザーごとのディレクトリ名の検証
 │   ├── automation/         組み込みの自動化の種類（ソース: webhook・schedule、通知先: ntfy・discord・slack・webhook）

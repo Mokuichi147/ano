@@ -98,9 +98,48 @@ impl Feed {
         url: Option<&str>,
         action: Option<&str>,
     ) -> Result<FeedItem> {
+        self.add(user, kind, title, body, url, action, false)
+            .map(|(item, _)| item)
+    }
+
+    /// Add an item for `user` unless one with the same title is there and
+    /// not done yet; then return that one. The flag says whether the item
+    /// was added.
+    pub fn post_once(
+        &self,
+        user: &str,
+        kind: FeedKind,
+        title: &str,
+        body: &str,
+        url: Option<&str>,
+        action: Option<&str>,
+    ) -> Result<(FeedItem, bool)> {
+        self.add(user, kind, title, body, url, action, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &self,
+        user: &str,
+        kind: FeedKind,
+        title: &str,
+        body: &str,
+        url: Option<&str>,
+        action: Option<&str>,
+        once: bool,
+    ) -> Result<(FeedItem, bool)> {
         let (title, body, url, action) = check_item(title, body, url, action)?;
         let _lock = self.lock(user)?;
         let mut file = self.load(user)?;
+        if once {
+            if let Some(item) = file
+                .items
+                .iter()
+                .find(|item| !item.done && item.title == title)
+            {
+                return Ok((item.clone(), false));
+            }
+        }
         file.last_id += 1;
         let item = FeedItem {
             id: format!("f{}", file.last_id),
@@ -119,7 +158,7 @@ impl Feed {
             file.items.drain(..excess);
         }
         self.store(user, &file)?;
-        Ok(item)
+        Ok((item, true))
     }
 
     /// Rate the item `id`: 1, -1, or 0 to clear the rating.

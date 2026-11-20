@@ -2,6 +2,7 @@
 //! session files, the built-in workspace tools, and the sources, state, and
 //! notifiers of automation.
 
+pub mod agenda;
 pub mod automation;
 pub mod automation_store;
 pub mod character;

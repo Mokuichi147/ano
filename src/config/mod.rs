@@ -25,6 +25,7 @@ use crate::{
         settings::AgentConfig,
     },
     infrastructure::{
+        agenda::AgendaSettings,
         character::CharacterSettings,
         chronotope::HistorySettings,
         feed::FeedSettings,
@@ -149,6 +150,9 @@ pub struct AppConfig {
     pub feed: FeedSettings,
     /// Small pages the agent builds for the user, shown in `ano web`.
     pub spaces: SpaceSettings,
+    /// Plans the user mentions in passing, left in the feed as candidates
+    /// for reminders.
+    pub agenda: AgendaSettings,
 }
 
 impl AppConfig {

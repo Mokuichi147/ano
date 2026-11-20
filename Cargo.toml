@@ -49,6 +49,8 @@ ignore = "0.4"
 directories = "6"
 serde_yaml_ng = "0.10"
 croner = "4"
+# The time expressions of the agenda (「来週の金曜15時」), read relative to when they were said.
+chronotope-core = { git = "https://github.com/Mokuichi147/chronotope", rev = "38b3129257be40eb3cff1a34c50579c94d62a939" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

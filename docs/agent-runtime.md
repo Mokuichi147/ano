@@ -18,6 +18,7 @@
 - [目標（objective_set / objective_log / objective_read）](#目標objective_set--objective_log--objective_read)
 - [フィード（feed_post / feed_read）](#フィードfeed_post--feed_read)
 - [スペース（space_save / space_read / space_data_set）](#スペースspace_save--space_read--space_data_set)
+- [予定の候補（agenda_suggest）](#予定の候補agenda_suggest)
 
 ## 実行ループと上限
 
@@ -447,3 +448,37 @@ enabled = true
 - 保存先は `<dir>/<ユーザー>/<name>/`（`index.html`・`data.json`・`space.json`）で、ユーザーごとに 30 件まで、ページは 200 KiB までです。名前は英小文字・数字・ハイフンです。`ano spaces` で一覧、`ano spaces remove <name>` で削除できます。
 - 実行の instructions には、作り方と、ユーザーのスペースの名前と題名を載せます。`space_*` は承認なしで使えます（ページは隔離されるため）。`space_save` は `tool_search` を経ずに常に公開し、`space_read` と `space_data_set` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます。データだけを更新するときに `space_save` でページごと作り直さないよう、instructions で伝えます（`tool_search` を無効にした実行では、既存のスペースを記憶から作り直さないよう伝えます）。信頼できないイベントから始まった作業では、`space_*` を使わせません。
 
+## 予定の候補（agenda_suggest）
+
+会話の中でユーザーがふと口にした予定（「来週の金曜15時に歯医者」「12月3日は友達の結婚式」など）を、リマインダーの候補としてフィードに残します。リマインダーにするかはユーザーがフィードで決めます（「やってみる」で、承認つきの `routine_create` が作ります）。`[agenda] enabled = true` で有効になり、候補を残す先として `[feed]` も有効にしてください（無効だと起動時にエラーになります）。リマインダーを作れるよう `[routines]` も有効にしておくことをおすすめします。
+
+```toml
+[feed]
+enabled = true
+
+[agenda]
+enabled = true
+```
+
+**時刻の読み取り。** モデルは予定の名前と、時刻を**ユーザーの言葉のまま**（「来週の金曜15時」）渡します。ano は [chronotope](chronotope-history.md) の時間表現の解析（`chronotope-core`）で、それを**ユーザーが話した時刻を基準に**、その時点の現地の時刻として読みます。夜に話した「明日」は翌日、先週の会話の「明日」は先週の翌日です。モデルに日付を計算させないので、ローカル AI でも曜日や月末を取り違えません。
+
+- フィードには「`2026-11-27 15:00 歯医者`」のように読み取った日時を題名に付け、本文にユーザーの元の言葉を残します。読み違いがあれば一目でわかります。時刻は「15時」のように言ったときだけ付け、「午後」「15時ごろ」のような幅のある言い方では日付だけにします。
+- 次のものは候補にせず、理由をモデルに返します（モデルは飛ばすか、ユーザーに聞き直します）。日が決まらない言い方（「来月」「そのうち」）、繰り返し（「毎週金曜」。頼まれたら `routine_create` の cron で作ります）、もう過ぎた予定。
+- 同じ題名（日時と名前）の未完了の候補がフィードにあれば、新しく作らずにそれを返します。
+- ユーザー自身が話した予定だけを対象にし、文書・Web ページ・tool の結果に書かれた予定は残しません。`agenda_suggest` は承認なしで使えます（フィードに候補を置くだけで、リマインダーの作成には承認が要るため）。
+- `agenda_suggest` は要求を小さく保つため常には公開せず、モデルが `tool_search` で読み込みます。`tool_search` を無効にした実行では、instructions に案内を載せません。信頼できないイベントから始まった作業では使わせません。
+
+**過去の会話から拾う。** [chronotope の会話履歴](chronotope-history.md)を有効にしていれば、定期実行で、その日の会話から予定を拾い直せます。`said_at` に発言の `received_at` を渡すので、「明日」はその発言の翌日として読まれます。
+
+```toml
+[automation.sources.agenda]
+kind = "schedule"
+cron = "0 21 * * *"
+
+[[automation.rules]]
+name = "agenda"
+sources = ["agenda"]
+action = "run"
+task = "history_search で今日のユーザーの発言（origins: [human]）を読み、日の決まった予定の話があれば agenda_suggest で候補にする。when には発言の中の言い方をそのまま、said_at には発言の received_at を渡す"
+environment = "assistant"
+```
