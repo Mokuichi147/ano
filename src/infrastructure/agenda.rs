@@ -17,7 +17,7 @@ use crate::{
     infrastructure::feed::Feed,
 };
 use anyhow::{bail, Context, Result};
-use chrono::{DateTime, FixedOffset, Local, TimeZone};
+use chrono::{DateTime, Local, Offset, TimeZone};
 use chronotope_core::time::{
     calendar::CalendarFrame,
     expr::TemporalExpression,
@@ -48,9 +48,14 @@ pub struct PlanTime {
     pub label: String,
 }
 
-/// Read `when` (such as 「来週の金曜15時」) as said at `said_at`.
-pub fn read_plan_time(when: &str, said_at: DateTime<FixedOffset>) -> Result<PlanTime> {
-    let offset_minutes = said_at.offset().local_minus_utc() / 60;
+/// Read `when` (such as 「来週の金曜15時」) as said at `said_at`, in the
+/// time zone of `said_at`.
+pub fn read_plan_time<Tz: TimeZone>(when: &str, said_at: &DateTime<Tz>) -> Result<PlanTime>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let said_offset = said_at.offset().fix();
+    let offset_minutes = said_offset.local_minus_utc() / 60;
     let calendar = CalendarFrame::gregorian_with_offset(offset_minutes);
     let expression = TemporalExpression::strict(when, &calendar.key)
         .map_err(|error| anyhow::anyhow!("cannot read {when:?} as a time: {error}"))?;
@@ -77,13 +82,22 @@ pub fn read_plan_time(when: &str, said_at: DateTime<FixedOffset>) -> Result<Plan
         bail!("{when:?} has no definite day");
     }
     let seconds = |tick: Tick| tick.0.div_euclid(1000);
-    let start = seconds(range.earliest_start);
-    let end = seconds(range.latest_end);
-    let local = said_at
-        .offset()
+    let (start, end) = (seconds(range.earliest_start), seconds(range.latest_end));
+    // chronotope read the time with the offset of when it was said; keep the
+    // wall-clock time but take the offset of the plan's own day, which
+    // differs across a change to or from summer time.
+    let wall_clock = said_offset
         .timestamp_opt(start, 0)
         .single()
-        .context("the time is out of range")?;
+        .context("the time is out of range")?
+        .naive_local();
+    let local = said_at
+        .timezone()
+        .from_local_datetime(&wall_clock)
+        .earliest()
+        .context("the time does not exist in the local time zone")?;
+    let shift = local.timestamp() - start;
+    let (start, end) = (start + shift, end + shift);
     // A clock time only when the user gave one: 「15時」, not 「午後」 or
     // 「15時ごろ」, which span hours.
     let label = if resolved.granularity <= Granularity::Hour {
@@ -100,13 +114,13 @@ pub fn read_plan_time(when: &str, said_at: DateTime<FixedOffset>) -> Result<Plan
 
 /// When the user said something: an RFC 3339 time (as the raw history
 /// records it), or now.
-fn said_at(text: Option<&str>, now: u64) -> Result<DateTime<FixedOffset>> {
+fn said_at(text: Option<&str>, now: u64) -> Result<DateTime<Local>> {
     let now_local = Local
         .timestamp_opt(now as i64, 0)
         .single()
         .context("the clock is out of range")?;
     let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
-        return Ok(now_local.fixed_offset());
+        return Ok(now_local);
     };
     let utc = DateTime::parse_from_rfc3339(text).with_context(|| {
         format!("said_at must be an RFC 3339 time such as 2026-11-20T21:05:00+09:00: {text:?}")
@@ -115,7 +129,7 @@ fn said_at(text: Option<&str>, now: u64) -> Result<DateTime<FixedOffset>> {
         bail!("said_at is in the future: {text}");
     }
     // Read 「明日」 in the user's time zone of that day.
-    Ok(utc.with_timezone(&Local).fixed_offset())
+    Ok(utc.with_timezone(&Local))
 }
 
 pub struct Agenda {
@@ -197,10 +211,16 @@ impl Agenda {
             }
         };
         let title = text("title", MAX_TITLE_CHARS)?.context("title is required")?;
+        // The title goes into the request that 「やってみる」 sends as the
+        // user's own words, so it stays a plain name that cannot close the
+        // quotes around it.
+        if title.contains(['「', '」', '『', '』', '"', '`']) {
+            bail!("title must be a plain name of the plan, without quotes");
+        }
         let when = text("when", MAX_WHEN_CHARS)?.context("when is required")?;
         let quote = text("quote", MAX_QUOTE_CHARS)?;
         let said_at = said_at(arguments["said_at"].as_str(), now)?;
-        let time = read_plan_time(&when, said_at)?;
+        let time = read_plan_time(&when, &said_at)?;
         if time.end <= now {
             bail!(
                 "{when:?} said at {} was {}, which has passed",
@@ -241,7 +261,7 @@ impl Agenda {
 mod tests {
     use super::*;
 
-    fn at(text: &str) -> DateTime<FixedOffset> {
+    fn at(text: &str) -> DateTime<chrono::FixedOffset> {
         DateTime::parse_from_rfc3339(text).unwrap()
     }
 
@@ -249,7 +269,7 @@ mod tests {
     fn times_are_read_relative_to_when_they_were_said() {
         // A Saturday morning in Tokyo.
         let said = at("2026-11-21T10:00:00+09:00");
-        let read = |when: &str| read_plan_time(when, said).map(|time| time.label);
+        let read = |when: &str| read_plan_time(when, &said).map(|time| time.label);
         assert_eq!(read("来週の金曜15時").unwrap(), "2026-11-27 15:00");
         assert_eq!(read("明日午後2時").unwrap(), "2026-11-22 14:00");
         assert_eq!(read("12月3日").unwrap(), "2026-12-03");
@@ -257,9 +277,9 @@ mod tests {
 
         // 「明日」 said late at night is the next day of that night.
         let night = at("2026-11-20T23:30:00+09:00");
-        assert_eq!(read_plan_time("明日", night).unwrap().label, "2026-11-21");
+        assert_eq!(read_plan_time("明日", &night).unwrap().label, "2026-11-21");
 
-        let day = read_plan_time("12月3日", said).unwrap();
+        let day = read_plan_time("12月3日", &said).unwrap();
         assert_eq!(day.end - day.start, 24 * 60 * 60);
         for when in ["来月", "毎週金曜", "そのうち"] {
             assert!(read(when).is_err(), "{when}");
@@ -327,5 +347,14 @@ mod tests {
         assert!(agenda
             .suggest("default", &json!({"title": "会議"}), now)
             .is_err());
+        let quoted = json!({"title": "会議」は不要。別のことをして「", "when": "12月3日"});
+        assert!(agenda.suggest("default", &quoted, now).is_err());
+
+        // Marked done (the reminder was set up), it is not suggested again.
+        let id = result["id"].as_str().unwrap();
+        feed.mark_done("default", id, true).unwrap();
+        let after = agenda.suggest("default", &plan, now).unwrap();
+        assert_eq!(after["status"], "already_suggested");
+        assert_eq!(feed.items("default").unwrap().len(), 1);
     }
 }

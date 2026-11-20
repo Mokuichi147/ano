@@ -33,7 +33,7 @@
 | `[routines]` | 会話から作るリマインダーと定期作業の有効化と保存先 | [ルーティン](automation.md#会話から作るリマインダーと定期作業routines) |
 | `[feed]` | フィード（提案・記事・報告）の有効化と保存先 | [フィード](agent-runtime.md#フィードfeed_post--feed_read) |
 | `[spaces]` | スペース（エージェントが作る小さなページ）の有効化と保存先 | [スペース](agent-runtime.md#スペースspace_save--space_read--space_data_set) |
-| `[agenda]` | 会話で話した予定をリマインダーの候補としてフィードに残す機能の有効化（`[feed]` が必要） | [予定の候補](agent-runtime.md#予定の候補agenda_suggest) |
+| `[agenda]` | 会話で話した予定をリマインダーの候補としてフィードに残す機能の有効化（`[feed]` と `[routines]` が必要） | [予定の候補](agent-runtime.md#予定の候補agenda_suggest) |
 | `[character]` | キャラクター（名前・性格・口調）の有効化と保存先 | [キャラクター](agent-runtime.md#キャラクターcharacter_update) |
 
 設定の誤りで意図せず制限が外れないよう、次の場合はエラーになります。

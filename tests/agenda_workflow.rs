@@ -56,7 +56,7 @@ async fn runs_leave_mentioned_plans_as_candidates_in_the_feed() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("config.toml"),
-        "[feed]\nenabled = true\ndir = 'feed'\n[agenda]\nenabled = true\n",
+        "[feed]\nenabled = true\ndir = 'feed'\n[routines]\nenabled = true\ndir = 'routines'\n[agenda]\nenabled = true\n",
     )
     .unwrap();
     let output = tokio::time::timeout(
@@ -107,7 +107,8 @@ async fn runs_leave_mentioned_plans_as_candidates_in_the_feed() {
     );
 }
 
-/// `[agenda]` leaves candidates in the feed, so it needs `[feed]`.
+/// `[agenda]` leaves candidates for reminders in the feed, so it needs
+/// `[feed]` and `[routines]`.
 #[tokio::test]
 async fn the_agenda_without_the_feed_is_a_config_error() {
     let directory = tempfile::tempdir().unwrap();

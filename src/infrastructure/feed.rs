@@ -102,9 +102,9 @@ impl Feed {
             .map(|(item, _)| item)
     }
 
-    /// Add an item for `user` unless one with the same title is there and
-    /// not done yet; then return that one. The flag says whether the item
-    /// was added.
+    /// Add an item for `user` unless one with the same title is still kept,
+    /// done or not; then return that one, so what the user already acted on
+    /// is not suggested again. The flag says whether the item was added.
     pub fn post_once(
         &self,
         user: &str,
@@ -132,11 +132,7 @@ impl Feed {
         let _lock = self.lock(user)?;
         let mut file = self.load(user)?;
         if once {
-            if let Some(item) = file
-                .items
-                .iter()
-                .find(|item| !item.done && item.title == title)
-            {
+            if let Some(item) = file.items.iter().find(|item| item.title == title) {
                 return Ok((item.clone(), false));
             }
         }

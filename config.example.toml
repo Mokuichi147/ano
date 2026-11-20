@@ -294,7 +294,7 @@ enabled = false
 
 [agenda]
 # 会話でふと話した予定（「来週の金曜15時に歯医者」）を、リマインダーの候補としてフィードに残します。
-# 時刻は chronotope の時間表現の解析で、話した時刻を基準に読みます。[feed] も有効にしてください。
+# 時刻は chronotope の時間表現の解析で、話した時刻を基準に読みます。[feed] と [routines] も有効にしてください。
 enabled = false
 
 # Webhook callers and `ano run --environment NAME` select names declared here.

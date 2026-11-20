@@ -295,6 +295,9 @@ impl AppConfig {
         self.agent.validate()?;
         self.webhook.validate()?;
         self.history.validate()?;
+        if self.agenda.enabled && !(self.feed.enabled && self.routines.enabled) {
+            bail!("[agenda] leaves candidates for reminders in the feed; set [feed] enabled = true and [routines] enabled = true");
+        }
         if self.api.timeout_secs == 0 {
             bail!("api.timeout_secs must be greater than zero");
         }
