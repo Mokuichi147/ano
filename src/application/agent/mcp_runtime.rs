@@ -66,7 +66,7 @@ impl McpRuntime {
         let unloaded = self
             .tools()
             .filter(|(other, tool)| {
-                other.config().label == label && !active.direct_mcp.contains(&tool.function_name)
+                other.config().label == label && !active.direct_mcp().contains(&tool.function_name)
             })
             .map(|(_, tool)| tool.name.clone())
             .collect();

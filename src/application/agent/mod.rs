@@ -751,9 +751,11 @@ impl Agent {
             .as_ref()
             .filter(|_| replay)
             .map(|session| {
+                // A new turn starts with one search's worth, the newest,
+                // so earlier turns' tools do not weigh on every request.
                 ActiveTools::from_history(
                     &session.data().history,
-                    loaded_tools_limit(self.settings.tool_discovery_limit),
+                    self.settings.tool_discovery_limit.max(1),
                 )
             })
             .unwrap_or_default();

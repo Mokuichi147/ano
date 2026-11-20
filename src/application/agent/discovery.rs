@@ -26,11 +26,11 @@ const MAX_DESCRIPTION_CHARS: usize = 240;
 /// ago are dropped (`keep_newest`) to keep requests small.
 #[derive(Default)]
 pub(super) struct ActiveTools {
-    pub local: BTreeSet<String>,
+    local: BTreeSet<String>,
     /// Responses-managed MCP server label -> selected tool names.
-    pub responses_mcp: BTreeMap<String, Vec<String>>,
+    responses_mcp: BTreeMap<String, Vec<String>>,
     /// Function aliases of directly connected MCP tools.
-    pub direct_mcp: BTreeSet<String>,
+    direct_mcp: BTreeSet<String>,
     /// The loaded tools from the oldest to the newest search.
     order: Vec<Loaded>,
 }
@@ -44,6 +44,22 @@ enum Loaded {
 }
 
 impl ActiveTools {
+    /// The loaded local tools. The fields change only through `add` and
+    /// `keep_newest`, which keep them in step with `order`.
+    pub(super) fn local(&self) -> &BTreeSet<String> {
+        &self.local
+    }
+
+    /// Responses-managed MCP server label -> the loaded tool names.
+    pub(super) fn responses_mcp(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.responses_mcp
+    }
+
+    /// Function aliases of the loaded directly connected MCP tools.
+    pub(super) fn direct_mcp(&self) -> &BTreeSet<String> {
+        &self.direct_mcp
+    }
+
     /// Load `tool`, or mark it the newest when it is loaded already.
     fn add(&mut self, tool: Loaded) {
         self.order.retain(|loaded| loaded != &tool);
@@ -87,6 +103,12 @@ impl ActiveTools {
     #[cfg(test)]
     pub(super) fn add_local(&mut self, name: &str) {
         self.add(Loaded::Local(name.to_string()));
+    }
+
+    /// Load the tool `name` of the Responses-managed MCP server `label`.
+    #[cfg(test)]
+    pub(super) fn add_responses_mcp(&mut self, label: &str, name: &str) {
+        self.add(Loaded::ResponsesMcp(label.to_string(), name.to_string()));
     }
 
     /// Add the tools of `other`, a later search, as the newest.

@@ -286,7 +286,7 @@ impl Agent {
                         let message = if selection.results.is_empty() {
                             "No tool matched. tool_search finds tools by their names and descriptions, usually written in English; it does not search the web. Search again with short English words for the capability you need, such as \"web search\" or \"fetch page\"."
                         } else {
-                            "The returned tools are available from the next step; tool_search and task_plan remain available unless disabled. Call tool_search again when another capability is needed."
+                            "The returned tools are available from the next step, together with the tools earlier searches loaded (the ones loaded longest ago drop out once many are loaded); tool_search and task_plan remain available unless disabled. Call tool_search again when another capability is needed."
                         };
                         (
                             json!({
@@ -309,7 +309,14 @@ impl Agent {
 
         if let Some((server, tool)) = mcp_runtime.find_tool(name) {
             let output = self
-                .execute_direct_mcp_tool(name, server, tool, &arguments, &active.direct_mcp, scope)
+                .execute_direct_mcp_tool(
+                    name,
+                    server,
+                    tool,
+                    &arguments,
+                    active.direct_mcp(),
+                    scope,
+                )
                 .await?;
             return Ok((output, None));
         }
@@ -350,7 +357,7 @@ impl Agent {
             return Ok((output, None));
         };
         let arguments = definition.declared_arguments(arguments);
-        if !definition.always_offered && !active.local.contains(name) {
+        if !definition.always_offered && !active.local().contains(name) {
             events.push(AgentEvent::LocalToolBlocked {
                 call_id: scope.call_id.map(str::to_string),
                 round,
@@ -768,7 +775,7 @@ impl Agent {
         let permitted = server
             .is_some_and(|server| server.is_tool_allowed(&self.policy, &request.tool_name))
             && active
-                .responses_mcp
+                .responses_mcp()
                 .get(&request.server_label)
                 .is_some_and(|names| names.contains(&request.tool_name));
 
