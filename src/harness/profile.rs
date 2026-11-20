@@ -22,6 +22,10 @@ use crate::{
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
+/// The tools that read the user's past conversations kept in chronotope
+/// (`history_search`, `history_get`, and the like), as a policy rule.
+const PAST_CONVERSATIONS: &str = "history_*";
+
 /// Everything a run takes from configuration: model settings, the effective
 /// tool policy, and the context passed to tools.
 #[derive(Debug, Clone)]
@@ -154,10 +158,12 @@ impl ExecutionProfile {
     /// Set this run up for content that third parties wrote, which could
     /// ask the agent to send what it knows about the user somewhere, or to
     /// leave instructions for later runs: keep the user's memory out, and
-    /// disable the tools that change what every later run reads.
+    /// disable the tools that read the user's past conversations or change
+    /// what every later run reads.
     pub fn without_personal_context(&mut self) {
         self.personal_context = false;
         self.policy = self.policy.with_extra_disabled([
+            PAST_CONVERSATIONS,
             MEMORY_SAVE_NAME,
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
@@ -365,6 +371,10 @@ mod tests {
         untrusted.append_memory(&book).unwrap();
         assert_eq!(untrusted.settings.instructions, base);
         for name in [
+            "history_search",
+            "history_get",
+            "history_context",
+            "history_conversations",
             MEMORY_SAVE_NAME,
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
