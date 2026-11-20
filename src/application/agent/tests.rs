@@ -95,10 +95,11 @@ fn agent(registry: ToolRegistry, mcp_servers: Vec<McpServerConfig>) -> Agent {
 }
 
 fn selected_local_tools(names: &[&str]) -> ActiveTools {
-    ActiveTools {
-        local: names.iter().map(|name| (*name).to_string()).collect(),
-        ..ActiveTools::default()
+    let mut active = ActiveTools::default();
+    for name in names {
+        active.add_local(name);
     }
+    active
 }
 
 #[derive(Clone)]
@@ -818,12 +819,12 @@ async fn configured_check_deadline_preserves_output_past_generic_tool_timeout() 
 }
 
 #[tokio::test]
-async fn a_new_search_revokes_previous_local_selection() {
+async fn a_later_search_keeps_the_tools_an_earlier_one_loaded() {
     let server = mock_responses(vec![
         search_response("first", "record_action"),
         search_response("second", "no_matching_capability"),
-        json!({"id": "stale", "status": "completed", "output": calls(&["record_action"])}),
-        text_response("done", "No action executed"),
+        json!({"id": "earlier", "status": "completed", "output": calls(&["record_action"])}),
+        text_response("done", "Action recorded"),
     ])
     .await;
     let (registry, count) = counting_registry();
@@ -833,11 +834,14 @@ async fn a_new_search_revokes_previous_local_selection() {
 
     agent.run(request()).await.unwrap();
 
-    assert_eq!(count.load(Ordering::SeqCst), 0);
+    // A task that searches for its next step can still finish the first.
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     let requests = server.requests.lock().unwrap();
-    let blocked: Value =
-        serde_json::from_str(requests[3]["input"][0]["output"].as_str().unwrap()).unwrap();
-    assert_eq!(blocked["error"], "tool_not_selected");
+    assert!(requests[2]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "record_action"));
 }
 
 #[tokio::test]
@@ -2618,7 +2622,7 @@ async fn a_new_turn_keeps_the_tools_loaded_in_earlier_turns() {
 }
 
 #[test]
-fn tool_selection_is_restored_from_the_last_search_only() {
+fn tool_selection_is_restored_from_the_searches_in_the_history() {
     let search = |id: &str, tools: Value| {
         [
             json!({"type":"function_call","call_id":id,"name":"tool_search","arguments":"{}"}),
@@ -2639,33 +2643,29 @@ fn tool_selection_is_restored_from_the_last_search_only() {
     history.push(json!({"type":"function_call","call_id":"other","name":"echo","arguments":"{}"}));
     history.push(json!({"type":"function_call_output","call_id":"other","output":json!({"tools":[{"name":"x"}]}).to_string()}));
 
-    let active = ActiveTools::from_history(&history);
+    // Within the limit, a later search adds to the earlier one.
+    let active = ActiveTools::from_history(&history, 10);
+    assert_eq!(
+        active.local,
+        ["old_tool".to_string(), "workspace_read".to_string()].into()
+    );
+    assert_eq!(active.direct_mcp, ["mcp__web__search".to_string()].into());
+    assert_eq!(active.responses_mcp["remote"], ["list"]);
+    assert!(ActiveTools::from_history(&[], 10).local.is_empty());
 
+    // Past it, the tools loaded longest ago go first.
+    let active = ActiveTools::from_history(&history, 3);
     assert_eq!(active.local, ["workspace_read".to_string()].into());
     assert_eq!(active.direct_mcp, ["mcp__web__search".to_string()].into());
     assert_eq!(active.responses_mcp["remote"], ["list"]);
-    assert!(ActiveTools::from_history(&[]).local.is_empty());
+    let active = ActiveTools::from_history(&history, 1);
+    assert!(active.local.is_empty() && active.direct_mcp.is_empty());
+    assert_eq!(active.responses_mcp["remote"], ["list"]);
 
-    // Two searches of one response come back together; a later response's
-    // search replaces them.
-    let call = |id: &str| json!({"type":"function_call","call_id":id,"name":"tool_search","arguments":"{}"});
-    let output = |id: &str, name: &str| json!({"type":"function_call_output","call_id":id,"output":json!({"tools":[{"kind":"local","name":name}]}).to_string()});
-    let mut history = vec![
-        json!({"role":"user","content":"read and send"}),
-        json!({"type":"reasoning","summary":[]}),
-        call("a"),
-        call("b"),
-        output("a", "read_file"),
-        output("b", "send_email"),
-    ];
-    let active = ActiveTools::from_history(&history);
-    assert_eq!(
-        active.local,
-        ["read_file".to_string(), "send_email".to_string()].into()
-    );
-    history.extend([call("c"), output("c", "list_files")]);
-    assert_eq!(
-        ActiveTools::from_history(&history).local,
-        ["list_files".to_string()].into()
-    );
+    // Loading a tool again makes it the newest.
+    history.extend(search("again", json!([{"kind":"local","name":"old_tool"}])));
+    let active = ActiveTools::from_history(&history, 2);
+    assert_eq!(active.local, ["old_tool".to_string()].into());
+    assert!(active.direct_mcp.is_empty());
+    assert_eq!(active.responses_mcp["remote"], ["list"]);
 }

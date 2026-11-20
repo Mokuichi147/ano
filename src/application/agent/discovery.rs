@@ -20,8 +20,10 @@ const MAX_TOOL_CATALOG_BYTES: usize = 8 * 1024;
 /// followed by '…'.
 const MAX_DESCRIPTION_CHARS: usize = 240;
 
-/// Tools loaded by the most recent `tool_search`, or by all the searches of
-/// the most recent response that called it.
+/// Tools loaded with `tool_search`. A search adds its results to what
+/// earlier searches loaded, so a task can search for one capability after
+/// another without losing the first; past a limit, the tools loaded longest
+/// ago are dropped (`keep_newest`) to keep requests small.
 #[derive(Default)]
 pub(super) struct ActiveTools {
     pub local: BTreeSet<String>,
@@ -29,54 +31,92 @@ pub(super) struct ActiveTools {
     pub responses_mcp: BTreeMap<String, Vec<String>>,
     /// Function aliases of directly connected MCP tools.
     pub direct_mcp: BTreeSet<String>,
+    /// The loaded tools from the oldest to the newest search.
+    order: Vec<Loaded>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Loaded {
+    Local(String),
+    DirectMcp(String),
+    /// Server label and tool name.
+    ResponsesMcp(String, String),
 }
 
 impl ActiveTools {
-    /// Add the tools of `other`, as when one response searched twice.
-    pub(super) fn merge(&mut self, other: ActiveTools) {
-        self.local.extend(other.local);
-        self.direct_mcp.extend(other.direct_mcp);
-        for (label, names) in other.responses_mcp {
-            let selected = self.responses_mcp.entry(label).or_default();
-            for name in names {
-                if !selected.contains(&name) {
-                    selected.push(name);
+    /// Load `tool`, or mark it the newest when it is loaded already.
+    fn add(&mut self, tool: Loaded) {
+        self.order.retain(|loaded| loaded != &tool);
+        match &tool {
+            Loaded::Local(name) => {
+                self.local.insert(name.clone());
+            }
+            Loaded::DirectMcp(name) => {
+                self.direct_mcp.insert(name.clone());
+            }
+            Loaded::ResponsesMcp(label, name) => {
+                let selected = self.responses_mcp.entry(label.clone()).or_default();
+                if !selected.contains(name) {
+                    selected.push(name.clone());
+                }
+            }
+        }
+        self.order.push(tool);
+    }
+
+    fn remove(&mut self, tool: &Loaded) {
+        match tool {
+            Loaded::Local(name) => {
+                self.local.remove(name);
+            }
+            Loaded::DirectMcp(name) => {
+                self.direct_mcp.remove(name);
+            }
+            Loaded::ResponsesMcp(label, name) => {
+                if let Some(selected) = self.responses_mcp.get_mut(label) {
+                    selected.retain(|selected| selected != name);
+                    if selected.is_empty() {
+                        self.responses_mcp.remove(label);
+                    }
                 }
             }
         }
     }
 
-    /// The selection of the last response that called `tool_search` in a
-    /// conversation's history (all its searches together), so a new turn can
-    /// still call the tools that earlier turns loaded. Without it the model
-    /// sees its past calls but not the tools, and may announce a capability
-    /// it can no longer call. Policy and availability are checked again when
-    /// the request's tools are built.
-    pub(super) fn from_history(history: &[Value]) -> Self {
-        let is_search =
-            |item: &Value| item["type"] == "function_call" && item["name"] == TOOL_SEARCH_NAME;
-        let Some(last) = history.iter().rposition(is_search) else {
-            return Self::default();
-        };
-        // The items of one response sit together, before the outputs of its
-        // calls and the next input.
-        let in_response =
-            |item: &Value| item["type"] != "function_call_output" && item["role"] != "user";
-        let start = history[..last]
+    /// Load the local tool `name`, as a search would.
+    #[cfg(test)]
+    pub(super) fn add_local(&mut self, name: &str) {
+        self.add(Loaded::Local(name.to_string()));
+    }
+
+    /// Add the tools of `other`, a later search, as the newest.
+    pub(super) fn merge(&mut self, other: ActiveTools) {
+        for tool in other.order {
+            self.add(tool);
+        }
+    }
+
+    /// Keep the `limit` tools loaded most recently, dropping the others.
+    pub(super) fn keep_newest(&mut self, limit: usize) {
+        let excess = self.order.len().saturating_sub(limit);
+        for tool in self.order.drain(..excess).collect::<Vec<_>>() {
+            self.remove(&tool);
+        }
+    }
+
+    /// The selection that the `tool_search` calls in a conversation's
+    /// history built, so a new turn can still call the tools that earlier
+    /// turns loaded. Without it the model sees its past calls but not the
+    /// tools, and may announce a capability it can no longer call. Policy and
+    /// availability are checked again when the request's tools are built.
+    pub(super) fn from_history(history: &[Value], limit: usize) -> Self {
+        let searches: BTreeSet<&str> = history
             .iter()
-            .rposition(|item| !in_response(item))
-            .map_or(0, |index| index + 1);
-        let end = history[last..]
-            .iter()
-            .position(|item| !in_response(item))
-            .map_or(history.len(), |index| last + index);
-        let searches: BTreeSet<&str> = history[start..end]
-            .iter()
-            .filter(|item| is_search(item))
+            .filter(|item| item["type"] == "function_call" && item["name"] == TOOL_SEARCH_NAME)
             .filter_map(|item| item["call_id"].as_str())
             .collect();
         let mut active = Self::default();
-        for item in &history[end..] {
+        for item in history {
             if item["type"] != "function_call_output"
                 || !item["call_id"]
                     .as_str()
@@ -92,6 +132,7 @@ impl ActiveTools {
                 continue;
             };
             active.merge(Self::from_results(&results));
+            active.keep_newest(limit);
         }
         active
     }
@@ -103,25 +144,27 @@ impl ActiveTools {
             let Some(name) = result["name"].as_str() else {
                 continue;
             };
-            match (
-                result["server_label"].as_str(),
-                result["function_name"].as_str(),
-            ) {
-                (Some(_), Some(function_name)) => {
-                    active.direct_mcp.insert(function_name.to_string());
-                }
-                (Some(label), None) => active
-                    .responses_mcp
-                    .entry(label.to_string())
-                    .or_default()
-                    .push(name.to_string()),
-                (None, _) => {
-                    active.local.insert(name.to_string());
-                }
-            }
+            active.add(
+                match (
+                    result["server_label"].as_str(),
+                    result["function_name"].as_str(),
+                ) {
+                    (Some(_), Some(function_name)) => Loaded::DirectMcp(function_name.to_string()),
+                    (Some(label), None) => {
+                        Loaded::ResponsesMcp(label.to_string(), name.to_string())
+                    }
+                    (None, _) => Loaded::Local(name.to_string()),
+                },
+            );
         }
         active
     }
+}
+
+/// How many tools searches keep loaded at once: two searches' worth, so a
+/// task can use what it found for one step while it searches for the next.
+pub(super) fn loaded_tools_limit(tool_discovery_limit: usize) -> usize {
+    tool_discovery_limit.saturating_mul(2).max(1)
 }
 
 impl Agent {
@@ -438,16 +481,12 @@ impl Agent {
                 result["server_label"] = json!(server_label.clone());
                 if let Some(function_name) = candidate.function_name {
                     result["function_name"] = json!(function_name.clone());
-                    active.direct_mcp.insert(function_name);
+                    active.add(Loaded::DirectMcp(function_name));
                 } else {
-                    active
-                        .responses_mcp
-                        .entry(server_label)
-                        .or_default()
-                        .push(candidate.name.clone());
+                    active.add(Loaded::ResponsesMcp(server_label, candidate.name.clone()));
                 }
             } else {
-                active.local.insert(candidate.name.clone());
+                active.add(Loaded::Local(candidate.name.clone()));
             }
             results.push(result);
         }

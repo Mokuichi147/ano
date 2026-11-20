@@ -37,7 +37,7 @@ use crate::{
     },
 };
 use anyhow::{bail, Context, Result};
-use discovery::ActiveTools;
+use discovery::{loaded_tools_limit, ActiveTools};
 use dispatch::RoundScope;
 use events::EventLog;
 use mcp_runtime::McpRuntime;
@@ -750,7 +750,12 @@ impl Agent {
         let mut active = session
             .as_ref()
             .filter(|_| replay)
-            .map(|session| ActiveTools::from_history(&session.data().history))
+            .map(|session| {
+                ActiveTools::from_history(
+                    &session.data().history,
+                    loaded_tools_limit(self.settings.tool_discovery_limit),
+                )
+            })
             .unwrap_or_default();
         let mut repetition = Repetition::default();
         let text_listener = self.text_listener.as_ref().filter(|_| origin.depth == 0);
@@ -1012,7 +1017,8 @@ impl Agent {
                 history.extend_from_slice(&continuation);
             }
             if let Some(selection) = selection {
-                active = selection;
+                active.merge(selection);
+                active.keep_newest(loaded_tools_limit(self.settings.tool_discovery_limit));
             }
 
             // Commentary is progress, including when it shares a response with
