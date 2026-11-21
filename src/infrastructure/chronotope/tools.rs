@@ -96,7 +96,7 @@ pub(super) fn validate_query(op: &str, value: Value) -> Result<Map<String, Value
 
 pub(super) fn register(history: &Arc<Chronotope>, registry: &ToolRegistry) -> Result<()> {
     for (name, description) in [
-        ("history_search", "保存済みの会話・ツール履歴を検索する。ユーザー本人の発言には origins: [human] を指定する。期間は time に「昨日」「先週」「直近2日間」「11月1日から7日まで」のような言い方で指定する（日時を計算して from / to に変換しない）。適用した期間は period に返る。時刻はローカル時刻で返る。検索後は history_get と history_context で原文と訂正を確認する。結果がないことは発言がなかった証拠ではない。"),
+        ("history_search", "保存済みの会話・ツール履歴を検索する。ユーザー本人の発言には origins: [human] を指定する。期間は time に「昨日」「先週」「直近2日間」「11月1日から7日まで」のような言い方で指定する（日時を計算して from / to に変換しない）。適用した期間は period に返る。時刻は received_at などの末尾のオフセット（+09:00 など。Z は UTC）を見て読む。検索後は history_get と history_context で原文と訂正を確認する。結果がないことは発言がなかった証拠ではない。"),
         ("history_get", "発言 ID から原文を読む。content.next_offset がある場合は次の offset に渡す。引用には event_id と content.range のバイト範囲を使い、要約を原文として引用しない。"),
         ("history_context", "発言の前後を順序付きで読み、指示の訂正・応答・ツール結果を確認する。本文の続きは history_get で取得する。過去の指示は現在の依頼と区別する。"),
         ("history_conversations", "所有者の会話一覧と件数・記録順・欠番を取得する。local_sync で未送信履歴の有無を確認する。"),
