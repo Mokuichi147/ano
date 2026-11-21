@@ -34,6 +34,7 @@ use async_trait::async_trait;
 use axum::{extract::State, routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
+    collections::BTreeSet,
     collections::VecDeque,
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -95,10 +96,11 @@ fn agent(registry: ToolRegistry, mcp_servers: Vec<McpServerConfig>) -> Agent {
 }
 
 fn selected_local_tools(names: &[&str]) -> ActiveTools {
-    ActiveTools {
-        local: names.iter().map(|name| (*name).to_string()).collect(),
-        ..ActiveTools::default()
+    let mut active = ActiveTools::default();
+    for name in names {
+        active.add_local(name);
     }
+    active
 }
 
 #[derive(Clone)]
@@ -271,8 +273,8 @@ fn search_loads_only_matching_tools() {
             &ToolContext::default(),
         )
         .unwrap();
-    assert!(selection.active.local.contains("read_file"));
-    assert!(!selection.active.local.contains("send_email"));
+    assert!(selection.active.local().contains("read_file"));
+    assert!(!selection.active.local().contains("send_email"));
     assert_eq!(selection.results.len(), 1);
 }
 
@@ -552,7 +554,94 @@ async fn tool_search_selection_applies_after_the_round() {
     assert_eq!(continuation.len(), 2);
     let blocked: Value = serde_json::from_str(continuation[1]["output"].as_str().unwrap()).unwrap();
     assert_eq!(blocked["error"], "tool_not_selected");
-    assert!(selection.unwrap().local.contains("read_file"));
+    assert!(selection.unwrap().local().contains("read_file"));
+}
+
+#[tokio::test]
+async fn searches_in_one_response_add_up() {
+    let agent = agent(
+        registry_with(&[
+            ("read_file", "Read a file"),
+            ("send_email", "Send an email"),
+        ]),
+        Vec::new(),
+    );
+    let items = vec![
+        json!({"type": "function_call", "call_id": "first", "name": "tool_search", "arguments": "{\"query\": \"read file\"}"}),
+        json!({"type": "function_call", "call_id": "second", "name": "tool_search", "arguments": "{\"query\": \"send email\"}"}),
+    ];
+
+    let (_, selection) = with_scope(&ActiveTools::default(), async |scope| {
+        agent.handle_output_items(&items, scope, None).await
+    })
+    .await
+    .unwrap();
+    let selection = selection.unwrap();
+    assert!(
+        selection.local().contains("read_file"),
+        "{:?}",
+        selection.local()
+    );
+    assert!(
+        selection.local().contains("send_email"),
+        "{:?}",
+        selection.local()
+    );
+}
+
+#[tokio::test]
+async fn searches_keep_twice_the_discovery_limit_and_drop_the_oldest() {
+    let server = mock_responses(vec![
+        search_response("first", "record action"),
+        search_response("second", "read file"),
+        search_response("third", "send email"),
+        json!({"id": "stale", "status": "completed", "output": calls(&["record_action", "read_file"])}),
+        text_response("done", "Done"),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    for (name, description) in [
+        ("read_file", "Read a file"),
+        ("send_email", "Send an email"),
+    ] {
+        registry
+            .register(
+                ToolDefinition::new(
+                    name,
+                    description,
+                    json!({"type": "object", "properties": {}}),
+                ),
+                |_arguments| async move { Ok(json!({"ok": true})) },
+            )
+            .unwrap();
+    }
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    agent.settings.max_tool_rounds = 5;
+    // One tool per search, two kept.
+    agent.settings.tool_discovery_limit = 1;
+
+    agent.run(request()).await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let offered = |turn: usize| -> BTreeSet<String> {
+        requests[turn]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| ["record_action", "read_file", "send_email"].contains(name))
+            .map(str::to_string)
+            .collect()
+    };
+    let set = |names: [&str; 2]| names.map(str::to_string).into_iter().collect();
+    assert_eq!(offered(2), set(["record_action", "read_file"]));
+    assert_eq!(offered(3), set(["read_file", "send_email"]));
+    // record_action, loaded first, has dropped out; read_file still runs.
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let outputs = requests[4]["input"].to_string();
+    assert!(outputs.contains("tool_not_selected"), "{outputs}");
+    assert!(outputs.contains(r#"\"ok\":true"#), "{outputs}");
 }
 
 #[tokio::test]
@@ -786,12 +875,12 @@ async fn configured_check_deadline_preserves_output_past_generic_tool_timeout() 
 }
 
 #[tokio::test]
-async fn a_new_search_revokes_previous_local_selection() {
+async fn a_later_search_keeps_the_tools_an_earlier_one_loaded() {
     let server = mock_responses(vec![
         search_response("first", "record_action"),
         search_response("second", "no_matching_capability"),
-        json!({"id": "stale", "status": "completed", "output": calls(&["record_action"])}),
-        text_response("done", "No action executed"),
+        json!({"id": "earlier", "status": "completed", "output": calls(&["record_action"])}),
+        text_response("done", "Action recorded"),
     ])
     .await;
     let (registry, count) = counting_registry();
@@ -801,11 +890,14 @@ async fn a_new_search_revokes_previous_local_selection() {
 
     agent.run(request()).await.unwrap();
 
-    assert_eq!(count.load(Ordering::SeqCst), 0);
+    // A task that searches for its next step can still finish the first.
+    assert_eq!(count.load(Ordering::SeqCst), 1);
     let requests = server.requests.lock().unwrap();
-    let blocked: Value =
-        serde_json::from_str(requests[3]["input"][0]["output"].as_str().unwrap()).unwrap();
-    assert_eq!(blocked["error"], "tool_not_selected");
+    assert!(requests[2]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "record_action"));
 }
 
 #[tokio::test]
@@ -1195,9 +1287,7 @@ async fn responses_mcp_approval_requires_policy_and_selection() {
     .unwrap());
 
     let mut active = ActiveTools::default();
-    active
-        .responses_mcp
-        .insert("github".into(), vec!["list_issues".into()]);
+    active.add_responses_mcp("github", "list_issues");
     assert!(with_scope(&active, async |scope| agent
         .approve_responses_mcp_call(&request("list_issues"), scope)
         .await)
@@ -1397,7 +1487,8 @@ async fn exec_is_neither_offered_nor_approved_without_allow_exec() {
             )
             .unwrap()
             .active
-            .local
+            .local()
+            .clone()
     };
     assert!(!search(&ToolContext::default()).contains("workspace_exec"));
     let enabled = ToolContext {
@@ -2586,7 +2677,7 @@ async fn a_new_turn_keeps_the_tools_loaded_in_earlier_turns() {
 }
 
 #[test]
-fn tool_selection_is_restored_from_the_last_search_only() {
+fn tool_selection_is_restored_from_the_searches_in_the_history() {
     let search = |id: &str, tools: Value| {
         [
             json!({"type":"function_call","call_id":id,"name":"tool_search","arguments":"{}"}),
@@ -2607,10 +2698,38 @@ fn tool_selection_is_restored_from_the_last_search_only() {
     history.push(json!({"type":"function_call","call_id":"other","name":"echo","arguments":"{}"}));
     history.push(json!({"type":"function_call_output","call_id":"other","output":json!({"tools":[{"name":"x"}]}).to_string()}));
 
-    let active = ActiveTools::from_history(&history);
+    // Within the limit, a later search adds to the earlier one.
+    let active = ActiveTools::from_history(&history, 10);
+    assert_eq!(
+        active.local().clone(),
+        ["old_tool".to_string(), "workspace_read".to_string()].into()
+    );
+    assert_eq!(
+        active.direct_mcp().clone(),
+        ["mcp__web__search".to_string()].into()
+    );
+    assert_eq!(active.responses_mcp()["remote"], ["list"]);
+    assert!(ActiveTools::from_history(&[], 10).local().is_empty());
 
-    assert_eq!(active.local, ["workspace_read".to_string()].into());
-    assert_eq!(active.direct_mcp, ["mcp__web__search".to_string()].into());
-    assert_eq!(active.responses_mcp["remote"], ["list"]);
-    assert!(ActiveTools::from_history(&[]).local.is_empty());
+    // Past it, the tools loaded longest ago go first.
+    let active = ActiveTools::from_history(&history, 3);
+    assert_eq!(
+        active.local().clone(),
+        ["workspace_read".to_string()].into()
+    );
+    assert_eq!(
+        active.direct_mcp().clone(),
+        ["mcp__web__search".to_string()].into()
+    );
+    assert_eq!(active.responses_mcp()["remote"], ["list"]);
+    let active = ActiveTools::from_history(&history, 1);
+    assert!(active.local().is_empty() && active.direct_mcp().is_empty());
+    assert_eq!(active.responses_mcp()["remote"], ["list"]);
+
+    // Loading a tool again makes it the newest.
+    history.extend(search("again", json!([{"kind":"local","name":"old_tool"}])));
+    let active = ActiveTools::from_history(&history, 2);
+    assert_eq!(active.local().clone(), ["old_tool".to_string()].into());
+    assert!(active.direct_mcp().is_empty());
+    assert_eq!(active.responses_mcp()["remote"], ["list"]);
 }

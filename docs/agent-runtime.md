@@ -28,7 +28,7 @@
 | `max_parallel_tool_calls` | 8 | 同時に実行する tool 呼び出しの上限 |
 | `tool_timeout_secs` | 120 | ローカル tool・直接接続 MCP tool 1回あたりのタイムアウト |
 | `max_tool_output_bytes` | 131072 | tool 出力（JSON のバイト数）の上限。超えた出力は先頭と末尾だけを残し、`truncated: true` と元のサイズを付けてモデルへ返します（4096 以上） |
-| `tool_discovery_limit` | 12 | `tool_search` 1回で有効化する tool 数 |
+| `tool_discovery_limit` | 12 | `tool_search` 1回で有効化する tool 数。検索で読み込んだ tool は、この2倍まで残します |
 | `max_output_tokens` | なし | 各応答の出力トークン上限 |
 | `reasoning_effort` | なし | 推論モデルの `reasoning.effort`（`none`・`minimal`・`low`・`medium`・`high`・`xhigh`・`max`・`ultra`。対応範囲はモデルによる）。CLI では `--reasoning-effort`、`ano chat` では `/effort`。接続先・モデルと組にするには[プリセット](providers.md#プリセットとロール)を使う |
 | `reasoning_summary` | なし | 推論の要約（`auto`・`concise`・`detailed`）。要約は `reasoning_summary` イベントとして進捗に表示 |
@@ -217,8 +217,8 @@ ano run --goal "cargo test がすべて通り、警告が増えていない" \
 tool や MCP server を大量に登録しても、初回の Responses 要求へ全件は送りません。最初は固定サイズの `tool_search`・`task_plan`・`delegate_task` だけを公開し、モデルが capability を検索した後、上位 `tool_discovery_limit` 件だけを次の要求へ追加します。登録数に比例して tool schema が毎回トークンを消費することを防ぐためです。
 
 - 検索で読み込める tool の名前は、実行ごとに instructions の末尾へ「ローカル tool」と「MCP server ごと（server の `description` 付き）」に分けて一覧します。最初に見えるのが `tool_search` だけだと、モデルは使える tool があることに気づかず、記憶で答えたり「できない」と返したりするためです。schema と説明文は含めず名前だけを載せ、8 KiB を超えた分は省略します（省略した tool も検索できます）。無効化された tool、`allow_exec` などで実行できない tool、常に公開している tool は載せません。
-- モデルは `tool_search` に「issue を一覧」「ファイルを読む」のように capability を渡します。必要な tool が変わったら再度検索し、新しい検索結果が前回の選択を置き換えます。
-- セッションやチャットで次のターンを始めるときは、会話の履歴に残る最後の `tool_search` の結果から選択を引き継ぎます。前のターンで使った tool が、履歴には残っているのに一覧から消えて呼べなくなるのを防ぐためです。ポリシーと、tool がまだ存在するかは改めて確認します。圧縮で検索結果が履歴から消えた場合は、最初の状態から始めます。
+- モデルは `tool_search` に「issue を一覧」「ファイルを読む」のように capability を渡します。必要な tool が増えたら再度検索し、新しい検索結果を前に読み込んだ tool に加えます。「履歴を読む」「原文を確かめる」「候補を残す」のように手順ごとに検索しても、先に読み込んだ tool を失わないためです。読み込んだ tool が `tool_discovery_limit` の2倍を超えたら、読み込んでからいちばん時間のたったものから外します（もう一度検索で見つかった tool は新しく読み込んだものとして扱います）。1つの応答の中で複数回検索した場合も、結果を合わせて次の要求に載せます。
+- セッションやチャットで次のターンを始めるときは、会話の履歴に残る `tool_search` の結果を順にたどり、新しく読み込んだものから `tool_discovery_limit` 個までを引き継ぎます（前のターンの作業の途中で使っていた tool を残しつつ、古いターンの tool で毎ターンの最初の要求が大きくならないようにするため）。前のターンで使った tool が、履歴には残っているのに一覧から消えて呼べなくなるのを防ぐためです。ポリシーと、tool がまだ存在するかは改めて確認します。圧縮で検索結果が履歴から消えた場合は、最初の状態から始めます。
 - 同じ応答内で `tool_search` を呼んだ場合、その結果は次の要求から有効になります。同時に呼ばれた他の tool は、モデルがその応答を生成した時点の tool 一覧で判定します。
 - 同じ tool だけを3回続けて呼ぶと、別の方法を取るよう実行時の通知を返します。その tool と同じ MCP server の tool、またはローカル tool なら同じ接頭辞（`workspace_` など）の tool のうち、まだ読み込まれていないものの名前も伝えます。読みたいのに `workspace_read` が読み込まれておらず、`workspace_search` を繰り返すような空回りを止めるためです。ファイルを順に読む・編集する・コマンドを実行するのは前進なので、`workspace_read`・`workspace_edit`・`workspace_write`・`workspace_exec` は、直前のラウンドとまったく同じ引数で呼び直した場合だけを数えます。通知を3回出しても（同じ呼び出しが9回続いても）変わらない場合は、上限を待たずに tool を外して報告を求め、`stop_reason: "no_progress"` で止めます。
 - ユーザーの `disabled_tools` に含まれる tool は要求から除外します。万一モデルが直接呼び出しても、実行前にもう一度確認して `tool_disabled` を返します。
