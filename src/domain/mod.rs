@@ -12,6 +12,7 @@ pub mod compaction;
 pub mod environment;
 pub mod feed;
 pub mod github;
+pub mod history;
 pub mod mcp;
 pub mod objective;
 pub mod plan;

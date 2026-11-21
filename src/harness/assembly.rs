@@ -119,6 +119,9 @@ impl Harness {
         if self.feed.is_some() {
             profile.append_feed();
         }
+        if self.history.is_some() {
+            profile.append_past_conversations(self.feed.is_some());
+        }
         if let Some(spaces) = &self.spaces {
             if let Err(error) = profile.append_spaces(spaces) {
                 warnings.push(format!("left out the spaces: {error:#}"));
@@ -227,6 +230,56 @@ mod tests {
             .find("- release-build: Build a release.")
             .unwrap();
         assert!(character < project && project < skills, "{instructions}");
+    }
+
+    #[test]
+    fn runs_with_a_kept_history_are_told_about_past_conversations() {
+        let root = tempfile::tempdir().unwrap();
+        let history = Chronotope::new(crate::infrastructure::chronotope::HistorySettings {
+            enabled: true,
+            data_dir: Some(root.path().join("history")),
+            ..Default::default()
+        })
+        .unwrap();
+        let harness = |history: Option<Arc<Chronotope>>| Harness {
+            registry: ToolRegistry::new(),
+            history,
+            skills: None,
+            character: None,
+            memory: None,
+            objectives: None,
+            routines: None,
+            feed: None,
+            spaces: None,
+        };
+        let config = AgentConfig::default();
+        let profile = || ExecutionProfile {
+            settings: config.settings.clone(),
+            project_instructions: Vec::new(),
+            policy: Default::default(),
+            context: crate::domain::tool::ToolContext::default(),
+            approval_mode: ApprovalMode::Ask,
+            personal_context: true,
+        };
+
+        let mut kept = profile();
+        harness(Some(Arc::new(history)))
+            .add_instructions(&mut kept)
+            .unwrap();
+        let instructions = &kept.settings.instructions;
+        assert!(
+            instructions.contains("\n\n# Past conversations\n"),
+            "{instructions}"
+        );
+        // フィードが無ければ、フィードへの投稿の案内は付けない。
+        assert!(
+            !instructions.contains("posting ideas to the feed"),
+            "{instructions}"
+        );
+
+        let mut none = profile();
+        harness(None).add_instructions(&mut none).unwrap();
+        assert!(!none.settings.instructions.contains("# Past conversations"));
     }
 
     #[test]
