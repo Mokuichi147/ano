@@ -4,8 +4,10 @@
 //!
 //! The time is read relative to when the user said it, in the local time
 //! zone of that moment: 「明日の15時」 said yesterday evening is today at
-//! 15:00. Times that are too vague (「来月」), repeat (「毎週金曜」), or
-//! have passed are refused, so the model can ask the user or skip them.
+//! 15:00. A plan over at most two days, such as 「来週末」, is kept with its
+//! first and last day. Times that are too vague (「来月」), repeat
+//! (「毎週金曜」), or have passed are refused, so the model can ask the user
+//! or skip them.
 
 use crate::{
     application::{clock::unix_now, registry::ToolRegistry},
@@ -44,9 +46,15 @@ pub struct PlanTime {
     /// plan with no clock time.
     pub end: u64,
     /// The local date and, when the user gave one, time, such as
-    /// `2026-11-27 15:00` or `2026-12-03`.
+    /// `2026-11-27 15:00` or `2026-12-03`, or the first and last day of a
+    /// plan over two days, such as `2026-11-28〜2026-11-29` for 「来週末」.
     pub label: String,
 }
+
+const DAY_SECONDS: i64 = 24 * 60 * 60;
+/// The longest plan without a single day that is still a candidate: two
+/// days and an hour of slack for a change of summer time.
+const MAX_SPAN_SECONDS: i64 = 2 * DAY_SECONDS + 3600;
 
 /// Read `when` (such as 「来週の金曜15時」) as said at `said_at`, in the
 /// time zone of `said_at`.
@@ -74,15 +82,17 @@ where
     if resolved.recurrence.is_some() {
         bail!("{when:?} repeats; a candidate is one plan on one day (set up repeating reminders with routine_create when the user asks)");
     }
-    if resolved.granularity > Granularity::Day {
-        bail!("{when:?} is too vague for a reminder; it needs a day (ask the user which day)");
-    }
     let range = resolved.range;
     if !range.earliest_start.is_finite() || !range.latest_end.is_finite() {
         bail!("{when:?} has no definite day");
     }
     let seconds = |tick: Tick| tick.0.div_euclid(1000);
     let (start, end) = (seconds(range.earliest_start), seconds(range.latest_end));
+    // A day, or at most two (「週末」 reads as Saturday to Sunday); a week or
+    // a month is too vague to remind of.
+    if resolved.granularity > Granularity::Day && end - start > MAX_SPAN_SECONDS {
+        bail!("{when:?} is too vague for a reminder; it needs a day (ask the user which day)");
+    }
     // chronotope read the time with the offset of when it was said; keep the
     // wall-clock time but take the offset of the plan's own day, which
     // differs across a change to or from summer time.
@@ -102,6 +112,15 @@ where
     // 「15時ごろ」, which span hours.
     let label = if resolved.granularity <= Granularity::Hour {
         local.format("%Y-%m-%d %H:%M").to_string()
+    } else if end - start > DAY_SECONDS + 3600 {
+        // Over more than one day (an hour of slack for a change of summer
+        // time): the first and the last day.
+        let last = said_at
+            .timezone()
+            .timestamp_opt(end - 1, 0)
+            .single()
+            .context("the time is out of range")?;
+        format!("{}〜{}", local.format("%Y-%m-%d"), last.format("%Y-%m-%d"))
     } else {
         local.format("%Y-%m-%d").to_string()
     };
@@ -281,7 +300,12 @@ mod tests {
 
         let day = read_plan_time("12月3日", &said).unwrap();
         assert_eq!(day.end - day.start, 24 * 60 * 60);
-        for when in ["来月", "毎週金曜", "そのうち"] {
+        // 週末は土曜から日曜まで。時間帯だけの言い方は日付で示す。
+        assert_eq!(read("来週末").unwrap(), "2026-11-28〜2026-11-29");
+        assert_eq!(read("今週末").unwrap(), "2026-11-21〜2026-11-22");
+        assert_eq!(read("今晩").unwrap(), "2026-11-21");
+        assert_eq!(read("明朝").unwrap(), "2026-11-22");
+        for when in ["来月", "来週", "毎週金曜", "そのうち"] {
             assert!(read(when).is_err(), "{when}");
         }
     }
