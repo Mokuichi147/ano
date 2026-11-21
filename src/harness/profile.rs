@@ -3,8 +3,9 @@
 
 use super::{
     instructions::{
-        append_character, append_feed, append_memory, append_objectives, append_past_conversations,
-        append_project_instructions, append_routines, append_skills, append_spaces,
+        append_agenda, append_character, append_feed, append_memory, append_objectives,
+        append_past_conversations, append_project_instructions, append_routines, append_skills,
+        append_spaces,
     },
     settings::AgentConfig,
 };
@@ -12,6 +13,7 @@ use crate::{
     application::settings::AgentSettings,
     config::{AppConfig, ModelRequest, ModelSelection},
     domain::{
+        agenda::AGENDA_SUGGEST_NAME,
         approval::ApprovalMode,
         character::CHARACTER_UPDATE_NAME,
         environment::EnvironmentConfig,
@@ -175,6 +177,7 @@ impl ExecutionProfile {
         self.personal_context = false;
         self.policy = self.policy.with_extra_disabled([
             PAST_CONVERSATIONS,
+            AGENDA_SUGGEST_NAME,
             MEMORY_SAVE_NAME,
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
@@ -232,6 +235,15 @@ impl ExecutionProfile {
         {
             let with_feed = feed && available(FEED_POST_NAME);
             append_past_conversations(&mut self.settings.instructions, with_feed);
+        }
+    }
+
+    /// Tell the run to leave plans the user mentions as candidates, when
+    /// `agenda_suggest` can be loaded and the run keeps personal context.
+    pub fn append_agenda(&mut self) {
+        let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
+        if self.personal_context && available(AGENDA_SUGGEST_NAME) && self.can_search() {
+            append_agenda(&mut self.settings.instructions);
         }
     }
 
@@ -519,6 +531,7 @@ mod tests {
             "history_get",
             "history_context",
             "history_conversations",
+            AGENDA_SUGGEST_NAME,
             MEMORY_SAVE_NAME,
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
@@ -648,6 +661,42 @@ mod tests {
             "{added}"
         );
         assert!(!added.contains(ROUTINE_CREATE_NAME), "{added}");
+    }
+
+    #[test]
+    fn agenda_instructions_need_tool_search_and_personal_context() {
+        let profile = |policy: UserPolicy| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext::default(),
+            approval_mode: ApprovalMode::Ask,
+            personal_context: true,
+        };
+        let mut searchable = profile(UserPolicy::default());
+        let base = searchable.settings.instructions.clone();
+        searchable.append_agenda();
+        let added = &searchable.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Agenda\n"), "{added}");
+        assert!(
+            added.contains(&format!(
+                "load {AGENDA_SUGGEST_NAME} with {TOOL_SEARCH_NAME}"
+            )),
+            "{added}"
+        );
+
+        for mut run in [
+            profile(UserPolicy::default().with_extra_disabled([TOOL_SEARCH_NAME])),
+            profile(UserPolicy::default().with_extra_disabled([AGENDA_SUGGEST_NAME])),
+        ] {
+            run.append_agenda();
+            assert_eq!(run.settings.instructions, base);
+        }
+        let mut untrusted = profile(UserPolicy::default());
+        untrusted.without_personal_context();
+        untrusted.append_agenda();
+        assert_eq!(untrusted.settings.instructions, base);
+        assert!(untrusted.policy.is_disabled(AGENDA_SUGGEST_NAME));
     }
 
     #[test]
