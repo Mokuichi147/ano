@@ -10,9 +10,9 @@ use crate::{
     application::{agent::Agent, ports::McpGateway, registry::ToolRegistry},
     config::AppConfig,
     infrastructure::{
-        agenda::Agenda, character::CharacterStore, chronotope::Chronotope, feed::Feed,
-        objectives::ObjectiveBook, project::read_project_instructions, routines::RoutineBook,
-        skills::SkillLibrary, spaces::Spaces, tools::register_builtin_tools,
+        agenda::Agenda, character::CharacterStore, chronotope::Chronotope, events::Events,
+        feed::Feed, objectives::ObjectiveBook, project::read_project_instructions,
+        routines::RoutineBook, skills::SkillLibrary, spaces::Spaces, tools::register_builtin_tools,
         user_memory::MemoryBook,
     },
 };
@@ -23,8 +23,8 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct Harness {
     /// The built-in tools, with those of the raw history, skills, the
-    /// character, memory, objectives, routines, the feed, spaces, and the
-    /// agenda when they are enabled.
+    /// character, memory, objectives, routines, the feed, spaces, the
+    /// agenda, and events when they are enabled.
     pub registry: ToolRegistry,
     pub history: Option<Arc<Chronotope>>,
     pub skills: Option<Arc<SkillLibrary>>,
@@ -35,6 +35,7 @@ pub struct Harness {
     pub feed: Option<Arc<Feed>>,
     pub spaces: Option<Arc<Spaces>>,
     pub agenda: Option<Arc<Agenda>>,
+    pub events: Option<Arc<Events>>,
 }
 
 impl Harness {
@@ -61,6 +62,7 @@ impl Harness {
             feed: None,
             spaces: None,
             agenda: None,
+            events: None,
         }
     }
 
@@ -78,6 +80,7 @@ impl Harness {
         let feed = Feed::from_settings(&config.feed, &registry)?;
         let spaces = Spaces::from_settings(&config.spaces, &registry)?;
         let agenda = Agenda::from_settings(&config.agenda, feed.as_ref(), &registry)?;
+        let events = Events::from_settings(&config.events, history.as_ref(), &registry)?;
         Ok(Self {
             registry,
             history,
@@ -89,6 +92,7 @@ impl Harness {
             feed,
             spaces,
             agenda,
+            events,
         })
     }
 
@@ -134,6 +138,9 @@ impl Harness {
         }
         if self.agenda.is_some() {
             profile.append_agenda();
+        }
+        if self.events.is_some() {
+            profile.append_events(self.feed.is_some());
         }
         if let Some(workspace) = &profile.context.workspace {
             let sources = read_project_instructions(workspace, &profile.project_instructions)?;
@@ -209,6 +216,7 @@ mod tests {
             feed: None,
             spaces: None,
             agenda: None,
+            events: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {
@@ -261,6 +269,7 @@ mod tests {
             feed: None,
             spaces: None,
             agenda: None,
+            events: None,
         };
         let config = AgentConfig::default();
         let profile = || ExecutionProfile {
@@ -308,6 +317,7 @@ mod tests {
             feed: None,
             spaces: None,
             agenda: None,
+            events: None,
         };
         let config = AgentConfig::default();
         let mut profile = ExecutionProfile {

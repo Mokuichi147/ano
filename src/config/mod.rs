@@ -28,6 +28,7 @@ use crate::{
         agenda::AgendaSettings,
         character::CharacterSettings,
         chronotope::HistorySettings,
+        events::EventSettings,
         feed::FeedSettings,
         objectives::ObjectiveSettings,
         openai::{ApiSettings, ProviderSettings},
@@ -153,6 +154,8 @@ pub struct AppConfig {
     /// Plans the user mentions in passing, left in the feed as candidates
     /// for reminders.
     pub agenda: AgendaSettings,
+    /// Dated events from articles the user reads, kept in chronotope.
+    pub events: EventSettings,
 }
 
 impl AppConfig {
@@ -297,6 +300,9 @@ impl AppConfig {
         self.history.validate()?;
         if self.agenda.enabled && !(self.feed.enabled && self.routines.enabled) {
             bail!("[agenda] leaves candidates for reminders in the feed; set [feed] enabled = true and [routines] enabled = true");
+        }
+        if self.events.enabled && !self.history.enabled {
+            bail!("[events] keeps events in chronotope; set [history] enabled = true");
         }
         if self.api.timeout_secs == 0 {
             bail!("api.timeout_secs must be greater than zero");

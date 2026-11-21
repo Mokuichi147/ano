@@ -214,6 +214,14 @@ chronotope は HTTP ヘッダーから主体を作り、認証は前段のゲー
 
 `[history]` を有効にしていれば、定期実行で `history_search` によりユーザーの発言を読み、`received_at` を `said_at` として渡すことで、過去の会話から予定を拾い直せる。
 
+## 記事の出来事での利用
+
+[記事の出来事（`event_save` / `event_search`）](agent-runtime.md#記事の出来事event_save--event_search)は、`[history]` と同じ接続で chronotope のサーバーを使う。
+- **保存。** 記事は公開の情報なので、`/v1/ingest/text` で Web ページの出典として保存する。そのとき、モデルが抽出した結果を `extraction` として渡す。
+- **時刻の解決。** 時刻は記事の公開日を基準に chronotope が解決する。
+- **検索。** `search`（`types: ["Event"]`、`time.expression`、ローカルの暦）で探す。
+- **利用者との結びつき。** どのユーザーがどの出来事を保存したかは ano の手元にだけ持つ。公開データには ano の主体だけが残る。
+
 ## 移行と受け入れ条件
 
 既存のセッション JSON と圧縮前アーカイブから、残っている原文は取り込める。

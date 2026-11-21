@@ -95,7 +95,7 @@ impl HistorySettings {
 }
 
 /// 今のローカルの UTC オフセットを持つグレゴリオ暦の名前（`gregorian+09:00` など）。
-fn local_calendar() -> String {
+pub(crate) fn local_calendar() -> String {
     calendar_for_offset(chrono::Local::now().offset().local_minus_utc())
 }
 
@@ -180,6 +180,12 @@ impl Chronotope {
             user,
         ))?;
         Ok(self.data_dir.join(hex::encode(Sha256::digest(key))))
+    }
+
+    /// POST `body` to `/v1/{path}` on behalf of `user`, for the other
+    /// features that keep data in chronotope (such as events from articles).
+    pub(crate) async fn request(&self, user: &str, path: &str, body: &Value) -> Result<Value> {
+        self.post(user, path, body).await
     }
 
     async fn post(&self, user: &str, path: &str, body: &Value) -> Result<Value> {
