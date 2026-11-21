@@ -217,6 +217,9 @@ fn article_url(arguments: &Value) -> Result<String> {
 pub struct Events {
     root: PathBuf,
     chronotope: Arc<Chronotope>,
+    /// Saves run one at a time, so the same event saved by parallel calls
+    /// reaches chronotope once.
+    saving: tokio::sync::Mutex<()>,
 }
 
 impl Events {
@@ -224,6 +227,7 @@ impl Events {
         Self {
             root: root.into(),
             chronotope,
+            saving: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -321,6 +325,7 @@ impl Events {
         let published = published_at(published_text.as_deref(), now)?;
         let time = read_event_time(&when, &published)?;
 
+        let _saving = self.saving.lock().await;
         if let Some(saved) = self
             .load(user)?
             .events
@@ -330,7 +335,10 @@ impl Events {
             return Ok(json!({"status": "already_saved", "name": saved.name, "time": saved.time}));
         }
 
-        let calendar = local_calendar();
+        // Read the time in the offset of when the article was published, as
+        // read_event_time did.
+        let offset_minutes = published.offset().fix().local_minus_utc() / 60;
+        let calendar = CalendarFrame::gregorian_with_offset(offset_minutes).key;
         let mut entities = vec![json!({"ref": "E1", "types": ["Event"], "label": name})];
         let mut claims = vec![json!({
             "subject": "E1", "predicate": "occurred_at",
@@ -411,6 +419,15 @@ impl Events {
     pub async fn search(&self, user: &str, arguments: &Value, now: u64) -> Result<Value> {
         let time = text(arguments, "time", MAX_WHEN_CHARS)?;
         let words = text(arguments, "text", MAX_NAME_CHARS)?;
+        // chronotope refuses a period it cannot read without saying why;
+        // check it here to tell the model.
+        if let Some(time) = &time {
+            if let Err(error) = TemporalExpression::strict(time, &local_calendar()) {
+                bail!(
+                    "cannot read the period {time:?}: {error}; give it like 来週末, 今月, or 12月"
+                );
+            }
+        }
         let saved = self.load(user)?.events;
         if time.is_none() && words.is_none() {
             let mut upcoming: Vec<&SavedEvent> = saved

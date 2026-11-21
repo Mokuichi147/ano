@@ -148,7 +148,8 @@ async fn an_event_is_saved_once_and_found_by_period_with_its_article() {
         assert_eq!(claims[0]["predicate"], "occurred_at");
         // The time goes to chronotope as written, read in the local calendar.
         assert_eq!(claims[0]["object"]["time"], "11月28日から29日まで");
-        assert_eq!(claims[0]["object"]["calendar"], local_calendar());
+        // In the offset of when the article was published.
+        assert_eq!(claims[0]["object"]["calendar"], "gregorian+09:00");
         assert_eq!(claims[1]["predicate"], "took_place_at");
     }
 
@@ -189,6 +190,37 @@ async fn an_event_is_saved_once_and_found_by_period_with_its_article() {
     let later = at("2026-12-01T00:00:00+09:00").timestamp() as u64;
     let upcoming = events.search("alice", &json!({}), later).await.unwrap();
     assert_eq!(upcoming["events"], json!([]));
+    server.abort();
+}
+
+#[tokio::test]
+async fn parallel_saves_of_one_event_reach_chronotope_once() {
+    let root = tempfile::tempdir().unwrap();
+    let fake = Arc::new(Fake {
+        requests: Mutex::new(Vec::new()),
+        queries: Mutex::new(vec![json!({})]),
+    });
+    let (url, server) = serve(Arc::clone(&fake)).await;
+    let events = events(root.path(), &url);
+    let now = at("2026-11-21T12:00:00+09:00").timestamp() as u64;
+    let arguments = fes();
+    let (first, second) = tokio::join!(
+        events.save("alice", &arguments, now),
+        events.save("alice", &arguments, now)
+    );
+    let statuses = [
+        first.unwrap()["status"].clone(),
+        second.unwrap()["status"].clone(),
+    ];
+    assert!(statuses.contains(&json!("saved")) && statuses.contains(&json!("already_saved")));
+    let ingests = fake
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(path, _)| path == "ingest/text")
+        .count();
+    assert_eq!(ingests, 1);
     server.abort();
 }
 
@@ -268,6 +300,14 @@ async fn arguments_are_checked_before_anything_is_sent() {
     refused(json!({"when": "そのうち"}), "cannot read").await;
     refused(json!({"published": "2027-01-01"}), "future").await;
     assert!(events.saved("alice").unwrap().is_empty());
+    let error = events
+        .search("alice", &json!({"time": "そのうち"}), now)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("cannot read the period"),
+        "{error:#}"
+    );
 }
 
 /// Against a real chronotope: `ANO_CHRONOTOPE_BIN=/path/to/chronotope
