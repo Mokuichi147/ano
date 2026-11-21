@@ -177,10 +177,14 @@ max_retained_jobs = 1000
 job_timeout_secs = 1800
 
 # 自動化（docs/automation.md）。ano serve が、POST /events/<name> に送られたイベント
-# （レポート・監視の結果・cron からの起動など）を受け、ルールに従って無視・通知・
+# （レポート・監視の結果など）や、決まった時刻に自分で作るイベント（schedule）を受け、ルールに従って無視・通知・
 # 作業（ジョブ）のどれにするかを決めます。sources が無ければ無効です。
 # [automation]
 # state_file = "~/ano-automation.json"   # 省略時は OS 標準のデータディレクトリの automation/state.json
+#
+# [automation.approvals]                # 作業の承認を、ルールの通知先へ承認ページのリンクで尋ねる
+# public_url = "https://ano.example.com" # スマホからこのサーバーに届く URL
+# timeout_secs = 600                     # これを過ぎると拒否
 #
 # [automation.notifiers.phone]
 # kind = "ntfy"                          # ntfy・discord・slack・webhook
@@ -196,10 +200,10 @@ job_timeout_secs = 1800
 # secret_env = "ANALYTICS_SECRET"        # このソース専用の秘密（省略するとサーバーの秘密）
 # trust = "trusted"                      # 自分のサービスのレポート（既定は untrusted）
 #
-# [automation.sources.cron]
-# kind = "webhook"                       # OS の cron などから定期的に POST して作業を起動する
-# secret_env = "CRON_SECRET"
-# trust = "trusted"
+# [automation.sources.daily]
+# kind = "schedule"                      # 決まった時刻に ano serve が自分でイベントを作る
+# cron = "0 9 * * MON-FRI"               # 分 時 日 月 曜日（サーバーのローカル時刻）
+# title = "毎朝の Issue 確認"
 #
 # [[automation.rules]]                   # 上から順に照合し、最初に一致したルールを使う
 # name = "active-users"
@@ -209,8 +213,7 @@ job_timeout_secs = 1800
 #
 # [[automation.rules]]
 # name = "daily-issues"
-# sources = ["cron"]
-# kinds = ["daily"]
+# sources = ["daily"]
 # action = "run"
 # task = "GitHub MCP で owner/name の過去1日の新しい Issue を読み、対応が要るものだけ notify_user で知らせる"
 # environment = "coding"                 # 第三者の文面を読む作業は approval_mode = "auto" か "deny" の環境で
@@ -241,6 +244,53 @@ enabled = false
 # Linux は ~/.local/share/ano/skills、Windows は %APPDATA%\ano\data\skills）。
 # ユーザーごとに <dir>/<user>/<name>/SKILL.md へ保存します。
 # dir = "~/notes/ano-skills"
+
+[character]
+# エージェントが名乗る名前・タグライン・性格と口調（SOUL.md）を instructions に加えます。既定は無効です。
+# `ano character set --name ...` か、会話で「〜と名乗って」と頼むと作れます（変更は承認が必要）。
+enabled = false
+# 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/character、
+# Linux は $XDG_DATA_HOME/ano/character（既定 ~/.local/share/ano/character）、Windows は %APPDATA%\ano\data\character）。
+# ユーザーごとに <dir>/<user>/SOUL.md へ保存します。
+# dir = "~/notes/ano-character"
+
+[memory]
+# 会話でユーザーが話した自分についての事実（好み・予定など）を MEMORY.md に記憶し、以後の実行に載せます。
+# 既定は無効です。保存は承認が必要で、`ano memory` で一覧・追加・削除できます。
+enabled = false
+# 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/memory、
+# Linux は $XDG_DATA_HOME/ano/memory（既定 ~/.local/share/ano/memory）、Windows は %APPDATA%\ano\data\memory）。
+# dir = "~/notes/ano-memory"
+
+[objectives]
+# ユーザーが時間をかけて取り組む目標（習慣・貯金・学習など）と進捗を記録し、進行中のものを以後の実行に載せます。
+# 既定は無効です。作成と変更は承認が必要で、`ano objectives` で一覧・追加・記録できます。
+# 1回の実行の完了条件である --goal とは別のものです。
+enabled = false
+# 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/objectives、
+# Linux は $XDG_DATA_HOME/ano/objectives（既定 ~/.local/share/ano/objectives）、Windows は %APPDATA%\ano\data\objectives）。
+# dir = "~/notes/ano-objectives"
+
+[routines]
+# 会話で頼んだリマインダーや定期作業（「毎週金曜17時に振り返りをして」）を routines.json に保存します。
+# 実行するのは [automation.sources.<name>] kind = "routines" を置いた ano serve です（docs/automation.md）。
+# 既定は無効です。作成と削除は承認が必要で、`ano routines` で一覧・作成・削除できます。
+enabled = false
+# 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/routines、
+# Linux は $XDG_DATA_HOME/ano/routines（既定 ~/.local/share/ano/routines）、Windows は %APPDATA%\ano\data\routines）。
+# dir = "~/notes/ano-routines"
+
+[feed]
+# エージェントが残す提案（idea）・記事（article）・報告（report）の置き場。ano web のホームと `ano feed` で読みます。
+# 定期実行（docs/automation.md）から「記憶と目標から提案を feed_post で残す」作業を動かすと、先回りの提案になります。
+enabled = false
+# dir = "~/notes/ano-feed"
+
+[spaces]
+# 頼まれてエージェントが作る小さなページ（トラッカー・プランナーなど）。ano web の /spaces/<name> で、
+# ほかから切り離して（通信できない状態で）表示します。データは定期実行の作業で更新できます。
+enabled = false
+# dir = "~/notes/ano-spaces"
 
 # Webhook callers and `ano run --environment NAME` select names declared here.
 # Relative workspace paths and MCP cwd paths resolve from this config directory;

@@ -1,6 +1,6 @@
 # エージェントの実行モデル
 
-`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェントについて説明します。
+`Agent::run` は Responses API に要求を送り、返された function call を実行して結果を次の要求へ返すループです。このページでは、ループの上限・並行実行・ストリーミング・セッション・圧縮・トークン上限・作業計画・tool の遅延公開・サブエージェント・スキル・キャラクター・記憶・目標・フィード・スペースについて説明します。
 
 - [実行ループと上限](#実行ループと上限)
 - [回答のストリーミング](#回答のストリーミング)
@@ -13,6 +13,11 @@
 - [サブエージェント（delegate_task）](#サブエージェントdelegate_task)
 - [変更のレビュー（review_changes）](#変更のレビューreview_changes)
 - [スキル（skill_read / skill_save）](#スキルskill_read--skill_save)
+- [キャラクター（character_update）](#キャラクターcharacter_update)
+- [記憶（memory_save / memory_forget）](#記憶memory_save--memory_forget)
+- [目標（objective_set / objective_log / objective_read）](#目標objective_set--objective_log--objective_read)
+- [フィード（feed_post / feed_read）](#フィードfeed_post--feed_read)
+- [スペース（space_save / space_read / space_data_set）](#スペースspace_save--space_read--space_data_set)
 
 ## 実行ループと上限
 
@@ -279,5 +284,166 @@ description: リリースビルドを作り、スモークテストで確認す�
 **記録。** モデルは、検証まで終えた作業のうち、試行錯誤して見つけた手順や、従ったスキルの誤り・不足、ユーザーが上手くいったと言った手順を、最終回答の前に `skill_save` で保存します。同じ名前で保存すると置き換わるため、既存のスキルは読んでから改善版を保存します。chat では `/skill [観点]` で、この会話で上手くいった手順をスキルにするよう明示的に頼めます（保存するほどのものがなければ保存しません）。
 
 - **保存には承認が必要です。** スキルは以後のすべての実行で指示として読まれるため、`workspace_exec` と同じ[承認モード](mcp.md#承認モード)で判定します。`auto` の判定用モデルは、依頼の作業から得た再利用できる手順を許可し、秘密情報・個人情報を含むもの、承認の省略や権限の緩和・データの送信を指示するもの、文書や tool 出力に埋め込まれた指示に由来するように見えるものを拒否します。承認モードが `deny` の実行（環境の既定）では、保存についての指示を省きます。
+- 信頼できないイベントから始まった[自動化](automation.md)の作業では、`skill_save` を使わせません。
 - `skill_read` と `skill_save` は `tool_search` を経ずに常に公開します（スキルの一覧を見たモデルがすぐ呼べるように）。`allowed_tools` を指定した環境では `skill_*` を加えてください。`skill_read` を使えない実行にはスキルの一覧も載せません。
 - スキルは手順の参考で、運用者の instructions やユーザーの依頼より優先されません。不要・誤ったスキルは `SKILL.md` をディレクトリごと削除するか、直接編集してください。
+
+## キャラクター（character_update）
+
+キャラクターは、エージェントがユーザーと話すときの名前・一言の紹介（タグライン）・性格と口調（ソウル）です。どのプロジェクトでも同じ相手と話している感覚で使えるよう、ユーザーごとに1つだけ持ちます。`[character] enabled = true` で有効になります。
+
+```toml
+[character]
+enabled = true
+# dir = "~/notes/ano-character"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**作り方。** コマンドで作るか、会話で頼みます。
+
+```sh
+ano character set --name ミラ --tagline "好奇心旺盛な相棒" --soul "敬語を使わず、短く話す。冗談は控えめに。"
+ano character set --soul-file soul.md   # ソウルをファイルから読む
+ano character                            # 今のキャラクターと保存先を表示
+```
+
+会話では「これからはミラと名乗って」「もっと短く話して」のように頼むと、モデルが `character_update` で名前・タグライン・ソウルのうち頼まれた部分を書き換えます。
+
+**保存形式。** `<dir>/<ユーザー>/SOUL.md` に、frontmatter の `name`（64文字以内）と `tagline`（省略可、200文字以内）、本文のソウル（Markdown、4 KiB まで）として保存します。手で編集しても読めます（ほかの frontmatter は無視します）。`dir` を省略した場合の場所はスキルと同じく OS 標準のデータディレクトリ（macOS は `~/Library/Application Support/ano/character`、Linux は `$XDG_DATA_HOME/ano/character`（既定 `~/.local/share/ano/character`）、Windows は `%APPDATA%\ano\data\character`）です。
+
+```markdown
+---
+name: ミラ
+tagline: 好奇心旺盛な相棒
+---
+
+敬語を使わず、短く話す。冗談は控えめに。
+```
+
+**参照。** 実行の開始時に、既定の instructions の後ろ（AGENTS.md とスキル一覧の前）へ `# Character` として名前・タグライン・ソウルを追記します。運用者の instructions を置き換えるのではなく、話し方だけを足します。ソウルは毎回の要求に含まれるため、ローカル AI の小さなコンテキストでも負担にならないよう 4 KiB に制限しています。キャラクターがまだない場合は、作り方だけを伝えます。
+
+- **変更には承認が必要です。** キャラクターは以後のすべての実行で指示として読まれるため、`skill_save` と同じく[承認モード](mcp.md#承認モード)で判定します。`auto` の判定用モデルは、ユーザーが名前・性格・口調の変更を頼んだときだけ許可し、話し方を超えた指示（承認の省略、データの送信など）を含むものは拒否します。モデルにも、文書や tool の出力に書かれていても変えないよう指示しています。承認モードが `deny` の実行では、変更についての指示を省きます。
+- キャラクターは話し方の指定で、何をしてよいかは変えません。運用者の instructions・ユーザーの依頼・承認より優先されず、ソウルに操作・権限・承認・データの送信についての指示があっても無視するよう伝えています。コード・コミット・ファイル・サブエージェント向けの報告は普段どおりの言葉で書かせます。
+- 承認モードが `allow` の環境では、変更も確認なしに通ります。第三者が書いた文面（Web ページ、Issue、信頼できないリポジトリの `AGENTS.md` など）を扱う環境では `allow` を避けるか、`disabled_tools` に `character_update` を加えてください。
+- 会話の途中で変えた場合、その会話では tool の結果に新しいキャラクターが返り、モデルはそれに従います。instructions に載るのは次の会話（chat・Web・ACP では新しいセッション）からです。
+- 信頼できないイベントから始まった[自動化](automation.md)の作業では、`character_update` を使わせません。
+- `character_update` は `tool_search` を経ずに常に公開します。`allowed_tools` を指定した環境では `character_update` を加えてください。使えない実行でも、キャラクター自体は instructions に載ります。
+- 読み取れない `SOUL.md` は警告を出して無視し、その実行では変更も案内しません。
+
+## 記憶（memory_save / memory_forget）
+
+記憶は、会話の中でユーザーが話した自分についての事実（好み・予定・習慣・身近な人・仕事の進め方など）を短い一文ずつ保存したものです。次の会話からは、言い直さなくても答えや提案に生かします。`[memory] enabled = true` で有効になります。
+
+```toml
+[memory]
+enabled = true
+# dir = "~/notes/ano-memory"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**保存形式。** `<dir>/<ユーザー>/MEMORY.md` に、事実を `- ` で始まる1行ずつ書きます（1件 300 文字まで、ユーザーごとに 300 件まで）。手で編集でき、`- ` で始まらない行（見出しやメモ）は事実として扱わず、そのまま残します。手で書いた長い行は 300 文字で切って読みます。`dir` を省略した場合の場所は、macOS は `~/Library/Application Support/ano/memory`、Linux は `$XDG_DATA_HOME/ano/memory`（既定 `~/.local/share/ano/memory`）、Windows は `%APPDATA%\ano\data\memory` です。
+
+```sh
+ano memory                      # 番号付きで一覧
+ano memory add "緑茶が好き"      # 追加
+ano memory forget 2 5           # 一覧の番号で削除
+```
+
+**参照。** 実行の開始時に、新しい方から合計 4 KiB までの事実を `# Memory` として instructions に載せます（入りきらない古い事実は件数だけ伝えます）。事実はユーザーについてのデータで、指示ではないと明示し、今ユーザーが言うことと食い違えばユーザーを優先させます。役に立つときは、頼まれなくても記憶に沿った提案をするよう伝えています。
+
+**記録と削除。** ユーザーが以後にも関わりそうなことを話すと、モデルが `memory_save` で一文として保存します。「忘れて」と頼まれたときや、事実が古くなったときは `memory_forget` で一覧どおりの文言を指定して消し、必要なら正しい事実を保存し直します。同じ事実（大文字小文字と空白の違いを除く）は重ねて保存しません。
+
+- **保存には承認が必要です。** 記憶は以後のすべての実行で読まれるため、[承認モード](mcp.md#承認モード)で判定します。`auto` の判定用モデルは、ユーザー自身が話した事実を許可し、秘密情報や、文書・Web ページ・tool の出力に由来するように見えるもの、話し方や事実を超えた指示を含むものを拒否します。削除も、文書や Web ページに書かれた指示で記憶を消させないよう承認が必要で、`auto` ではユーザーが忘れる・直すよう頼んだときだけ許可します。承認モードが `deny` の実行では、保存と削除についての指示を省きます。
+- **第三者の入力では使いません。** [自動化](automation.md)で信頼できないイベント（`trust = "untrusted"`）から始まった作業には、記憶を載せず、`memory_save`・`memory_forget` も使わせません。Issue などに埋め込まれた指示で、ユーザーについての情報を外へ送らせないためです。同じ理由で、過去の会話を読む `history_*`（[chronotope の会話履歴](chronotope-history.md)）と、以後の実行に残るものを書く `character_update`・`skill_save` も使わせません。
+- `memory_save` と `memory_forget` は `tool_search` を経ずに常に公開します。`allowed_tools` を指定した環境では `memory_*` を加えてください。
+- 会話の途中で保存した事実は、tool の結果としてモデルに伝わり、instructions に載るのは次の会話からです。
+
+## 目標（objective_set / objective_log / objective_read）
+
+目標は、ユーザーが数週間から数か月かけて取り組むこと（習慣・貯金・学習など）と、その進捗の記録です。会話がまたがっても続き、エージェントは進んでいる目標を踏まえて次の一歩を提案し、報告された進捗を記録します。`[objectives] enabled = true` で有効になります。
+
+1回の実行の完了条件である[ゴール](#ゴールと完了条件)（`--goal`・`/goal`）とは別のものです。ゴールはその作業が終わったかを確かめるための条件で、目標は作業をまたいで追いかけるものです。
+
+```toml
+[objectives]
+enabled = true
+# dir = "~/notes/ano-objectives"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**中身。** 各目標は、id（`o1` のように振られ、消しても使い回しません）、タイトル、カテゴリ（health・money などの自由な一語）、理由、状態（`active`・`paused`・`done`・`dropped`）、次の一歩、期日、数値の目標（値と単位）、進捗の記録（日時・一文・そのときの値）を持ちます。
+
+```sh
+ano objectives                                                    # 進行中と保留中の一覧（--all で終わったものも）
+ano objectives add "貯金" --category money --target 100000 --unit 円 --due 2026-12-31
+ano objectives log o1 "今月は3万円貯めた" --value 30000             # 進捗の記録
+ano objectives set o1 --next-step "スマホのプランを見直す"           # 一部の変更
+ano objectives set o1 --status done
+ano objectives set o1 --clear-target                               # 数値の目標を外す
+ano objectives show o1                                            # 進捗の記録を含めて表示
+ano objectives remove o1
+```
+
+**参照。** 実行の開始時に、進行中（`active`）の目標を、更新の新しい順に1行ずつ `# Objectives` として載せます（合計 3 KiB まで）。各行には、数値の目標に対する今の値、期日、次の一歩、最後の進捗を含めます。全体や進捗の記録は `objective_read` で読めます。
+
+**作成と記録。** ユーザーが時間をかけて達成したいことを話すと、エージェントは目標にすることを提案し、理由や目標の数値・日付をいくつか質問して具体的にし、最初の一歩を添えて `objective_set` で作ります。進捗を報告されたら `objective_log` で記録します（数値の目標があれば、増えた分ではなくその時点の値を記録します）。
+
+- **作成と変更（`objective_set`）には承認が必要です。** 目標は以後のすべての実行に載るためです。進捗の記録（`objective_log`）と読み取り（`objective_read`）は承認なしで行います。承認モードが `deny` の実行では、作成と変更についての指示を省きます。
+- **第三者の入力では使いません。** 信頼できないイベントから始まった[自動化](automation.md)の作業には、目標を載せず、`objective_*` も使わせません。
+- 保存先は `<dir>/<ユーザー>/objectives.json` です（JSON。目標は 100 件、進捗は目標ごとに新しい 200 件まで）。`dir` を省略した場合の場所は、macOS は `~/Library/Application Support/ano/objectives`、Linux は `$XDG_DATA_HOME/ano/objectives`（既定 `~/.local/share/ano/objectives`）、Windows は `%APPDATA%\ano\data\objectives` です。
+- `objective_set` と `objective_log` は `tool_search` を経ずに常に公開します。`objective_read` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます（進行中の目標は instructions に載っているため、ほとんどの会話では不要です。`tool_search` を無効にした実行では、`objective_read` の案内を省きます）。`allowed_tools` を指定した環境では `objective_*` を加えてください。`objective_read` を使えない実行には目標を載せません。
+
+## フィード（feed_post / feed_read）
+
+フィードは、エージェントがユーザーに後で見てもらうために残すものの置き場です。記憶や目標から考えた**提案**（`idea`。実行するための依頼文つき）、興味に合う**記事**（`article`。URL つき）、自分で進めた作業の**報告**（`report`）を残します。ユーザーは `ano web` のホームや `ano feed` で読み、👍・👎 の評価や「済み」を付けます。`[feed] enabled = true` で有効になります。
+
+```toml
+[feed]
+enabled = true
+# dir = "~/notes/ano-feed"   # 省略時は OS 標準のデータディレクトリ
+```
+
+**先回りの提案と記事の収集。** 決まった時刻に動かすと、頼まれる前に提案や記事が届きます（[定期実行](automation.md#定期実行schedule)）。
+
+```toml
+[automation.sources.ideas]
+kind = "schedule"
+cron = "0 8 * * *"
+
+[automation.sources.reading]
+kind = "schedule"
+cron = "30 7 * * MON-FRI"
+
+[[automation.rules]]
+name = "ideas"
+sources = ["ideas"]
+action = "run"
+task = "記憶と目標を踏まえて、今日やるとよさそうなことを2〜3件考え、feed_post で idea として残す。feed_read で最近の評価を確かめ、似たものの繰り返しや 👎 のついた種類は避ける"
+environment = "assistant"
+
+[[automation.rules]]
+name = "reading"
+sources = ["reading"]
+action = "run"
+task = "記憶にある興味に合う新しい記事を web_fetch で探し、良いものを2〜3件 feed_post で article として残す"
+environment = "reader"                  # web_fetch を許し、approval_mode = "auto" の環境
+```
+
+- `feed_post`（残す）と `feed_read`（最近の項目を評価・済みとともに読む）は承認なしで使えます。残すのはユーザーに見せる項目で、以後の実行の instructions には載せません。`feed_read` で読んだ項目は、作業の中ではデータとして扱います。`feed_post` は `tool_search` を経ずに常に公開し、`feed_read` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます（`tool_search` を無効にした実行では、投稿前に読む案内を省きます）。
+- 実行の instructions には、フィードの使い方だけを短く載せます（項目そのものは載せません）。
+- 保存先は `<dir>/<ユーザー>/feed.json` です（新しい 200 件まで）。`ano feed` で一覧、`ano feed rate f3 up`（`down`・`none`）で評価、`ano feed done f3` で済みにできます。
+- 信頼できないイベントから始まった作業では、`feed_*` を使わせません。
+
+## スペース（space_save / space_read / space_data_set）
+
+スペースは、頼まれてエージェントが作る小さなページです（習慣のトラッカー、週間プランナー、イベントの一覧など）。`ano web` の `/spaces/<name>` で開きます。定期実行の作業でデータを更新すれば、開くたびに新しい内容が見られます。`[spaces] enabled = true` で有効になります。
+
+```toml
+[spaces]
+enabled = true
+# dir = "~/notes/ano-spaces"   # 省略時は OS 標準のデータディレクトリ
+```
+
+- **作り方。** 「毎日の運動を記録できるトラッカーを作って」のように頼むと、モデルが `space_save` で1枚の HTML（CSS と JavaScript はページ内に書く）とデータ（JSON、64 KiB まで）を保存します。ページは `window.ANO_SPACE.data` を読んで表示します。直すときは `space_read` で読んでから保存し直し、表示する中身だけを変えるときは `space_data_set` でデータを置き換えます。
+- **隔離。** `/spaces/<name>` は外枠のページで、スペースの中身はその中の iframe（`sandbox="allow-scripts allow-forms allow-modals"`、中身は `/spaces/<name>/frame`）に表示します。中身は CSP の `sandbox` でオリジンを持たないページとして動くので、`ano web` の Cookie も API も使えず、`connect-src 'none'` などで通信と外部からの読み込みも禁じます。外枠の CSP（`default-src 'self'`）が iframe を外部のサイトへ遷移させないので、データを URL に載せて持ち出すこともできません。ポップアップと最上位のページの遷移も許しません。データはサーバーが中身に埋め込み、`</script>` で抜け出せないようにエスケープします。
+- **今の制約。** ページの中で付けたチェックやメモは保存されません（ページを開き直すと戻ります）。記録を残したいものは、会話で頼んでデータを更新させてください。
+- 保存先は `<dir>/<ユーザー>/<name>/`（`index.html`・`data.json`・`space.json`）で、ユーザーごとに 30 件まで、ページは 200 KiB までです。名前は英小文字・数字・ハイフンです。`ano spaces` で一覧、`ano spaces remove <name>` で削除できます。
+- 実行の instructions には、作り方と、ユーザーのスペースの名前と題名を載せます。`space_*` は承認なしで使えます（ページは隔離されるため）。`space_save` は `tool_search` を経ずに常に公開し、`space_read` と `space_data_set` は要求を小さく保つため常には公開せず、必要なときにモデルが `tool_search` で読み込みます。データだけを更新するときに `space_save` でページごと作り直さないよう、instructions で伝えます（`tool_search` を無効にした実行では、既存のスペースを記憶から作り直さないよう伝えます）。信頼できないイベントから始まった作業では、`space_*` を使わせません。
+

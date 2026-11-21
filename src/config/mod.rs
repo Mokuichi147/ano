@@ -25,9 +25,15 @@ use crate::{
         settings::AgentConfig,
     },
     infrastructure::{
+        character::CharacterSettings,
         chronotope::HistorySettings,
+        feed::FeedSettings,
+        objectives::ObjectiveSettings,
         openai::{ApiSettings, ProviderSettings},
+        routines::RoutineSettings,
         skills::SkillSettings,
+        spaces::SpaceSettings,
+        user_memory::MemorySettings,
     },
     interface::webhook::{AutomationSettings, WebhookSettings},
 };
@@ -130,6 +136,19 @@ pub struct AppConfig {
     pub automation: AutomationSettings,
     pub history: HistorySettings,
     pub skills: SkillSettings,
+    /// The name and personality the agent takes on with its user.
+    pub character: CharacterSettings,
+    /// Facts about the user that conversations save and later runs read.
+    pub memory: MemorySettings,
+    /// The user's long-term objectives and the progress toward them.
+    pub objectives: ObjectiveSettings,
+    /// Reminders and recurring tasks set up in conversations, which
+    /// `ano serve` carries out.
+    pub routines: RoutineSettings,
+    /// Ideas, articles, and reports the agent leaves for the user.
+    pub feed: FeedSettings,
+    /// Small pages the agent builds for the user, shown in `ano web`.
+    pub spaces: SpaceSettings,
 }
 
 impl AppConfig {
@@ -207,6 +226,24 @@ impl AppConfig {
         }
         if let Some(dir) = &mut self.skills.dir {
             *dir = resolve_path(dir, directory, home).context("invalid skills.dir")?;
+        }
+        if let Some(dir) = &mut self.spaces.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid spaces.dir")?;
+        }
+        if let Some(dir) = &mut self.feed.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid feed.dir")?;
+        }
+        if let Some(dir) = &mut self.routines.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid routines.dir")?;
+        }
+        if let Some(dir) = &mut self.objectives.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid objectives.dir")?;
+        }
+        if let Some(dir) = &mut self.memory.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid memory.dir")?;
+        }
+        if let Some(dir) = &mut self.character.dir {
+            *dir = resolve_path(dir, directory, home).context("invalid character.dir")?;
         }
         if let Some(file) = &mut self.automation.state_file {
             *file = resolve_path(file, directory, home).context("invalid automation.state_file")?;

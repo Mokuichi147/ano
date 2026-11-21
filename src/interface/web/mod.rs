@@ -12,6 +12,7 @@ mod access;
 mod approval;
 mod events;
 mod markdown;
+mod saved;
 mod session;
 #[cfg(test)]
 mod tests;
@@ -37,6 +38,7 @@ use axum::{
 };
 use events::Outgoing;
 use futures::StreamExt;
+use saved::SavedSessions;
 use serde::Deserialize;
 use serde_json::json;
 use session::{MissingWorkspace, NewSession, TurnRefused, WebSession, Workbench};
@@ -50,9 +52,8 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::broadcast::error::RecvError, task::JoinSet};
 
-/// Sessions that may exist at the same time. Running several in parallel
-/// is the next step; the API and the session table already allow it.
-const MAX_SESSIONS: usize = 1;
+/// Sessions that may exist at the same time, saved ones included.
+const MAX_SESSIONS: usize = 50;
 /// Longest message the page may send.
 const MAX_MESSAGE_BYTES: usize = 100_000;
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,7 +91,12 @@ pub struct WebOptions {
     pub token: Option<String>,
     /// Off, anyone who reaches the server may use it without the token.
     pub authenticate: bool,
+    /// Where sessions are kept across restarts; `None` keeps them in memory
+    /// only, so they end with the server.
+    pub sessions_dir: Option<PathBuf>,
 }
+
+pub use saved::default_sessions_dir;
 
 struct WebState {
     harness: Harness,
@@ -102,12 +108,25 @@ struct WebState {
     workspace_root: Option<PathBuf>,
     access: Access,
     sessions: RwLock<BTreeMap<String, Arc<WebSession>>>,
+    /// Where sessions are kept, when they are.
+    saved: Option<Arc<SavedSessions>>,
     /// Serializes session creation, so the limit holds.
     creating: tokio::sync::Mutex<()>,
     turns: Mutex<JoinSet<()>>,
 }
 
 impl WebState {
+    fn workbench(&self) -> Workbench<'_> {
+        Workbench {
+            config: &self.config,
+            harness: &self.harness,
+            mcp: &self.mcp,
+            user: &self.user,
+            default_workspace: &self.default_workspace,
+            workspace_root: self.workspace_root.as_deref(),
+        }
+    }
+
     fn session(&self, id: &str) -> Option<Arc<WebSession>> {
         self.sessions
             .read()
@@ -166,6 +185,11 @@ pub async fn serve(
             options.workspace.display()
         );
     }
+    let saved = options
+        .sessions_dir
+        .as_deref()
+        .map(|dir| SavedSessions::new(dir, &options.user).map(Arc::new))
+        .transpose()?;
     let listener = TcpListener::bind(address)
         .await
         .with_context(|| format!("failed to listen on {address}"))?;
@@ -179,9 +203,11 @@ pub async fn serve(
         default_workspace,
         access: Access::new(token, local.port()),
         sessions: RwLock::default(),
+        saved,
         creating: tokio::sync::Mutex::new(()),
         turns: Mutex::new(JoinSet::new()),
     });
+    restore_sessions(&state).await;
     println!(
         "{}\nCtrl+C stops the server.",
         startup_message(local, state.access.token())
@@ -223,6 +249,41 @@ pub async fn serve(
         turns.abort_all();
     }
     served
+}
+
+/// Open the saved sessions again, most recently used first, up to the
+/// limit. A session that cannot be opened (its folder is gone, or its
+/// endpoint changed) is reported and left on disk.
+async fn restore_sessions(state: &WebState) {
+    let Some(saved) = &state.saved else {
+        return;
+    };
+    let list = saved.list();
+    let mut restored = 0;
+    for meta in list.into_iter().take(MAX_SESSIONS) {
+        let id = meta.id.clone();
+        match WebSession::open(
+            state.workbench(),
+            meta.request.clone(),
+            Some(Arc::clone(saved)),
+            Some(meta),
+        )
+        .await
+        {
+            Ok(session) => {
+                restored += 1;
+                state
+                    .sessions
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .insert(id, session);
+            }
+            Err(error) => eprintln!("warning: cannot restore web session {id}: {error:#}"),
+        }
+    }
+    if restored > 0 {
+        println!("ano web: restored {restored} saved sessions");
+    }
 }
 
 /// Where to open the UI. A browser on this machine needs no token; other
@@ -274,6 +335,10 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/sessions/{id}/cancel", post(cancel_turn))
         .route("/sessions/{id}/approvals/{approval}", post(answer_approval))
         .route("/sessions/{id}/events", get(session_events))
+        .route("/home", get(home))
+        .route("/feed", get(list_feed))
+        .route("/spaces", get(list_spaces))
+        .route("/feed/{item}", post(update_feed_item))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             require_access,
@@ -290,6 +355,8 @@ fn router(state: Arc<WebState>) -> Router {
             "/assets/pkg/ano_web_ui_bg.wasm",
             get(|| asset("application/wasm", UI_WASM)),
         )
+        .route("/spaces/{name}", get(space_page))
+        .route("/spaces/{name}/frame", get(space_frame))
         .nest("/api", api)
         .layer(middleware::from_fn(security_headers))
         .with_state(state)
@@ -301,10 +368,13 @@ async fn security_headers(request: Request, next: Next) -> Response {
     }
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static(CONTENT_SECURITY_POLICY),
-    );
+    // Spaces set their own, stricter policy.
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static(CONTENT_SECURITY_POLICY),
+        );
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
@@ -424,12 +494,14 @@ async fn options(State(state): State<Arc<WebState>>) -> Response {
     .into_response()
 }
 
+/// The sessions, most recently used first.
 async fn list_sessions(State(state): State<Arc<WebState>>) -> Response {
-    let sessions: Vec<_> = state
+    let mut sessions: Vec<_> = state
         .sessions()
         .iter()
         .map(|session| session.status())
         .collect();
+    sessions.sort_by_key(|session| std::cmp::Reverse(session.info.updated_at_unix));
     Json(sessions).into_response()
 }
 
@@ -441,18 +513,10 @@ async fn create_session(
     if state.sessions().len() >= MAX_SESSIONS {
         return error_response(
             StatusCode::CONFLICT,
-            "only one session can be open for now; end the current session first",
+            &format!("{MAX_SESSIONS} sessions are open; delete one first"),
         );
     }
-    let bench = Workbench {
-        config: &state.config,
-        harness: &state.harness,
-        mcp: &state.mcp,
-        user: &state.user,
-        default_workspace: &state.default_workspace,
-        workspace_root: state.workspace_root.as_deref(),
-    };
-    match WebSession::open(bench, request).await {
+    match WebSession::open(state.workbench(), request, state.saved.clone(), None).await {
         Ok(session) => {
             let status = session.status();
             state
@@ -498,9 +562,201 @@ async fn delete_session(State(state): State<Arc<WebState>>, Path(id): Path<Strin
     match removed {
         Some(session) => {
             session.end().await;
+            if let Err(error) = session.forget() {
+                eprintln!("warning: {error:#}");
+            }
             StatusCode::NO_CONTENT.into_response()
         }
         None => session_not_found(),
+    }
+}
+
+/// What the home page shows: the character, what is remembered, active
+/// objectives, upcoming routines, the feed's open items, and the spaces.
+/// Each is `null` when its feature is disabled; one that cannot be read
+/// carries its error instead.
+async fn home(State(state): State<Arc<WebState>>) -> Response {
+    let harness = state.harness.clone();
+    let user = state.user.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        let part = |result: anyhow::Result<serde_json::Value>| {
+            result.unwrap_or_else(|error| json!({"error": format!("{error:#}")}))
+        };
+        let now = crate::application::clock::unix_now();
+        json!({
+            "character": harness.character.as_ref().map(|store| part(
+                store.read(&user).map(|character| json!(character))
+            )),
+            "memory": harness.memory.as_ref().map(|book| part(
+                book.facts(&user).map(|facts| json!(facts))
+            )),
+            "objectives": harness.objectives.as_ref().map(|book| part(book.list(&user).map(|list| {
+                json!(list
+                    .iter()
+                    .filter(|objective| objective.status == crate::domain::objective::Status::Active)
+                    .map(|objective| json!({"id": objective.id, "summary": objective.summary()}))
+                    .collect::<Vec<_>>())
+            }))),
+            "routines": harness.routines.as_ref().map(|book| part(book.upcoming(&user, now).map(|list| {
+                json!(list
+                    .iter()
+                    .take(10)
+                    .map(|(at, routine)| json!({
+                        "id": routine.id,
+                        "kind": routine.kind.name(),
+                        "title": routine.title,
+                        "at": crate::infrastructure::automation::schedule::local_time(*at),
+                    }))
+                    .collect::<Vec<_>>())
+            }))),
+            "feed": harness.feed.as_ref().map(|feed| part(feed.items(&user).map(|items| {
+                json!(items.into_iter().filter(|item| !item.done).take(30).collect::<Vec<_>>())
+            }))),
+            "spaces": harness.spaces.as_ref().map(|spaces| part(
+                spaces.list(&user).map(|list| json!(list))
+            )),
+        })
+    })
+    .await;
+    match built {
+        Ok(home) => Json(home).into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// The user's feed, newest first; empty when the feed is disabled.
+async fn list_feed(State(state): State<Arc<WebState>>) -> Response {
+    let Some(feed) = state.harness.feed.clone() else {
+        return Json(json!({"enabled": false, "items": []})).into_response();
+    };
+    let user = state.user.clone();
+    match tokio::task::spawn_blocking(move || feed.items(&user)).await {
+        Ok(Ok(items)) => Json(json!({"enabled": true, "items": items})).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}")),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeedItemUpdate {
+    /// 1, -1, or 0 to clear.
+    rating: Option<i8>,
+    done: Option<bool>,
+}
+
+/// The user's spaces, most recently updated first; empty when spaces are
+/// disabled.
+async fn list_spaces(State(state): State<Arc<WebState>>) -> Response {
+    let Some(spaces) = state.harness.spaces.clone() else {
+        return Json(json!({"enabled": false, "spaces": []})).into_response();
+    };
+    let user = state.user.clone();
+    match tokio::task::spawn_blocking(move || spaces.list(&user)).await {
+        Ok(Ok(list)) => Json(json!({"enabled": true, "spaces": list})).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &format!("{error:#}")),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+/// The content of a space, isolated: the policy gives it no origin (so it
+/// cannot use the session's cookie or the API) and lets it load and send
+/// nothing. It is shown only inside its frame page, whose own policy
+/// (`frame-src` from `default-src 'self'`) keeps the frame from navigating
+/// to another site, which could carry the data out in the URL.
+const SPACE_POLICY: &str = "sandbox allow-scripts allow-forms allow-modals; default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data:; media-src data:; connect-src 'none'; form-action 'none'; base-uri 'none'; frame-ancestors 'self'";
+
+/// The page of a space: a frame around its content. The page has the
+/// server's usual policy; the frame is sandboxed without popups or top
+/// navigation, so the content can neither leave the frame nor send the
+/// frame elsewhere.
+async fn space_page(
+    State(state): State<Arc<WebState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if !state.access.admits(peer, &headers) {
+        return (StatusCode::UNAUTHORIZED, Html(LOCKED_HTML)).into_response();
+    }
+    let Some(info) = read_space(&state, name).await.map(|(info, _, _)| info) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let title = crate::interface::escape_html(&info.title);
+    let page = format!(
+        "<!doctype html><html lang=\"ja\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>{title}</title><style>html,body{{margin:0;height:100%;background:#fff}}iframe{{border:0;display:block;width:100%;height:100%}}</style><iframe sandbox=\"allow-scripts allow-forms allow-modals\" referrerpolicy=\"no-referrer\" title=\"{title}\" src=\"/spaces/{}/frame\"></iframe></html>",
+        info.name
+    );
+    ([(header::CACHE_CONTROL, "no-cache")], Html(page)).into_response()
+}
+
+/// The content of a space, for its frame page.
+async fn space_frame(
+    State(state): State<Arc<WebState>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> Response {
+    if !state.access.admits(peer, &headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match read_space(&state, name).await {
+        Some((info, html, data)) => (
+            [
+                (header::CONTENT_SECURITY_POLICY, SPACE_POLICY),
+                (header::CACHE_CONTROL, "no-cache"),
+            ],
+            Html(crate::infrastructure::spaces::render_page(
+                &info, &html, &data,
+            )),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+async fn read_space(
+    state: &WebState,
+    name: String,
+) -> Option<(
+    crate::infrastructure::spaces::SpaceInfo,
+    String,
+    serde_json::Value,
+)> {
+    let spaces = state.harness.spaces.clone()?;
+    let user = state.user.clone();
+    tokio::task::spawn_blocking(move || spaces.read(&user, &name))
+        .await
+        .ok()?
+        .ok()
+        .flatten()
+}
+
+/// Rate an item of the feed, or mark it done.
+async fn update_feed_item(
+    State(state): State<Arc<WebState>>,
+    Path(item): Path<String>,
+    Json(update): Json<FeedItemUpdate>,
+) -> Response {
+    let Some(feed) = state.harness.feed.clone() else {
+        return error_response(StatusCode::NOT_FOUND, "the feed is disabled");
+    };
+    let user = state.user.clone();
+    let changed = tokio::task::spawn_blocking(move || {
+        let mut changed = None;
+        if let Some(rating) = update.rating {
+            changed = Some(feed.rate(&user, &item, rating)?);
+        }
+        if let Some(done) = update.done {
+            changed = Some(feed.mark_done(&user, &item, done)?);
+        }
+        changed.context("give rating or done")
+    })
+    .await;
+    match changed {
+        Ok(Ok(item)) => Json(item).into_response(),
+        Ok(Err(error)) => error_response(StatusCode::BAD_REQUEST, &format!("{error:#}")),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
 

@@ -18,6 +18,7 @@ use crate::{
     },
     infrastructure::{
         automation::register_builtin_automation, automation_store::AutomationStore, mcp::McpPool,
+        user_memory::MemoryBook,
     },
     interface::webhook::{
         jobs::JobState, post_event, signature::HmacSha256, unix_now, WebhookState,
@@ -49,6 +50,9 @@ use tokio::{
 struct FakeApi {
     triage: String,
     agent_calls: Mutex<Vec<Value>>,
+    /// The tool the agent calls first (with no arguments, unless it is
+    /// `notify_user`).
+    first_tool: &'static str,
 }
 
 #[async_trait]
@@ -64,7 +68,11 @@ impl ResponsesApi for FakeApi {
         }
         let mut calls = self.agent_calls.lock().unwrap();
         calls.push(payload.clone());
-        Ok(if calls.len() == 1 {
+        Ok(if calls.len() == 1 && self.first_tool != "notify_user" {
+            json!({"id": "r1", "status": "completed", "output": [{
+                "type": "function_call", "call_id": "t1", "name": self.first_tool, "arguments": "{}"
+            }]})
+        } else if calls.len() == 1 {
             json!({"id": "r1", "status": "completed", "output": [{
                 "type": "function_call", "call_id": "n1", "name": "notify_user",
                 "arguments": json!({"title": "DAU drop", "message": "DAU fell 30%.", "priority": "high"}).to_string()
@@ -130,6 +138,26 @@ async fn setup_with(
     rules: &str,
     triage: &str,
 ) -> Setup {
+    setup_with_harness(
+        registry,
+        extra,
+        rules,
+        triage,
+        Harness::bare(ToolRegistry::new()),
+        "notify_user",
+    )
+    .await
+}
+
+/// `setup_with`, with the agents built by `harness`.
+async fn setup_with_harness(
+    registry: &AutomationRegistry,
+    extra: &str,
+    rules: &str,
+    triage: &str,
+    harness: Harness,
+    first_tool: &'static str,
+) -> Setup {
     let (url, received) = notifier_server().await;
     let settings: AutomationSettings = toml::from_str(&format!(
         "[sources.reports]\nkind = 'webhook'\ntrust = 'trusted'\n\n[notifiers.phone]\nkind = 'webhook'\nurl = '{url}'\n\n{extra}\n\n{rules}"
@@ -139,12 +167,17 @@ async fn setup_with(
     config
         .environments
         .insert("coding".into(), Default::default());
+    config.environments.insert(
+        "asking".into(),
+        toml::from_str("approval_mode = 'ask'").unwrap(),
+    );
     config.automation = settings.clone();
     config.validate().unwrap();
 
     let api = Arc::new(FakeApi {
         triage: triage.into(),
         agent_calls: Mutex::new(Vec::new()),
+        first_tool,
     });
     let dir = tempfile::tempdir().unwrap();
     let store = AutomationStore::open(&dir.path().join("state.json")).unwrap();
@@ -156,11 +189,7 @@ async fn setup_with(
         context_window: None,
     });
     let state = Arc::new(WebhookState {
-        harness: Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-        },
+        harness,
         config,
         client: api.clone(),
         connections: Default::default(),
@@ -171,6 +200,10 @@ async fn setup_with(
         tasks: std::sync::Mutex::new(JoinSet::new()),
         secret: Some(b"secret".to_vec()),
         seen_signatures: std::sync::Mutex::new(HashMap::new()),
+        approvals: settings
+            .approvals
+            .clone()
+            .map(|approvals| Arc::new(super::super::RemoteApprovals::new(approvals))),
         automation: Some(Automation::new(settings, store, parts, triage)),
     });
     Setup {
@@ -308,6 +341,78 @@ async fn runs_tell_the_user_through_notify_user_and_on_completion() {
     let input = first["input"].to_string();
     assert!(input.contains("Read the report and notify me"), "{input}");
     assert!(input.contains("DAU: 700"), "{input}");
+}
+
+/// Runs started by the user's own reports see what is remembered about the
+/// user; runs started by text a third party wrote see neither the memory
+/// nor the tools that change it.
+#[tokio::test]
+async fn only_runs_of_trusted_events_see_the_memory() {
+    let memory = tempfile::tempdir().unwrap();
+    let book = Arc::new(MemoryBook::new(memory.path()));
+    book.save("default", "Reads reports on Monday mornings.")
+        .unwrap();
+    let registry = ToolRegistry::new();
+    book.register_tools(&registry).unwrap();
+    let mut harness = Harness::bare(registry);
+    harness.memory = Some(book);
+    let setup = setup_with_harness(
+        &builtin(),
+        "[sources.posted]\nkind = 'webhook'",
+        "[[rules]]\nname = 'weekly'\naction = 'run'\ntask = 'Summarize it.'\nenvironment = 'coding'\nnotify = ['phone']\nnotify_on = ['completed']",
+        "unused",
+        harness,
+        "notify_user",
+    )
+    .await;
+    for (source, title) in [("reports", "Own report"), ("posted", "Posted report")] {
+        let (status, _) = post_signed(
+            &setup.state,
+            source,
+            json!({"kind": "report", "key": title, "title": title, "body": "DAU: 700"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let jobs = setup.state.jobs.read().await;
+            if jobs.len() == 2 && jobs.values().all(|job| job.snapshot.status.is_finished()) {
+                return;
+            }
+            drop(jobs);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the jobs did not finish");
+
+    let calls = setup.api.agent_calls.lock().unwrap();
+    let job = |title: &str| {
+        calls
+            .iter()
+            .find(|call| call["input"].to_string().contains(title))
+            .unwrap()
+            .clone()
+    };
+    let offers = |call: &Value, name: &str| {
+        call["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == name)
+    };
+    let own = job("Own report");
+    let instructions = own["instructions"].as_str().unwrap();
+    assert!(
+        instructions.contains("- Reads reports on Monday mornings."),
+        "{instructions}"
+    );
+    assert!(offers(&own, "memory_forget"));
+    let third_party = job("Posted report");
+    let instructions = third_party["instructions"].as_str().unwrap();
+    assert!(!instructions.contains("# Memory"), "{instructions}");
+    assert!(!offers(&third_party, "memory_save") && !offers(&third_party, "memory_forget"));
 }
 
 #[tokio::test]
@@ -595,4 +700,250 @@ fn the_example_in_config_example_toml_is_valid() {
     assert_eq!(config.automation.sources.len(), 2);
     assert_eq!(config.automation.rules.len(), 2);
     assert_eq!(config.automation.notifiers.len(), 2);
+}
+
+/// A source that fires every second, keyed by the second.
+struct EverySecond;
+
+#[async_trait]
+impl EventSource for EverySecond {
+    fn trust(&self) -> Trust {
+        Trust::Trusted
+    }
+
+    fn describe(&self) -> String {
+        "every second".into()
+    }
+
+    fn receive(&self, _request: &PostedRequest<'_>) -> Result<AutomationEvent, Rejection> {
+        Err(Rejection::invalid("timer only"))
+    }
+
+    fn timed(&self) -> bool {
+        true
+    }
+
+    fn next_fire(&self, after: u64) -> Option<u64> {
+        Some(after + 1)
+    }
+
+    fn fired(&self, source: &str, at: u64) -> Vec<AutomationEvent> {
+        vec![AutomationEvent {
+            source: source.into(),
+            kind: "tick".into(),
+            key: format!("{source}@{at}"),
+            title: "Tick".into(),
+            body: String::new(),
+            url: None,
+            author: None,
+            trust: Trust::Trusted,
+        }]
+    }
+}
+
+/// Timers hand their events to the rules like posted ones, each time once,
+/// and stop when the server shuts down.
+#[tokio::test]
+async fn timed_sources_fire_through_the_rules_until_shutdown() {
+    let mut registry = builtin();
+    registry.register_source("every-second", |_| Ok(Arc::new(EverySecond)));
+    let setup = setup_with(
+        &registry,
+        "[sources.ticks]\nkind = 'every-second'",
+        "[[rules]]\nname = 'ticks'\nsources = ['ticks']\naction = 'notify'\nnotify = ['phone']",
+        "unused",
+    )
+    .await;
+    // Posting to it is refused by the source.
+    let (status, _) = post_signed(&setup.state, "ticks", json!({"title": "x"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    super::start_timers(&setup.state);
+    let received = wait_for(&setup.received, 2).await;
+    assert!(received
+        .iter()
+        .all(|notification| notification["title"] == "Tick"));
+    let seen = setup
+        .state
+        .automation
+        .as_ref()
+        .unwrap()
+        .store
+        .path()
+        .to_path_buf();
+    assert!(seen.exists());
+
+    crate::interface::webhook::shutdown_jobs(&setup.state).await;
+    let count = setup.received.lock().unwrap().len();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(setup.received.lock().unwrap().len(), count);
+}
+
+/// Built from the config, a schedule names its pattern in the listing and
+/// cannot be set up with a broken one.
+#[test]
+fn schedules_are_built_from_the_config() {
+    let config = AppConfig {
+        automation: toml::from_str(
+            "[sources.morning]\nkind = 'schedule'\ncron = '0 7 * * *'\nbody = 'Plan the day.'\n[[rules]]\nname = 'morning'\nsources = ['morning']\nnotify = []",
+        )
+        .unwrap(),
+        ..Default::default()
+    };
+    config.validate().unwrap();
+    let parts = config
+        .automation
+        .build(&builtin(), &config.environments)
+        .unwrap();
+    let morning = &parts.sources["morning"];
+    assert_eq!(morning.trust(), Trust::Trusted);
+    assert!(morning.describe().contains("\"0 7 * * *\""));
+    assert!(morning.next_fire(unix_now()).is_some());
+    assert!(
+        problem("[sources.morning]\nkind = 'schedule'\ncron = 'every morning'")
+            .contains("invalid cron pattern")
+    );
+}
+
+/// A reminder set up for a moment from now fires through the `routines`
+/// source and its rule.
+#[tokio::test]
+async fn routines_fire_at_their_time() {
+    let routines = tempfile::tempdir().unwrap();
+    let book = crate::infrastructure::routines::RoutineBook::new(routines.path());
+    let root = routines.path().to_path_buf();
+    let mut registry = builtin();
+    registry.register_source("routines", move |spec| {
+        Ok(Arc::new(
+            crate::infrastructure::routines::RoutineSource::new(root.clone(), spec.options)?,
+        ))
+    });
+    let setup = setup_with(
+        &registry,
+        "[sources.routines]\nkind = 'routines'",
+        "[[rules]]\nname = 'reminders'\nsources = ['routines']\nkinds = ['reminder']\naction = 'notify'\nnotify = ['phone']",
+        r#"{"action": "notify", "priority": "normal", "summary": "Time to water the plants.", "reason": "a reminder"}"#,
+    )
+    .await;
+    super::start_timers(&setup.state);
+    // Set up after the server started: the timer looks again on its own.
+    book.create(
+        "default",
+        crate::domain::routine::RoutineKind::Reminder,
+        "Water the plants",
+        "Water the plants.",
+        None,
+        Some(unix_now() + 2),
+    )
+    .unwrap();
+    let received = tokio::time::timeout(Duration::from_secs(70), async {
+        loop {
+            if let Some(first) = setup.received.lock().unwrap().first().cloned() {
+                return first;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the reminder did not fire");
+    assert_eq!(received["title"], "Water the plants");
+    crate::interface::webhook::shutdown_jobs(&setup.state).await;
+}
+
+/// A job whose call needs the user's approval asks through the rule's
+/// notifier with a link; the page shows the call, and the answer from it
+/// lets the job go on. The link works only with its token, and once.
+#[tokio::test]
+async fn jobs_ask_for_approval_with_a_link_the_user_answers() {
+    let registry = ToolRegistry::new();
+    registry
+        .register(
+            crate::domain::tool::ToolDefinition::new(
+                "guarded_tool",
+                "A test tool that needs approval",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            )
+            .with_approval()
+            .always_offered(),
+            |_| async { Ok(json!("ran")) },
+        )
+        .unwrap();
+    let setup = setup_with_harness(
+        &builtin(),
+        "[approvals]\npublic_url = 'https://ano.example.com/'\ntimeout_secs = 60",
+        "[[rules]]\nname = 'weekly'\naction = 'run'\ntask = 'Check.'\nenvironment = 'asking'\nnotify = ['phone']\nnotify_on = ['completed']",
+        "unused",
+        Harness::bare(registry),
+        "guarded_tool",
+    )
+    .await;
+    let (status, _) = post_signed(
+        &setup.state,
+        "reports",
+        serde_json::from_str(REPORT).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+
+    let asked = wait_for(&setup.received, 1).await;
+    assert_eq!(asked[0]["title"], "承認が必要です — weekly");
+    assert_eq!(asked[0]["priority"], "high");
+    let link = asked[0]["url"].as_str().unwrap();
+    let path = link.strip_prefix("https://ano.example.com").unwrap();
+    let (page_path, query) = path.split_once("?t=").unwrap();
+    assert!(page_path.starts_with("/approvals/"));
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let app = super::super::router(Arc::clone(&setup.state));
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = reqwest::Client::new();
+
+    let wrong = http
+        .get(format!("{base}{page_path}?t=wrong"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), reqwest::StatusCode::NOT_FOUND);
+    let page = http.get(format!("{base}{path}")).send().await.unwrap();
+    assert_eq!(page.status(), reqwest::StatusCode::OK);
+    assert!(page
+        .headers()
+        .get("content-security-policy")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .starts_with("default-src 'none'"));
+    let html = page.text().await.unwrap();
+    assert!(
+        html.contains("guarded_tool") && html.contains("weekly"),
+        "{html}"
+    );
+
+    let answer = |token: &str| {
+        http.post(format!("{base}{page_path}"))
+            .form(&[("t", token), ("decision", "allow")])
+            .send()
+    };
+    assert_eq!(
+        answer("wrong").await.unwrap().status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        answer(query).await.unwrap().status(),
+        reqwest::StatusCode::OK
+    );
+    assert_eq!(
+        answer(query).await.unwrap().status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
+    let received = wait_for(&setup.received, 2).await;
+    assert_eq!(
+        received[1]["title"],
+        "weekly: completed — Weekly active users"
+    );
+    let calls = setup.api.agent_calls.lock().unwrap();
+    let output = calls[1]["input"].to_string();
+    assert!(output.contains("ran"), "{output}");
 }

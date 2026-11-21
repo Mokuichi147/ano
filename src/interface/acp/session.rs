@@ -276,7 +276,7 @@ impl AcpSession {
             &self.base,
             &mut conversation.connections,
             &mut conversation.agent,
-            &mut conversation.store,
+            conversation.store.as_mut(),
             |reviewer| {
                 approval_factory(&self.mode, self.fixed_mode, &self.ask_user, &reviewer)
                     .build(reviewer)
@@ -650,11 +650,7 @@ mod tests {
         options: &AcpOptions,
         cwd: &Path,
     ) -> Result<(ExecutionProfile, ModelSelection, Vec<ModelRequest>)> {
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let bench = Workbench {
             config,

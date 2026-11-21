@@ -16,6 +16,7 @@ mod app;
 mod chat;
 mod dom;
 mod events;
+mod home;
 mod setup;
 mod timeline;
 

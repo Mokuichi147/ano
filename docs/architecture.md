@@ -102,6 +102,12 @@ src/
 │   ├── tool.rs             ToolDefinition・ToolContext・予約名
 │   ├── mcp.rs              MCP サーバー設定と公開可否の判定
 │   ├── skill.rs            スキルの名前・説明・本文の検証
+│   ├── character.rs        キャラクターの名前・タグライン・ソウルの検証と部分的な変更
+│   ├── user_memory.rs      記憶する事実の検証と、実行に載せる範囲
+│   ├── objective.rs        長期の目標と進捗の検証・変更・要約
+│   ├── routine.rs          リマインダーと定期作業の検証
+│   ├── feed.rs             フィードの項目（提案・記事・報告）の検証
+│   ├── space.rs            スペースの名前・題名・ページの検証
 │   ├── environment.rs      実行環境と検証コマンドの設定
 │   ├── text.rs             上限付きの文字列の切り詰め
 │   └── github.rs           git remote の URL から GitHub のリポジトリ名を読む
@@ -122,9 +128,9 @@ src/
 │   ├── clock.rs            現在時刻（Unix 秒）
 │   └── input.rs            テキスト・画像・音声入力の組み立て
 ├── harness/
-│   ├── mod.rs              Harness（組み込み tool・原文履歴・スキルの登録と、実行ごとの Agent の組み立て）
+│   ├── mod.rs              Harness（組み込み tool・原文履歴・スキル・キャラクター・記憶・目標・ルーティン・フィード・スペースの登録と、実行ごとの Agent の組み立て）
 │   ├── settings.rs         config.toml の [agent]（実行ループの設定と、AGENTS.md・承認・接続先・ロールの設定）
-│   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、AGENTS.md・スキル一覧の追記
+│   ├── instructions.rs     既定の instructions（workspace・git・web の tool の使い方を含む）と、キャラクター・記憶・目標・ルーティン・フィード・スペース・AGENTS.md・スキル一覧の追記
 │   ├── profile.rs          実行環境（または実行環境を使わない実行の権限）から1回の実行設定を解決（ExecutionProfile）
 │   ├── models.rs           接続先のクライアントと、メインのエージェント・ロールのモデルの解決、会話中のモデルの切り替え
 │   ├── conversation.rs     クライアントがターンごとに進める会話（ano web・ano acp で共有。開始・中断・終了）
@@ -142,8 +148,15 @@ src/
 │   ├── memory_store.rs     プロセス内だけで保持する会話（ano chat）
 │   ├── project.rs          AGENTS.md などプロジェクト指示の読み込み
 │   ├── skills.rs           SKILL.md の読み書きと skill_read・skill_save
-│   ├── fs.rs               原子的なファイル置き換え
-│   ├── automation/         組み込みの自動化の種類（ソース: webhook、通知先: ntfy・discord・slack・webhook）
+│   ├── character.rs        SOUL.md の読み書きと character_update
+│   ├── user_memory.rs      MEMORY.md の読み書きと memory_save・memory_forget
+│   ├── objectives.rs       objectives.json の読み書きと objective_set・objective_log・objective_read
+│   ├── routines.rs         routines.json の読み書き、routine_create・routine_delete、自動化のソース routines
+│   ├── feed.rs             feed.json の読み書きと feed_post・feed_read
+│   ├── spaces.rs           スペースの読み書き、space_save・space_read・space_data_set、データを埋め込んだページ
+│   ├── frontmatter.rs      YAML frontmatter 付き Markdown の分割（SKILL.md・SOUL.md）
+│   ├── fs.rs               原子的なファイル置き換えと、ユーザーごとのディレクトリ名の検証
+│   ├── automation/         組み込みの自動化の種類（ソース: webhook・schedule、通知先: ntfy・discord・slack・webhook）
 │   ├── automation_store.rs 自動化の処理済みイベントの保存
 │   └── tools/
 │       ├── mod.rs          組み込み tool の登録（echo・unix_time）
@@ -162,7 +175,7 @@ src/
 └── interface/
     ├── cli/                clap による CLI（run・chat・tools・session・serve・web）、進捗表示、端末での承認
     ├── acp/                ano acp（Agent Client Protocol のセッション・イベントの変換・エディタでの承認）
-    ├── web/                ano web のサーバー（セッション・SSE のイベント・ブラウザでの承認・Markdown の HTML 化）と、埋め込む画面
+    ├── web/                ano web のサーバー（セッションとその保存・SSE のイベント・ブラウザでの承認・Markdown の HTML 化）と、埋め込む画面
     └── webhook/            署名付き Webhook、ジョブ管理、自動化（automation/: 登録された種類のソースを動かし、振り分け・通知する）
 
 web-ui/                     ano web の画面。naui の DOM バックエンドで組み立てる wasm（build.sh で src/interface/web/assets/pkg/ へ出力）

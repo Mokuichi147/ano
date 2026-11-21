@@ -3,7 +3,7 @@
 
 use crate::{
     api,
-    app::{App, Message},
+    app::App,
     dom,
     events::EventStream,
     timeline::{self, one_line, pretty},
@@ -483,9 +483,7 @@ impl Chat {
                 // Replacing the view drops this stream, which must not
                 // happen inside its own callback.
                 let app = Rc::clone(&app);
-                app.clone().spawn(async move {
-                    app.show_setup(Some(Message::notice("セッションを終了しました。")))
-                });
+                app.clone().spawn(async move { app.show_sessions().await });
             }
             _ => {}
         }

@@ -5,16 +5,22 @@
 mod approval;
 mod auth;
 mod automation;
+mod character;
 mod chat;
+mod feed;
 mod history;
 mod mcp;
+mod memory;
 mod model;
+mod objectives;
 mod output;
 mod preset;
 mod prompt;
 mod provider;
+mod routines;
 mod run;
 mod skills;
+mod spaces;
 mod tools;
 
 pub use approval::InteractiveApproval;
@@ -27,6 +33,7 @@ use crate::{
     infrastructure::{
         automation::register_builtin_automation,
         mcp::{redact_urls, McpPool},
+        routines::RoutineSource,
         session_store::Session,
         tools::register_builtin_tools,
     },
@@ -92,6 +99,19 @@ enum Command {
     History(history::HistoryArgs),
     /// List the saved skills, or show one.
     Skills(skills::SkillsArgs),
+    /// Show or change the character: the name and personality the agent
+    /// takes on with you.
+    Character(character::CharacterArgs),
+    /// List, add, and forget the facts ano remembers about you.
+    Memory(memory::MemoryArgs),
+    /// List, add, and track your long-term objectives.
+    Objectives(objectives::ObjectivesArgs),
+    /// List, set up, and remove your reminders and recurring tasks.
+    Routines(routines::RoutinesArgs),
+    /// Read the feed of ideas, articles, and reports, and rate items.
+    Feed(feed::FeedArgs),
+    /// List and remove the spaces the agent built for you.
+    Spaces(spaces::SpacesArgs),
 }
 
 /// Options shared by `run` and `chat`: environment, permissions, model, and
@@ -314,6 +334,20 @@ struct WebArgs {
         help = "Let sessions choose any folder as their working folder, not only --workspace and the folders inside it"
     )]
     allow_any_workspace: bool,
+
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "no_save",
+        help = "Where sessions are kept across restarts (defaults to web-sessions in the OS data directory)"
+    )]
+    sessions_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
+        help = "Keep sessions in memory only, so they end with the server"
+    )]
+    no_save: bool,
 }
 
 #[derive(Debug, Args)]
@@ -438,7 +472,9 @@ pub async fn run() -> Result<()> {
         Command::Run(args) => run::run_agent(config, cli.user, args, registry).await,
         Command::Chat(args) => chat::run(config, cli.user, args.agent, registry).await,
         Command::Serve(args) => serve(config, args, registry).await,
-        Command::Automation(args) => automation::run(&config, &automation_kinds(), args).await,
+        Command::Automation(args) => {
+            automation::run(&config, &automation_kinds(&config)?, args).await
+        }
         Command::Web(args) => web(config, cli.user, args, registry).await,
         Command::Acp(args) => acp(config, cli.user, args, registry).await,
         // A failed connection's error may show the server URL, with an API
@@ -451,14 +487,31 @@ pub async fn run() -> Result<()> {
         Command::Model(args) => model::run(&config, &config_path, args).await,
         Command::History(args) => history::run(&config, &cli.user, args).await,
         Command::Skills(args) => skills::run(&config, &cli.user, args),
+        Command::Character(args) => character::run(&config, &cli.user, args),
+        Command::Memory(args) => memory::run(&config, &cli.user, args),
+        Command::Objectives(args) => objectives::run(&config, &cli.user, args),
+        Command::Routines(args) => routines::run(&config, &cli.user, args),
+        Command::Feed(args) => feed::run(&config, &cli.user, args),
+        Command::Spaces(args) => spaces::run(&config, &cli.user, args),
     }
 }
 
 /// The kinds of automation sources and notifiers the binary offers.
-fn automation_kinds() -> AutomationRegistry {
+/// The kinds of automation sources and notifiers the binary offers: the
+/// built-in ones, and `routines`, which reads the routines kept where
+/// `config` says.
+fn automation_kinds(config: &AppConfig) -> Result<AutomationRegistry> {
     let mut registry = AutomationRegistry::new();
     register_builtin_automation(&mut registry);
-    registry
+    let routines = config.routines.directory();
+    registry.register_source("routines", move |spec| {
+        let root = match &routines {
+            Ok(root) => root.clone(),
+            Err(error) => bail!("{error:#}"),
+        };
+        Ok(Arc::new(RoutineSource::new(root, spec.options)?))
+    });
+    Ok(registry)
 }
 
 async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -> Result<()> {
@@ -472,15 +525,9 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
         config.webhook.allow_unauthenticated = true;
     }
     let client = connect_provider(&config, config.default_provider())?;
+    let kinds = automation_kinds(&config)?;
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
-    let served = webhook::serve(
-        config,
-        client,
-        Arc::clone(&mcp),
-        registry,
-        automation_kinds(),
-    )
-    .await;
+    let served = webhook::serve(config, client, Arc::clone(&mcp), registry, kinds).await;
     // Close MCP connections after jobs have stopped, even on failure.
     mcp.shutdown().await;
     served
@@ -498,6 +545,16 @@ async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegis
         token: std::env::var(web::TOKEN_ENV).ok(),
         authenticate: !args.no_auth,
         any_workspace: args.allow_any_workspace,
+        sessions_dir: if args.no_save {
+            None
+        } else {
+            Some(match args.sessions_dir {
+                Some(dir) => dir,
+                None => web::default_sessions_dir().context(
+                    "cannot find the OS data directory; pass --sessions-dir or --no-save",
+                )?,
+            })
+        },
     };
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = web::serve(config, Arc::clone(&mcp), registry, options).await;

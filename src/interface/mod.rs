@@ -22,6 +22,15 @@ pub(crate) fn summarize_event(event: &AgentEvent, max_chars: usize) -> Value {
 }
 
 /// Replace `value` with `{"truncated": true, "preview": ...}`, the start of
+/// `text` safe to place in HTML, as element content or a quoted attribute.
+pub(crate) fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 /// its JSON, when that is longer than `max_chars`.
 pub(crate) fn shorten(value: &mut Value, max_chars: usize) {
     let text = value.to_string();

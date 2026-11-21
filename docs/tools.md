@@ -17,6 +17,19 @@
 | `git_commit_push` | 指定したファイルだけをコミットし、ブランチを remote へ push する。既定ブランチには直接コミットしない。`review_changes` を受けた内容のファイルだけをコミットできる。呼び出しごとに承認が必要（[詳細](#github-の-issue-と-pull-request)） | `allow_writes` |
 | `skill_read` | 保存済みスキルの手順を名前で読む（[詳細](agent-runtime.md#スキルskill_read--skill_save)） | `[skills]` |
 | `skill_save` | 上手くいった手順をスキルとして保存・更新する。呼び出しごとに承認が必要 | `[skills]` |
+| `memory_save` | ユーザーについての事実を一文として記憶する。呼び出しごとに承認が必要（[詳細](agent-runtime.md#記憶memory_save--memory_forget)） | `[memory]` |
+| `memory_forget` | 記憶した事実を、一覧どおりの文言を指定して消す。呼び出しごとに承認が必要 | `[memory]` |
+| `objective_set` | ユーザーの長期の目標を作る・一部を変える。呼び出しごとに承認が必要（[詳細](agent-runtime.md#目標objective_set--objective_log--objective_read)） | `[objectives]` |
+| `objective_log` | 目標への進捗を記録する | `[objectives]` |
+| `objective_read` | 目標を進捗の記録ごと読む、またはすべての目標を一覧する | `[objectives]` |
+| `routine_create` | 決まった時刻のリマインダーや定期作業を作る。呼び出しごとに承認が必要（[詳細](automation.md#会話から作るリマインダーと定期作業routines)） | `[routines]` |
+| `routine_delete` | ルーティンを消す。呼び出しごとに承認が必要 | `[routines]` |
+| `feed_post` | 提案・記事・報告をユーザーのフィードに残す（[詳細](agent-runtime.md#フィードfeed_post--feed_read)） | `[feed]` |
+| `feed_read` | フィードの最近の項目を、評価と済みとともに読む | `[feed]` |
+| `space_save` | スペース（小さなページ）を作る・置き換える（[詳細](agent-runtime.md#スペースspace_save--space_read--space_data_set)） | `[spaces]` |
+| `space_read` | スペースのページとデータを読む、または一覧する | `[spaces]` |
+| `space_data_set` | スペースのデータを置き換える | `[spaces]` |
+| `character_update` | キャラクター（名前・タグライン・性格と口調）を作る・一部を変える。呼び出しごとに承認が必要（[詳細](agent-runtime.md#キャラクターcharacter_update)） | `[character]` |
 | `history_search` / `history_get` / `history_context` / `history_conversations` | chronotope に保存した会話・ツール履歴の原文を検索し、発言 ID から前後ごと読む | `[history]` |
 | `task_plan` | 作業計画の読み書き（[詳細](agent-runtime.md#作業計画と完了判定)） | 常時 |
 | `tool_search` | 登録済み tool・MCP の検索（[詳細](agent-runtime.md#tool-の遅延公開tool_search)） | 常時 |

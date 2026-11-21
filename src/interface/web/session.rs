@@ -4,6 +4,7 @@
 use super::{
     approval::{PendingApprovals, WebApproval},
     events::{EventLog, Progress, UiEvent},
+    saved::{title_from, SavedMeta, SavedSessions},
 };
 pub(super) use crate::harness::conversation::TurnRefused;
 use crate::{
@@ -20,14 +21,14 @@ use crate::{
         profile::{ExecutionProfile, Permissions},
         Harness,
     },
-    infrastructure::memory_store::MemoryConversation,
+    infrastructure::{memory_store::MemoryConversation, session_store::Session},
 };
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{
     future::Future,
     path::{Component, Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use uuid::Uuid;
 
@@ -36,7 +37,7 @@ use uuid::Uuid;
 pub(super) const WEB_ENVIRONMENT: &str = "web";
 
 /// How the page asks for a new session.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(super) struct NewSession {
     /// The working directory. `~` stands for the home directory, and a
@@ -89,6 +90,11 @@ pub(super) struct SessionInfo {
     pub(super) allow_exec: bool,
     pub(super) approval_mode: ApprovalMode,
     pub(super) created_at_unix: u64,
+    /// From the first message; empty before it.
+    pub(super) title: String,
+    pub(super) updated_at_unix: u64,
+    /// Kept across restarts of the server.
+    pub(super) saved: bool,
 }
 
 /// A session with what is happening in it now.
@@ -105,6 +111,9 @@ pub(super) struct WebSession {
     pub(super) log: Arc<EventLog>,
     pub(super) approvals: Arc<PendingApprovals>,
     turns: Turns,
+    /// Where the session is kept, when it is.
+    saved: Option<Arc<SavedSessions>>,
+    meta: Arc<Mutex<SavedMeta>>,
 }
 
 /// What sessions are built from: shared by the sessions of a server.
@@ -123,15 +132,58 @@ pub(super) struct Workbench<'a> {
 
 impl WebSession {
     /// Resolve `request` and build the session's agent. Nothing contacts the
-    /// model until the first turn.
-    pub(super) async fn open(bench: Workbench<'_>, request: NewSession) -> Result<Arc<Self>> {
+    /// model until the first turn. With `saved`, the session is kept there:
+    /// a new one when `existing` is `None`, or the saved session `existing`,
+    /// which continues its conversation.
+    pub(super) async fn open(
+        bench: Workbench<'_>,
+        mut request: NewSession,
+        saved: Option<Arc<SavedSessions>>,
+        existing: Option<SavedMeta>,
+    ) -> Result<Arc<Self>> {
         let (profile, selection, base) = resolve_profile(&bench, &request)?;
+        // Kept as resolved, so a server started elsewhere opens the same
+        // folder, and a missing folder is not created again.
+        if request.environment.is_none() {
+            request.workspace = profile
+                .context
+                .workspace
+                .as_ref()
+                .map(|workspace| workspace.display().to_string());
+        }
+        request.create_workspace = false;
         let opening =
             Opening::prepare(bench.harness, bench.config, profile, selection, &base).await?;
         let approval_mode = opening.profile.approval_mode;
         let endpoint = opening.endpoint.clone();
 
-        let log = Arc::new(EventLog::default());
+        let now = unix_now();
+        let meta = existing.unwrap_or_else(|| SavedMeta {
+            id: Uuid::new_v4().to_string(),
+            title: String::new(),
+            created_at_unix: now,
+            updated_at_unix: now,
+            request,
+        });
+        let (store, log): (Box<dyn ConversationStore>, EventLog) = match &saved {
+            Some(saved) => {
+                // A turn the server was stopped in is recorded as failed.
+                let session = Session::open(
+                    saved.conversation_path(&meta.id)?,
+                    opening.binding().clone(),
+                    true,
+                )?;
+                let data = session.data();
+                let log = EventLog::restored(saved.said(&meta.id)?, &data.plan, &data.usage);
+                saved.write_meta(&meta)?;
+                (Box::new(session), log)
+            }
+            None => (
+                Box::new(MemoryConversation::new(opening.binding().clone())),
+                EventLog::default(),
+            ),
+        };
+        let log = Arc::new(log);
         let approvals = Arc::new(PendingApprovals::default());
         let approval = ApprovalFactory {
             mode: approval_mode,
@@ -142,15 +194,21 @@ impl WebSession {
         };
         let events = Arc::clone(&log);
         let text = Arc::clone(&log);
-        let conversation = opening.open(bench.harness, Arc::clone(bench.mcp), &approval, |agent| {
-            agent
-                .with_event_listener(Arc::new(move |event| events.record(event)))
-                .with_text_listener(Arc::new(move |delta| text.text_delta(delta)))
-        });
+        let conversation = opening.open_in(
+            store,
+            bench.harness,
+            Arc::clone(bench.mcp),
+            &approval,
+            |agent| {
+                agent
+                    .with_event_listener(Arc::new(move |event| events.record(event)))
+                    .with_text_listener(Arc::new(move |delta| text.text_delta(delta)))
+            },
+        );
 
         let context = &conversation.context;
         let info = SessionInfo {
-            id: Uuid::new_v4().to_string(),
+            id: meta.id.clone(),
             user: context.user_id.clone(),
             environment: context.environment.clone(),
             workspace: context.workspace.clone(),
@@ -159,14 +217,50 @@ impl WebSession {
             allow_writes: context.allow_writes,
             allow_exec: context.allow_exec,
             approval_mode,
-            created_at_unix: unix_now(),
+            created_at_unix: meta.created_at_unix,
+            title: meta.title.clone(),
+            updated_at_unix: meta.updated_at_unix,
+            saved: saved.is_some(),
         };
         Ok(Arc::new(Self {
             info,
             log,
             approvals,
             turns: Turns::new(conversation),
+            saved,
+            meta: Arc::new(Mutex::new(meta)),
         }))
+    }
+
+    /// Note that the session was used now, taking its title from `text`
+    /// when it has none, and keep that.
+    fn touch(saved: Option<&SavedSessions>, meta: &Mutex<SavedMeta>, text: Option<&str>) {
+        let mut meta = meta.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        meta.updated_at_unix = unix_now();
+        if let Some(text) = text.filter(|_| meta.title.is_empty()) {
+            meta.title = title_from(text);
+        }
+        if let Some(saved) = saved {
+            if let Err(error) = saved.write_meta(&meta) {
+                eprintln!("warning: cannot save session {}: {error:#}", meta.id);
+            }
+        }
+    }
+
+    fn keep_said(&self, role: &str, text: &str) {
+        if let Some(saved) = &self.saved {
+            if let Err(error) = saved.append_said(self.id(), role, text) {
+                eprintln!("warning: cannot save session {}: {error:#}", self.id());
+            }
+        }
+    }
+
+    /// The saved files of the session, deleted after it ended.
+    pub(super) fn forget(&self) -> Result<()> {
+        match &self.saved {
+            Some(saved) => saved.remove(self.id()),
+            None => Ok(()),
+        }
     }
 
     pub(super) fn id(&self) -> &str {
@@ -174,8 +268,17 @@ impl WebSession {
     }
 
     pub(super) fn status(&self) -> SessionStatusView {
+        let mut info = self.info.clone();
+        {
+            let meta = self
+                .meta
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            info.title.clone_from(&meta.title);
+            info.updated_at_unix = meta.updated_at_unix;
+        }
         SessionStatusView {
-            info: self.info.clone(),
+            info,
             progress: self.log.progress(),
         }
     }
@@ -188,12 +291,23 @@ impl WebSession {
     ) -> Result<impl Future<Output = ()> + Send + 'static, TurnRefused> {
         let turn = self.turns.start()?;
         self.log.start_turn(text.clone());
+        Self::touch(self.saved.as_deref(), &self.meta, Some(&text));
+        self.keep_said("user", &text);
         let log = Arc::clone(&self.log);
+        let (saved, meta) = (self.saved.clone(), Arc::clone(&self.meta));
+        let id = self.id().to_string();
         Ok(async move {
             let (conversation, outcome) = turn.run(vec![InputPart::Text(text)], None).await;
-            let store = &conversation.store;
+            let store = conversation.store.as_ref();
             let finished = match outcome {
                 TurnOutcome::Completed(result) => {
+                    if let Some(saved) = &saved {
+                        if !result.text.trim().is_empty() {
+                            if let Err(error) = saved.append_said(&id, "assistant", &result.text) {
+                                eprintln!("warning: cannot save session {id}: {error:#}");
+                            }
+                        }
+                    }
                     let finished = turn_finished(store, Some(&result), None, false);
                     if !result.streamed && !result.text.trim().is_empty() {
                         log.flush_partial();
@@ -209,6 +323,7 @@ impl WebSession {
                 }
             };
             log.finish_turn(finished, &store.data().plan, &store.data().usage);
+            Self::touch(saved.as_deref(), &meta, None);
         })
     }
 
@@ -232,7 +347,7 @@ impl WebSession {
 }
 
 fn turn_finished(
-    store: &MemoryConversation,
+    store: &dyn ConversationStore,
     result: Option<&crate::application::agent::AgentResult>,
     error: Option<String>,
     cancelled: bool,
@@ -387,11 +502,7 @@ mod tests {
         default_workspace: &Path,
         request: NewSession,
     ) -> Result<(ExecutionProfile, ModelSelection, Vec<ModelRequest>)> {
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let bench = Workbench {
             config,
@@ -410,11 +521,7 @@ mod tests {
             AppConfig::parse("[environments.gone]\nworkspace = '/nonexistent-ano-test'").unwrap();
         let root = tempfile::tempdir().unwrap();
         let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let resolve = |request: NewSession| {
             let bench = Workbench {
@@ -472,11 +579,7 @@ mod tests {
         std::fs::create_dir(root.path().join("project")).unwrap();
         let outside = tempfile::tempdir().unwrap();
         let canonical_root = std::fs::canonicalize(root.path()).unwrap();
-        let harness = Harness {
-            registry: ToolRegistry::new(),
-            history: None,
-            skills: None,
-        };
+        let harness = Harness::bare(ToolRegistry::new());
         let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(Vec::new()));
         let resolve = |workspace_root: Option<&Path>, request: NewSession| {
             let bench = Workbench {

@@ -251,6 +251,24 @@ impl EventLog {
         self.push_locked(&mut state, &finished);
     }
 
+    /// A log for a conversation kept from before: what was said in it
+    /// (`timeline`, oldest first), with the plan and usage. What the agent
+    /// did in between is not kept, so it is not shown.
+    pub(super) fn restored(timeline: Vec<UiEvent>, plan: &TaskPlan, usage: &UsageSummary) -> Self {
+        let log = Self::default();
+        {
+            let mut state = log.lock();
+            for event in &timeline {
+                log.push_locked(&mut state, event);
+            }
+            if !plan.steps.is_empty() {
+                state.progress.plan = Some(plan.clone());
+            }
+            state.progress.usage = usage.clone();
+        }
+        log
+    }
+
     pub(super) fn progress(&self) -> Progress {
         self.lock().progress.clone()
     }

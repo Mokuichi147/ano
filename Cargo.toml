@@ -48,6 +48,7 @@ htmd = "0.5"
 ignore = "0.4"
 directories = "6"
 serde_yaml_ng = "0.10"
+croner = "4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

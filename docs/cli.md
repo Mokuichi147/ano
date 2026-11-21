@@ -7,12 +7,18 @@
 | `ano auth login/status/logout` | ChatGPT サブスクリプションにログインし、保存した認証情報の状態を確認・削除します（[ChatGPT サブスクリプション](chatgpt-subscription.md)） |
 | `ano tools` | 利用可能な tool と MCP server を、ポリシーを適用して表示します |
 | `ano session PATH` | 保存済みセッションの状態・計画・使用量を表示します（`--json` で全内容） |
-| `ano web` | ブラウザで対話する Web UI を起動します。セッションごとに作業フォルダ・環境・プリセット・権限・承認モードを選べます（[docs/web.md](web.md)） |
+| `ano web` | ブラウザで対話する Web UI を起動します。セッションごとに作業フォルダ・環境・プリセット・権限・承認モードを選べ、会話は保存して再起動後も続けられます（`--sessions-dir`・`--no-save`。[docs/web.md](web.md)） |
 | `ano acp` | ACP に対応したエディタから起動され、Agent Client Protocol で対話します。エディタで開いたフォルダで作業し、承認はエディタで答えます（[docs/acp.md](acp.md)） |
 | `ano serve` | Webhook サーバーを起動します。`[automation]` があれば、送られたイベントへの反応と通知も行います（[docs/webhook.md](webhook.md)、[docs/automation.md](automation.md)） |
 | `ano automation list` / `ano automation notify NAME [MESSAGE]` | 自動化のソース・ルール・通知先を表示し、通知先へテストを送ります（[`ano automation`](automation.md#ano-automation)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](chronotope-history.md)） |
 | `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](agent-runtime.md#スキルskill_read--skill_save)） |
+| `ano memory` / `ano memory add` / `ano memory forget` | 記憶した事実を番号付きで一覧し、追加・削除します（[記憶](agent-runtime.md#記憶memory_save--memory_forget)） |
+| `ano objectives` / `add` / `set` / `log` / `show` / `remove` | 長期の目標を一覧し、追加・変更・進捗の記録・削除をします（[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)） |
+| `ano routines` / `add` / `remove` | リマインダーと定期作業を次の時刻つきで一覧し、作成・削除します（[ルーティン](automation.md#会話から作るリマインダーと定期作業routines)） |
+| `ano feed` / `rate` / `done` | フィードの項目を一覧し、評価・済みを付けます（[フィード](agent-runtime.md#フィードfeed_post--feed_read)） |
+| `ano spaces` / `remove` | スペースを一覧し、削除します（[スペース](agent-runtime.md#スペースspace_save--space_read--space_data_set)） |
+| `ano character` / `ano character set` | キャラクターを表示し、`set --name`・`--tagline`・`--soul`（`--soul-file`）で作成・変更します（[キャラクター](agent-runtime.md#キャラクターcharacter_update)） |
 | `ano mcp tools [LABEL]` | MCP server に接続して提供される tool をすべて表示し、設定で有効なものに印を付けます（[tool の確認と有効化](mcp.md#tool-の確認と有効化)） |
 | `ano mcp edit LABEL` | MCP server の tool をチェックリストで有効化・無効化し、設定ファイルに保存します（`ano mcp enable/disable LABEL TOOL...` でも可） |
 | `ano provider list` | 接続先の一覧（有効・無効、URL、既定モデル、モデルの絞り込み、フォールバック先）を表示します（[接続先の管理](providers.md#接続先の管理)） |

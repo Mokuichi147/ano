@@ -1,6 +1,6 @@
 use super::{
-    access::Access, close_sessions, router, serve, session::TurnRefused, startup_message,
-    WebOptions, WebState, MAX_SESSIONS, TOKEN_ENV,
+    access::Access, close_sessions, restore_sessions, router, saved::SavedSessions, serve,
+    session::TurnRefused, startup_message, WebOptions, WebState, MAX_SESSIONS, TOKEN_ENV,
 };
 use crate::{
     application::registry::ToolRegistry, config::AppConfig, domain::tool::ToolDefinition,
@@ -82,6 +82,20 @@ struct Server {
 
 impl Server {
     async fn start(api_url: &str) -> Self {
+        Self::start_saving(api_url, None).await
+    }
+
+    /// A server that keeps sessions in `saved` and opens those kept there.
+    async fn start_saving(api_url: &str, saved: Option<&std::path::Path>) -> Self {
+        Self::start_with(api_url, saved, |_| {}).await
+    }
+
+    /// `start_saving`, with the harness changed by `configure`.
+    async fn start_with(
+        api_url: &str,
+        saved: Option<&std::path::Path>,
+        configure: impl FnOnce(&mut Harness),
+    ) -> Self {
         let config = AppConfig::parse(&format!(
             "[agent]\nprovider = 'fake'\n[providers.fake]\nbase_url = '{api_url}'\nmodel = 'fake-model'\nstream = false\nmax_retries = 0"
         ))
@@ -99,12 +113,10 @@ impl Server {
             )
             .unwrap();
         let workspace = tempfile::tempdir().unwrap();
+        let mut harness = Harness::bare(registry);
+        configure(&mut harness);
         let state = Arc::new(WebState {
-            harness: Harness {
-                registry,
-                history: None,
-                skills: None,
-            },
+            harness,
             config,
             mcp: Arc::new(McpPool::new(Vec::new())),
             user: "default".into(),
@@ -112,9 +124,11 @@ impl Server {
             workspace_root: None,
             access: Access::new(Some(TOKEN.into()), 1),
             sessions: RwLock::default(),
+            saved: saved.map(|dir| Arc::new(SavedSessions::new(dir, "default").unwrap())),
             creating: tokio::sync::Mutex::new(()),
             turns: Mutex::new(JoinSet::new()),
         });
+        restore_sessions(&state).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let app = router(Arc::clone(&state)).into_make_service_with_connect_info::<SocketAddr>();
@@ -339,10 +353,20 @@ async fn a_session_works_in_its_folder_and_asks_the_page_for_approval() {
     assert_eq!(session["allow_writes"], true);
     assert_eq!(session["running"], false);
     assert!(session["model"].as_str().unwrap().contains("fake-model"));
+    // Sessions open side by side.
     let second = server
         .post("/api/sessions", json!({"workspace": folder.path()}))
         .await;
-    assert_eq!(second.status(), StatusCode::CONFLICT);
+    assert_eq!(second.status(), StatusCode::CREATED);
+    let listed: Value = server
+        .request(reqwest::Method::GET, "/api/sessions")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 2);
 
     // A plain turn: the answer arrives as rendered Markdown.
     let sent = server
@@ -579,6 +603,7 @@ async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
                 user: "default".into(),
                 token: Some(token.into()),
                 authenticate: true,
+                sessions_dir: None,
             },
         )
     };
@@ -608,4 +633,256 @@ fn the_printed_urls_need_the_token_only_from_other_machines() {
         message("192.168.1.5:8787", None),
         "ano web UI: http://192.168.1.5:8787/"
     );
+}
+
+/// A saved session is open again after the server restarts, with its title
+/// and what was said, and continues its conversation; deleting it removes
+/// its files.
+#[tokio::test]
+async fn saved_sessions_survive_a_restart() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let saved = tempfile::tempdir().unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let id = {
+        let server = Server::start_saving(&api, Some(saved.path())).await;
+        let created = server
+            .post("/api/sessions", json!({"workspace": folder.path()}))
+            .await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let session: Value = created.json().await.unwrap();
+        assert_eq!(session["saved"], true);
+        let id = session["id"].as_str().unwrap().to_string();
+        server
+            .post(
+                &format!("/api/sessions/{id}/messages"),
+                json!({"text": "hello\nmore"}),
+            )
+            .await;
+        server.wait_for(&id, "turn_finished", 1).await;
+        close_sessions(&server.state).await;
+        id
+    };
+    assert!(saved
+        .path()
+        .join("default")
+        .join(&id)
+        .join("conversation.json")
+        .is_file());
+
+    let server = Server::start_saving(&api, Some(saved.path())).await;
+    let listed: Value = server
+        .request(reqwest::Method::GET, "/api/sessions")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let session = &listed[0];
+    assert_eq!(session["id"], id.as_str());
+    assert_eq!(session["title"], "hello");
+    assert_eq!(
+        session["workspace"],
+        json!(std::fs::canonicalize(folder.path()).unwrap())
+    );
+    let restored = server.state.session(&id).unwrap();
+    let (backlog, _) = restored.log.subscribe(0);
+    let kinds: Vec<Value> = backlog
+        .iter()
+        .map(|event| serde_json::from_str::<Value>(&event.data).unwrap()["type"].clone())
+        .collect();
+    assert_eq!(kinds, [json!("user_message"), json!("message")]);
+
+    // The conversation goes on from where it was.
+    server
+        .post(
+            &format!("/api/sessions/{id}/messages"),
+            json!({"text": "again"}),
+        )
+        .await;
+    let events = server.wait_for(&id, "turn_finished", 1).await;
+    assert_eq!(events.last().unwrap()["usage"]["responses"], 2);
+
+    server
+        .request(reqwest::Method::DELETE, &format!("/api/sessions/{id}"))
+        .send()
+        .await
+        .unwrap();
+    assert!(!saved.path().join("default").join(&id).exists());
+}
+
+/// The page reads the feed and rates its items; without a feed, the list
+/// says so.
+#[tokio::test]
+async fn the_page_reads_and_rates_the_feed() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let server = Server::start(&api).await;
+    let feed: Value = server
+        .request(reqwest::Method::GET, "/api/feed")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(feed, json!({"enabled": false, "items": []}));
+
+    let dir = tempfile::tempdir().unwrap();
+    crate::infrastructure::feed::Feed::new(dir.path())
+        .post(
+            "default",
+            crate::domain::feed::FeedKind::Idea,
+            "Morning walk",
+            "",
+            None,
+            Some("Plan a walk"),
+        )
+        .unwrap();
+    let server = Server::start_with(&api, None, |harness| {
+        harness.feed = Some(Arc::new(crate::infrastructure::feed::Feed::new(dir.path())));
+    })
+    .await;
+    let feed: Value = server
+        .request(reqwest::Method::GET, "/api/feed")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(feed["items"][0]["action"], "Plan a walk");
+    let rated = server
+        .post("/api/feed/f1", json!({"rating": 1, "done": true}))
+        .await;
+    assert_eq!(rated.status(), StatusCode::OK);
+    let item: Value = rated.json().await.unwrap();
+    assert_eq!(
+        (item["rating"].clone(), item["done"].clone()),
+        (json!(1), json!(true))
+    );
+    let missing = server.post("/api/feed/f9", json!({"rating": 1})).await;
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A space is served isolated: no origin, nothing to connect to, with its
+/// data given to its scripts.
+#[tokio::test]
+async fn spaces_are_served_isolated_with_their_data() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let dir = tempfile::tempdir().unwrap();
+    let spaces = crate::infrastructure::spaces::Spaces::new(dir.path());
+    spaces
+        .save(
+            "default",
+            "habits",
+            "習慣",
+            "<html><head></head><body><script>document.body.textContent = ANO_SPACE.data.days</script></body></html>",
+            Some(&json!({"days": 3})),
+        )
+        .unwrap();
+    let server = Server::start_with(&api, None, |harness| {
+        harness.spaces = Some(Arc::new(crate::infrastructure::spaces::Spaces::new(
+            dir.path(),
+        )));
+    })
+    .await;
+    let listed: Value = server
+        .request(reqwest::Method::GET, "/api/spaces")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(listed["spaces"][0]["name"], "habits");
+
+    // The page frames the content; its own policy keeps the frame on this
+    // server, so the content cannot navigate it elsewhere with the data in
+    // the URL.
+    let page = server
+        .request(reqwest::Method::GET, "/spaces/habits")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    let policy = page.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(policy.starts_with("default-src 'self'"), "{policy}");
+    let html = page.text().await.unwrap();
+    assert!(
+        html.contains(r#"<iframe sandbox="allow-scripts allow-forms allow-modals" referrerpolicy="no-referrer" title="習慣" src="/spaces/habits/frame">"#),
+        "{html}"
+    );
+
+    let frame = server
+        .request(reqwest::Method::GET, "/spaces/habits/frame")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(frame.status(), StatusCode::OK);
+    let policy = frame.headers()["content-security-policy"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    // Its scripts run with no origin and may not connect anywhere, so they
+    // cannot reach /api with the page's cookie.
+    assert!(policy.starts_with("sandbox allow-scripts"), "{policy}");
+    assert!(
+        !policy.contains("allow-same-origin") && !policy.contains("allow-popups"),
+        "{policy}"
+    );
+    assert!(
+        policy.contains("connect-src 'none'") && policy.ends_with("frame-ancestors 'self'"),
+        "{policy}"
+    );
+    let html = frame.text().await.unwrap();
+    assert!(
+        html.contains(r#"window.ANO_SPACE = {"name":"habits","title":"習慣","data":{"days":3}};"#),
+        "{html}"
+    );
+
+    for missing in ["/spaces/none", "/spaces/..%2Fx", "/spaces/none/frame"] {
+        let response = server
+            .request(reqwest::Method::GET, missing)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{missing}");
+    }
+}
+
+/// The home page gets each enabled feature's part, and `null` for the
+/// others.
+#[tokio::test]
+async fn the_home_page_gets_what_is_enabled() {
+    let api = fake_api(Arc::new(Notify::new())).await;
+    let memory = tempfile::tempdir().unwrap();
+    let feed = tempfile::tempdir().unwrap();
+    crate::infrastructure::user_memory::MemoryBook::new(memory.path())
+        .save("default", "Likes green tea.")
+        .unwrap();
+    let server = Server::start_with(&api, None, |harness| {
+        harness.memory = Some(Arc::new(
+            crate::infrastructure::user_memory::MemoryBook::new(memory.path()),
+        ));
+        harness.feed = Some(Arc::new(crate::infrastructure::feed::Feed::new(
+            feed.path(),
+        )));
+    })
+    .await;
+    let home: Value = server
+        .request(reqwest::Method::GET, "/api/home")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(home["memory"], json!(["Likes green tea."]));
+    assert_eq!(home["feed"], json!([]));
+    for disabled in ["character", "objectives", "routines", "spaces"] {
+        assert!(home[disabled].is_null(), "{disabled}: {home}");
+    }
 }

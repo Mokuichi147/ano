@@ -1,9 +1,10 @@
-//! The built-in kinds of automation: the source `webhook`, and the
-//! notifiers `ntfy`, `discord`, `slack`, and `webhook`.
+//! The built-in kinds of automation: the sources `webhook` and `schedule`,
+//! and the notifiers `ntfy`, `discord`, `slack`, and `webhook`.
 //! Each reads and checks its own settings, and is registered by its kind
 //! like the kinds a harness or library user adds.
 
 pub mod notify;
+pub mod schedule;
 pub mod webhook;
 
 use crate::application::automation::{AutomationRegistry, KindSpec};
@@ -18,6 +19,9 @@ use std::sync::Arc;
 pub fn register_builtin_automation(registry: &mut AutomationRegistry) {
     registry.register_source("webhook", |spec| {
         Ok(Arc::new(webhook::WebhookSource::new(spec)?))
+    });
+    registry.register_source("schedule", |spec| {
+        Ok(Arc::new(schedule::ScheduleSource::new(spec)?))
     });
     for kind in HttpNotifierKind::ALL {
         registry.register_notifier(kind.name(), move |spec| {
