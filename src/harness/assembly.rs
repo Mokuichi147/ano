@@ -119,6 +119,9 @@ impl Harness {
         if self.feed.is_some() {
             profile.append_feed();
         }
+        if self.history.is_some() {
+            profile.append_past_conversations(self.feed.is_some());
+        }
         if let Some(spaces) = &self.spaces {
             if let Err(error) = profile.append_spaces(spaces) {
                 warnings.push(format!("left out the spaces: {error:#}"));

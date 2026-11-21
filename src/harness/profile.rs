@@ -3,7 +3,7 @@
 
 use super::{
     instructions::{
-        append_character, append_feed, append_memory, append_objectives,
+        append_character, append_feed, append_memory, append_objectives, append_past_conversations,
         append_project_instructions, append_routines, append_skills, append_spaces,
     },
     settings::AgentConfig,
@@ -16,6 +16,7 @@ use crate::{
         character::CHARACTER_UPDATE_NAME,
         environment::EnvironmentConfig,
         feed::{FEED_POST_NAME, FEED_READ_NAME},
+        history::{HISTORY_GET_NAME, HISTORY_SEARCH_NAME},
         objective::{OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
         policy::UserPolicy,
         routine::{ROUTINE_CREATE_NAME, ROUTINE_DELETE_NAME},
@@ -215,6 +216,23 @@ impl ExecutionProfile {
             .collect();
         append_spaces(&mut self.settings.instructions, &listed, can_change);
         Ok(())
+    }
+
+    /// Tell the run that the user's past conversations can be looked up,
+    /// when the raw history is kept, the run keeps personal context, and it
+    /// can load the history tools. Building feed ideas on recent
+    /// conversations is mentioned only when the user has a feed (`feed`) and
+    /// the run may post to it.
+    pub fn append_past_conversations(&mut self, feed: bool) {
+        let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
+        if self.personal_context
+            && self.can_search()
+            && available(HISTORY_SEARCH_NAME)
+            && available(HISTORY_GET_NAME)
+        {
+            let with_feed = feed && available(FEED_POST_NAME);
+            append_past_conversations(&mut self.settings.instructions, with_feed);
+        }
     }
 
     /// Tell the run about the user's feed, when it may post to it and keeps
@@ -662,6 +680,61 @@ mod tests {
         let mut untrusted = profile(UserPolicy::default());
         untrusted.without_personal_context();
         untrusted.append_feed();
+        assert_eq!(untrusted.settings.instructions, base);
+    }
+
+    #[test]
+    fn past_conversations_are_mentioned_only_when_they_can_be_looked_up() {
+        let profile = |policy: UserPolicy| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext::default(),
+            approval_mode: ApprovalMode::Ask,
+            personal_context: true,
+        };
+        let mut run = profile(UserPolicy::default());
+        let base = run.settings.instructions.clone();
+        run.append_past_conversations(true);
+        let added = &run.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Past conversations\n"), "{added}");
+        assert!(
+            added.contains(&format!(
+                "load {HISTORY_SEARCH_NAME} and {HISTORY_GET_NAME} with {TOOL_SEARCH_NAME}"
+            )),
+            "{added}"
+        );
+        assert!(added.contains("as time in the user's words"), "{added}");
+        assert!(added.contains("posting ideas to the feed"), "{added}");
+
+        // フィードが無い、または投稿できない実行では、フィードの案内を付けない。
+        for (feed, policy) in [
+            (false, UserPolicy::default()),
+            (
+                true,
+                UserPolicy::default().with_extra_disabled([FEED_POST_NAME]),
+            ),
+        ] {
+            let mut run = profile(policy);
+            run.append_past_conversations(feed);
+            let added = &run.settings.instructions[base.len()..];
+            assert!(added.contains("# Past conversations"), "{added}");
+            assert!(!added.contains("feed"), "{added}");
+        }
+
+        // 履歴の tool を読み込めない実行や、個人の文脈を持たない実行には何も足さない。
+        for policy in [
+            UserPolicy::default().with_extra_disabled([TOOL_SEARCH_NAME]),
+            UserPolicy::default().with_extra_disabled([HISTORY_SEARCH_NAME]),
+            UserPolicy::default().with_extra_disabled([PAST_CONVERSATIONS]),
+        ] {
+            let mut run = profile(policy);
+            run.append_past_conversations(true);
+            assert_eq!(run.settings.instructions, base);
+        }
+        let mut untrusted = profile(UserPolicy::default());
+        untrusted.without_personal_context();
+        untrusted.append_past_conversations(true);
         assert_eq!(untrusted.settings.instructions, base);
     }
 
