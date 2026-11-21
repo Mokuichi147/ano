@@ -9,6 +9,7 @@ pub mod character;
 pub mod chat_completions;
 pub mod chatgpt;
 pub mod chronotope;
+pub mod events;
 pub mod fallback;
 pub mod feed;
 pub(crate) mod frontmatter;

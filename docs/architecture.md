@@ -109,6 +109,7 @@ src/
 │   ├── feed.rs             フィードの項目（提案・記事・報告）の検証
 │   ├── space.rs            スペースの名前・題名・ページの検証
 │   ├── agenda.rs           予定の候補の tool 名と上限
+│   ├── event.rs            記事の出来事の tool 名と上限
 │   ├── environment.rs      実行環境と検証コマンドの設定
 │   ├── text.rs             上限付きの文字列の切り詰め
 │   └── github.rs           git remote の URL から GitHub のリポジトリ名を読む
@@ -156,6 +157,7 @@ src/
 │   ├── feed.rs             feed.json の読み書きと feed_post・feed_read
 │   ├── spaces.rs           スペースの読み書き、space_save・space_read・space_data_set、データを埋め込んだページ
 │   ├── agenda.rs           agenda_suggest（chronotope-core で話した時刻を基準に予定の時刻を読み、フィードに候補を残す）
+│   ├── events/             event_save・event_search（記事の出来事を chronotope に保存し、期間で探す。保存した出来事の一覧は手元に持つ）
 │   ├── frontmatter.rs      YAML frontmatter 付き Markdown の分割（SKILL.md・SOUL.md）
 │   ├── fs.rs               原子的なファイル置き換えと、ユーザーごとのディレクトリ名の検証
 │   ├── automation/         組み込みの自動化の種類（ソース: webhook・schedule、通知先: ntfy・discord・slack・webhook）

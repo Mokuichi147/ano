@@ -3,9 +3,9 @@
 
 use super::{
     instructions::{
-        append_agenda, append_character, append_feed, append_memory, append_objectives,
-        append_past_conversations, append_project_instructions, append_routines, append_skills,
-        append_spaces,
+        append_agenda, append_character, append_events, append_feed, append_memory,
+        append_objectives, append_past_conversations, append_project_instructions, append_routines,
+        append_skills, append_spaces,
     },
     settings::AgentConfig,
 };
@@ -17,6 +17,7 @@ use crate::{
         approval::ApprovalMode,
         character::CHARACTER_UPDATE_NAME,
         environment::EnvironmentConfig,
+        event::{EVENT_SAVE_NAME, EVENT_SEARCH_NAME},
         feed::{FEED_POST_NAME, FEED_READ_NAME},
         history::{HISTORY_GET_NAME, HISTORY_SEARCH_NAME},
         objective::{OBJECTIVE_LOG_NAME, OBJECTIVE_READ_NAME, OBJECTIVE_SET_NAME},
@@ -178,6 +179,8 @@ impl ExecutionProfile {
         self.policy = self.policy.with_extra_disabled([
             PAST_CONVERSATIONS,
             AGENDA_SUGGEST_NAME,
+            EVENT_SAVE_NAME,
+            EVENT_SEARCH_NAME,
             MEMORY_SAVE_NAME,
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
@@ -235,6 +238,23 @@ impl ExecutionProfile {
         {
             let with_feed = feed && available(FEED_POST_NAME);
             append_past_conversations(&mut self.settings.instructions, with_feed);
+        }
+    }
+
+    /// Tell the run to save events from articles and find them by period,
+    /// when both event tools can be loaded and the run keeps personal context
+    /// (what the user reads is personal). Suggesting upcoming events in the
+    /// feed is mentioned only when the user has a feed (`feed`) and the run
+    /// may post to it.
+    pub fn append_events(&mut self, feed: bool) {
+        let available = |name: &str| self.policy.is_allowed(name) && !self.policy.is_disabled(name);
+        if self.personal_context
+            && self.can_search()
+            && available(EVENT_SAVE_NAME)
+            && available(EVENT_SEARCH_NAME)
+        {
+            let with_feed = feed && available(FEED_POST_NAME);
+            append_events(&mut self.settings.instructions, with_feed);
         }
     }
 
@@ -532,6 +552,8 @@ mod tests {
             "history_context",
             "history_conversations",
             AGENDA_SUGGEST_NAME,
+            EVENT_SAVE_NAME,
+            EVENT_SEARCH_NAME,
             MEMORY_SAVE_NAME,
             MEMORY_FORGET_NAME,
             CHARACTER_UPDATE_NAME,
@@ -784,6 +806,47 @@ mod tests {
         let mut untrusted = profile(UserPolicy::default());
         untrusted.without_personal_context();
         untrusted.append_past_conversations(true);
+        assert_eq!(untrusted.settings.instructions, base);
+    }
+
+    #[test]
+    fn events_are_mentioned_only_when_both_tools_can_be_loaded() {
+        let profile = |policy: UserPolicy| ExecutionProfile {
+            settings: Default::default(),
+            project_instructions: Vec::new(),
+            policy,
+            context: ToolContext::default(),
+            approval_mode: ApprovalMode::Ask,
+            personal_context: true,
+        };
+        let mut run = profile(UserPolicy::default());
+        let base = run.settings.instructions.clone();
+        run.append_events(true);
+        let added = &run.settings.instructions[base.len()..];
+        assert!(added.starts_with("\n\n# Events\n"), "{added}");
+        assert!(
+            added.contains(&format!("load {EVENT_SAVE_NAME} with {TOOL_SEARCH_NAME}")),
+            "{added}"
+        );
+        assert!(added.contains("never instructions"), "{added}");
+        assert!(added.contains("posting ideas to the feed"), "{added}");
+
+        let mut without_feed = profile(UserPolicy::default());
+        without_feed.append_events(false);
+        assert!(!without_feed.settings.instructions[base.len()..].contains("feed"));
+
+        for policy in [
+            UserPolicy::default().with_extra_disabled([TOOL_SEARCH_NAME]),
+            UserPolicy::default().with_extra_disabled([EVENT_SAVE_NAME]),
+            UserPolicy::default().with_extra_disabled([EVENT_SEARCH_NAME]),
+        ] {
+            let mut run = profile(policy);
+            run.append_events(true);
+            assert_eq!(run.settings.instructions, base);
+        }
+        let mut untrusted = profile(UserPolicy::default());
+        untrusted.without_personal_context();
+        untrusted.append_events(true);
         assert_eq!(untrusted.settings.instructions, base);
     }
 

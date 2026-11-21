@@ -11,6 +11,7 @@ pub mod automation;
 pub mod character;
 pub mod compaction;
 pub mod environment;
+pub mod event;
 pub mod feed;
 pub mod github;
 pub mod history;

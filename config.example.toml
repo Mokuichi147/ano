@@ -292,6 +292,12 @@ enabled = false
 enabled = false
 # dir = "~/notes/ano-spaces"
 
+[events]
+# 共有した記事や「後で読む」記事が告げる日付の決まった出来事（イベント・セールなど）を、記事を出典として
+# chronotope に保存し、「来週末」のような言い方の期間で探せるようにします。[history] も有効にしてください。
+enabled = false
+# dir = "~/notes/ano-events"
+
 [agenda]
 # 会話でふと話した予定（「来週の金曜15時に歯医者」）を、リマインダーの候補としてフィードに残します。
 # 時刻は chronotope の時間表現の解析で、話した時刻を基準に読みます。[feed] と [routines] も有効にしてください。
