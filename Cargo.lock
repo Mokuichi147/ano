@@ -460,7 +460,7 @@ dependencies = [
 [[package]]
 name = "chronotope-core"
 version = "0.1.0"
-source = "git+https://github.com/Mokuichi147/chronotope?rev=f42e9f3e64737e448dee3ee724c2706e2435269e#f42e9f3e64737e448dee3ee724c2706e2435269e"
+source = "git+https://github.com/Mokuichi147/chronotope?rev=0f635ec80d2f2d21d639f5ab703601c60a0699c4#0f635ec80d2f2d21d639f5ab703601c60a0699c4"
 dependencies = [
  "serde",
  "serde_json",

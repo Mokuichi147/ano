@@ -305,6 +305,8 @@ mod tests {
         assert_eq!(read("今週末").unwrap(), "2026-11-21〜2026-11-22");
         assert_eq!(read("今晩").unwrap(), "2026-11-21");
         assert_eq!(read("明朝").unwrap(), "2026-11-22");
+        // A time zone offset followed by kanji once panicked in chronotope-core.
+        assert!(read("2026-12-03 15:30-12時30").is_err());
         for when in ["来月", "来週", "毎週金曜", "そのうち"] {
             assert!(read(when).is_err(), "{when}");
         }

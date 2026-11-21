@@ -22,6 +22,8 @@ fn times_are_read_relative_to_the_publication() {
     assert_eq!(read("12月").unwrap(), "2026-12-01〜2026-12-31");
     let span = read_event_time("11月28日から29日まで", &published).unwrap();
     assert_eq!(span.end - span.start, 2 * 24 * 60 * 60);
+    // A time zone offset followed by kanji once panicked in chronotope-core.
+    assert!(read("2026-12-05 15:30-12時30").is_err());
     for when in ["毎週金曜", "そのうち", "2026年12月以降"] {
         assert!(read(when).is_err(), "{when}");
     }
