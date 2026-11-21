@@ -244,6 +244,46 @@ async fn real_history_cli_round_trip_compaction_restart_and_offline_retry() {
     successful(&search);
     let found: Value = serde_json::from_slice(&search.stdout).unwrap();
     assert_eq!(found["results"]["events"].as_array().unwrap().len(), 1);
+    // 期間を言い方で指定すると、ローカルの日付で解決した期間と、ローカルのオフセット付きの時刻が返る。
+    let today = cli(
+        root.path(),
+        &model,
+        &[
+            "history", "search", offline, "--exact", "--human", "--time", "今日",
+        ],
+        None,
+    )
+    .await;
+    successful(&today);
+    let today: Value = serde_json::from_slice(&today.stdout).unwrap();
+    let results = &today["results"];
+    assert_eq!(results["events"].as_array().unwrap().len(), 1, "{results}");
+    assert_eq!(results["period"]["time"], "今日");
+    let offset = chrono::Local::now().format("%:z").to_string();
+    let local = |value: &Value| {
+        let text = value.as_str().unwrap();
+        text.ends_with(&offset) || (offset == "+00:00" && text.ends_with('Z'))
+    };
+    assert!(local(&results["period"]["from"]), "{results}");
+    assert!(local(&results["events"][0]["received_at"]), "{results}");
+    let yesterday = cli(
+        root.path(),
+        &model,
+        &[
+            "history",
+            "search",
+            offline,
+            "--exact",
+            "--human",
+            "--time",
+            "一昨日",
+        ],
+        None,
+    )
+    .await;
+    successful(&yesterday);
+    let yesterday: Value = serde_json::from_slice(&yesterday.stdout).unwrap();
+    assert_eq!(yesterday["results"]["events"].as_array().unwrap().len(), 0);
     let read = query(
         &endpoint,
         "default",

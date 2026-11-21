@@ -202,6 +202,83 @@ fn query_arguments_cannot_change_owner_operation_or_unbound_output_size() {
     );
 }
 
+#[test]
+fn search_period_is_given_as_time_or_from_to_and_the_calendar_is_not_the_models() {
+    let args = tools::validate_query("history_search", json!({"time":"昨日","origins":["human"]}))
+        .unwrap();
+    assert_eq!(args["time"], "昨日");
+    for args in [
+        json!({"time":"昨日","from":"2026-11-01"}),
+        json!({"time":"昨日","to":"2026-11-01"}),
+        json!({"time":"  "}),
+        json!({"calendar":"gregorian+01:00"}),
+    ] {
+        assert!(tools::validate_query("history_search", args).is_err());
+    }
+    assert!(
+        tools::validate_query("history_get", json!({"event":"e","calendar":"gregorian"})).is_err()
+    );
+    assert_eq!(calendar_for_offset(9 * 3600), "gregorian+09:00");
+    assert_eq!(
+        calendar_for_offset(-(5 * 3600 + 30 * 60)),
+        "gregorian-05:30"
+    );
+    assert_eq!(calendar_for_offset(0), "gregorian+00:00");
+}
+
+#[tokio::test]
+async fn queries_use_the_local_calendar_and_refuse_a_period_the_server_ignored() {
+    let root = tempfile::tempdir().unwrap();
+    let queries = Arc::new(Mutex::new(Vec::<Value>::new()));
+    // 1 回目は期間を適用した応答、2 回目は time を知らない古いサーバーの応答。
+    let app = Router::new().route("/v1/query", post({
+        let queries = queries.clone();
+        move |Json(body): Json<Value>| {
+            let queries = queries.clone();
+            async move {
+                let first = {
+                    let mut queries = queries.lock().unwrap();
+                    queries.push(body.clone());
+                    queries.len() == 1
+                };
+                let period = if first { json!({"time": body["time"], "from": "2026-11-20T00:00:00+09:00", "to": "2026-11-21T00:00:00+09:00"}) } else { Value::Null };
+                Json(json!({"results": {"events": [], "period": period}, "truncated": false, "warnings": []}))
+            }
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let h = history(
+        root.path(),
+        &format!("http://{}", listener.local_addr().unwrap()),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let found = h
+        .query("alice", "history_search", json!({"time":"昨日"}))
+        .await
+        .unwrap();
+    assert_eq!(found["results"]["period"]["time"], "昨日");
+    let error = h
+        .query("alice", "history_search", json!({"time":"昨日"}))
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("time による期間の指定に対応していません"),
+        "{error:#}"
+    );
+    // 期間を指定しない検索は、古いサーバーでもそのまま使える。
+    h.query("alice", "history_search", json!({"text":"歯医者"}))
+        .await
+        .unwrap();
+
+    let queries = queries.lock().unwrap();
+    for query in queries.iter() {
+        assert_eq!(query["calendar"], local_calendar());
+    }
+    assert_eq!(queries[0]["time"], "昨日");
+    server.abort();
+}
+
 #[tokio::test]
 async fn rejected_event_is_isolated_and_the_sent_position_survives_pruning() {
     let root = tempfile::tempdir().unwrap();

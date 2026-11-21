@@ -28,6 +28,9 @@ enum HistoryCommand {
         human: bool,
         #[arg(long)]
         conversation: Option<String>,
+        /// 期間（「昨日」「先週」「直近2日間」など。ローカルの日付で解決する）。
+        #[arg(long)]
+        time: Option<String>,
         #[arg(long)]
         cursor: Option<String>,
     },
@@ -58,6 +61,7 @@ pub(super) async fn run(config: &AppConfig, user: &str, args: HistoryArgs) -> Re
             exact,
             human,
             conversation,
+            time,
             cursor,
         } => {
             let mut args = json!({"text":text,"exact":exact});
@@ -66,6 +70,9 @@ pub(super) async fn run(config: &AppConfig, user: &str, args: HistoryArgs) -> Re
             }
             if let Some(conversation) = conversation {
                 args["conversation"] = json!(conversation);
+            }
+            if let Some(time) = time {
+                args["time"] = json!(time);
             }
             if let Some(cursor) = cursor {
                 args["cursor"] = json!(cursor);

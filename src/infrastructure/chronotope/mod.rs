@@ -94,6 +94,18 @@ impl HistorySettings {
     }
 }
 
+/// 今のローカルの UTC オフセットを持つグレゴリオ暦の名前（`gregorian+09:00` など）。
+fn local_calendar() -> String {
+    calendar_for_offset(chrono::Local::now().offset().local_minus_utc())
+}
+
+fn calendar_for_offset(seconds: i32) -> String {
+    let minutes = seconds / 60;
+    let sign = if minutes < 0 { '-' } else { '+' };
+    let minutes = minutes.abs();
+    format!("gregorian{sign}{:02}:{:02}", minutes / 60, minutes % 60)
+}
+
 /// OS のデータディレクトリ（macOS: `~/Library/Application Support/ano`、
 /// Linux: `$XDG_DATA_HOME/ano`、Windows: `%APPDATA%\ano\data`）の `history`。
 pub fn default_history_dir() -> Option<PathBuf> {
@@ -215,9 +227,18 @@ impl Chronotope {
         } else {
             self.sync(user).await.err()
         };
+        let period_requested = args.contains_key("time");
         args.insert("op".into(), json!(op));
         args.insert("budget_ms".into(), json!(1000));
+        // 相対的な期間をローカルの日付で解決し、時刻もローカルのオフセットで受け取る。
+        args.insert("calendar".into(), json!(local_calendar()));
         let mut result = self.post(user, "query", &Value::Object(args)).await?;
+        // 古い chronotope は time を無視して全期間の結果を返すため、期間を適用した応答か確かめる。
+        if period_requested && result["results"]["period"].is_null() {
+            bail!(
+                "接続先の chronotope が time による期間の指定に対応していません。chronotope を更新するか、from / to を指定してください"
+            );
+        }
         result["local_sync"] = self.status(user)?;
         if result["local_sync"]["synchronized"] != true {
             result["local_sync"]["warning"] =
