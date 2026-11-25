@@ -191,7 +191,10 @@ impl MemoryBook {
             }
             match next.next() {
                 Some((Some(fact), before)) if fact == before => replaced.push_str(line),
-                Some((Some(fact), _)) => replaced.push_str(&format!("- {fact}\n")),
+                Some((Some(fact), _)) => {
+                    let ending = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+                    replaced.push_str(&format!("- {fact}{ending}"));
+                }
                 Some((None, _)) => {}
                 None => bail!("the memory changed in the meantime; nothing was replaced"),
             }

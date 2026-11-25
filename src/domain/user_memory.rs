@@ -121,6 +121,17 @@ pub fn consolidate(facts: &[String], merges: Vec<Merge>) -> Consolidation {
             Some("one consolidation removes only a part of the memory; run it again".to_string())
         } else {
             match normalize_fact(&merge.into) {
+                // The same fact twice, as a save refuses.
+                Ok(fact)
+                    if result.facts.iter().enumerate().any(|(index, kept)| {
+                        !merge.members.contains(&index)
+                            && kept
+                                .as_deref()
+                                .is_some_and(|kept| kept.eq_ignore_ascii_case(&fact))
+                    }) =>
+                {
+                    Some("its fact is already remembered as another fact".to_string())
+                }
                 Ok(fact) => {
                     merge.into = fact;
                     None
@@ -185,6 +196,7 @@ mod tests {
                 merge(&[5, 6], &long),
                 merge(&[5, 6], " \n "),
                 merge(&[2, 3, 4, 5, 6, 7, 8], "too many"),
+                merge(&[8, 9], "FACT 7"),
                 merge(&[10, 11], "ten and eleven"),
             ],
         );
@@ -195,7 +207,7 @@ mod tests {
                 merge(&[10, 11], "ten and eleven")
             ]
         );
-        assert_eq!(result.skipped.len(), 6);
+        assert_eq!(result.skipped.len(), 7);
         assert_eq!(result.remaining().len(), 10);
         assert_eq!(result.facts[2].as_deref(), Some("fact 2"));
     }

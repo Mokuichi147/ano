@@ -72,7 +72,12 @@ impl MemoryConsolidator {
         } else {
             self.propose(&before[..shown]).await?
         };
-        let outcome = consolidate(&before, merges);
+        // Only the facts the model saw can be merged: a number past them
+        // names a fact it never read.
+        let mut outcome = consolidate(&before[..shown], merges);
+        outcome
+            .facts
+            .extend(before[shown..].iter().cloned().map(Some));
         let backup = if apply && !outcome.applied.is_empty() {
             Some(book.replace(user, &before, &outcome.facts)?)
         } else {
@@ -151,7 +156,8 @@ fn shown_facts(facts: &[String]) -> usize {
 
 /// The merges of an answer, with the model's numbers (from 1) as positions
 /// (from 0). An answer without a readable `merges` list is an error, so
-/// that nothing is changed on it; a merge that cannot be read is dropped.
+/// that nothing is changed on it; a merge that cannot be read comes out as
+/// one that `consolidate` leaves out.
 fn parse_merges(response: &Value) -> Result<Vec<Merge>> {
     let text = response_text(response)?;
     let value = json_object(&text).with_context(|| unreadable(&text, "consolidation"))?;
@@ -160,23 +166,23 @@ fn parse_merges(response: &Value) -> Result<Vec<Merge>> {
         .context("the consolidation answer has no list of merges")?;
     Ok(merges
         .iter()
-        .filter_map(|merge| {
-            let members = merge["facts"]
-                .as_array()?
-                .iter()
+        .map(|merge| Merge {
+            members: merge["facts"]
+                .as_array()
+                .into_iter()
+                .flatten()
                 .map(|number| {
+                    // What is not a number of the list (0, a string)
+                    // becomes a position no memory has, so the merge is
+                    // reported as left out rather than dropped silently.
                     number
                         .as_u64()
                         .and_then(|number| usize::try_from(number).ok())
-                        // 0 is not a number of the list; it becomes a
-                        // position no memory has.
-                        .map(|number| number.checked_sub(1).unwrap_or(usize::MAX))
+                        .and_then(|number| number.checked_sub(1))
+                        .unwrap_or(usize::MAX)
                 })
-                .collect::<Option<Vec<_>>>()?;
-            Some(Merge {
-                members,
-                into: merge["into"].as_str()?.to_string(),
-            })
+                .collect(),
+            into: merge["into"].as_str().unwrap_or_default().to_string(),
         })
         .collect())
 }
@@ -316,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn numbers_become_positions_and_unreadable_merges_are_dropped() {
+    fn numbers_become_positions_and_unreadable_merges_are_left_out_later() {
         let merges = parse_merges(&json!({"output_text": json!({"merges": [
             {"facts": [2, 5], "into": "x"},
             {"facts": [0, 1], "into": "zero is not a number of the list"},
@@ -325,10 +331,49 @@ mod tests {
             "not a merge"
         ]}).to_string()}))
         .unwrap();
-        assert_eq!(merges.len(), 2);
+        assert_eq!(merges.len(), 5);
         assert_eq!(merges[0].members, [1, 4]);
         assert_eq!(merges[1].members, [usize::MAX, 0]);
+        assert_eq!(merges[2].members, [usize::MAX, 1]);
+        assert_eq!(
+            (merges[3].members.as_slice(), merges[3].into.as_str()),
+            (&[2, 3][..], "")
+        );
+        assert!(merges[4].members.is_empty());
+        let facts: Vec<String> = (0..6).map(|n| format!("fact {n}")).collect();
+        let outcome = consolidate(&facts, merges);
+        assert_eq!((outcome.applied.len(), outcome.skipped.len()), (1, 4));
         assert!(parse_merges(&json!({"output_text": "{\"merges\": 3}"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn facts_the_model_was_not_shown_are_never_merged() {
+        let root = tempfile::tempdir().unwrap();
+        let book = MemoryBook::new(root.path());
+        let path = book.path("default").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let facts: Vec<String> = (0..200)
+            .map(|n| format!("{n:03}{}", "あ".repeat(99)))
+            .collect();
+        let text: String = facts.iter().map(|fact| format!("- {fact}\n")).collect();
+        std::fs::write(&path, text).unwrap();
+        let shown = shown_facts(&facts);
+        assert!(shown < 200);
+        // The second merge names a fact past those shown.
+        let (consolidator, _) = consolidator(vec![answer(&format!(
+            "{{\"merges\": [{{\"facts\": [1, 2], \"into\": \"merged\"}}, {{\"facts\": [3, {}], \"into\": \"unseen\"}}]}}",
+            shown + 5
+        ))]);
+
+        let report = consolidator.run(&book, "default", true).await.unwrap();
+
+        assert_eq!(report.not_shown, 200 - shown);
+        assert_eq!(report.outcome.applied.len(), 1);
+        assert_eq!(report.outcome.skipped.len(), 1);
+        let after = book.facts("default").unwrap();
+        assert_eq!(after.len(), 199);
+        assert_eq!(after[0], "merged");
+        assert_eq!(after[1..], facts[2..]);
     }
 
     #[test]
