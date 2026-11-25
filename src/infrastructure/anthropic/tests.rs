@@ -388,6 +388,32 @@ fn a_tool_result_without_its_call_is_sent_as_text() {
     );
 }
 
+#[test]
+fn tool_ids_and_arguments_from_other_providers_are_made_acceptable() {
+    let payload = json!({"model": "m", "tools": [search_tool()], "input": [
+        {"role": "user", "content": "hi"},
+        {"type": "function_call", "call_id": "functions.search:0", "name": "search", "arguments": "{\"q\":"},
+        {"type": "function_call_output", "call_id": "functions.search:0", "output": "error"},
+    ]});
+    let messages = messages_request(&payload, &LOCAL, true).unwrap().body["messages"].clone();
+    let call = &messages[1]["content"][0];
+    let id = call["id"].as_str().unwrap();
+    assert!(id.starts_with("functions_search_0_"), "{id}");
+    assert_eq!(messages[2]["content"][0]["tool_use_id"], id);
+    assert_eq!(call["input"], json!({"arguments": "{\"q\":"}));
+    assert_eq!(tool_id(&json!("toolu_01-A")), json!("toolu_01-A"));
+
+    // tool を定義しない要求では、呼び出しと結果をテキストにする。
+    let mut untooled = payload.clone();
+    untooled["tools"] = json!([]);
+    let messages = messages_request(&untooled, &LOCAL, true).unwrap().body["messages"].clone();
+    assert_eq!(messages[1]["content"][0]["type"], "text");
+    assert!(messages[2]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("[tool result functions_search_0_"));
+}
+
 #[tokio::test]
 async fn streams_thinking_text_and_tool_calls() {
     let body = sse(&[

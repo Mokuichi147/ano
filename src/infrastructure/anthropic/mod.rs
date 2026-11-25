@@ -88,10 +88,11 @@ impl AnthropicClient {
         let mut models = Vec::new();
         let mut after: Option<String> = None;
         loop {
-            let mut url = format!("{}/models?limit=1000", self.inner.base_url());
+            let mut url = reqwest::Url::parse(&format!("{}/models", self.inner.base_url()))
+                .context("the base_url is not a valid URL")?;
+            url.query_pairs_mut().append_pair("limit", "1000");
             if let Some(after) = &after {
-                url.push_str("&after_id=");
-                url.push_str(after);
+                url.query_pairs_mut().append_pair("after_id", after);
             }
             let request = self.inner.authorize(self.inner.http().get(url));
             let response = match request.send().await {
@@ -301,8 +302,9 @@ fn messages_request(payload: &Value, options: &Options, keep_thinking: bool) -> 
         }
     }
     let orphans = orphan_results(&mut messages);
-    if orphans {
-        // 結果の相手がない呼び出しを外したので、前置きは作られたときと違う。
+    let untooled = tools.is_empty() && tools_as_text(&mut messages);
+    if orphans || untooled {
+        // 呼び出しや結果をテキストにしたので、前置きは作られたときと違う。
         has_thinking = false;
         strip_thinking(&mut messages);
     }
@@ -415,26 +417,31 @@ fn append_item(turns: &mut Vec<Turn>, system: &mut String, item: &Value) -> Resu
         },
         "function_call" => {
             let input = match &item["arguments"] {
-                Value::String(text) => serde_json::from_str::<Value>(text).ok(),
-                Value::Object(_) => Some(item["arguments"].clone()),
-                _ => None,
-            }
-            .filter(Value::is_object)
-            .unwrap_or_else(|| json!({}));
-            let id = item.get("call_id").or_else(|| item.get("id")).cloned();
+                Value::Object(_) => item["arguments"].clone(),
+                Value::Null => json!({}),
+                // オブジェクトでない引数（壊れた JSON など）は、モデルが
+                // 自分の送ったものを見られるよう文字列のまま残す。
+                Value::String(text) => serde_json::from_str::<Value>(text)
+                    .ok()
+                    .filter(Value::is_object)
+                    .unwrap_or_else(|| json!({"arguments": text})),
+                arguments => json!({"arguments": arguments}),
+            };
+            let id = item.get("call_id").or_else(|| item.get("id"));
             push_blocks(
                 turns,
                 "assistant",
                 vec![Block::Plain(json!({
                     "type": "tool_use",
-                    "id": id.unwrap_or(Value::Null),
+                    "id": tool_id(id.unwrap_or(&Value::Null)),
                     "name": item["name"],
                     "input": input,
                 }))],
             );
         }
         "function_call_output" => {
-            let mut result = json!({"type": "tool_result", "tool_use_id": item["call_id"]});
+            let mut result =
+                json!({"type": "tool_result", "tool_use_id": tool_id(&item["call_id"])});
             match &item["output"] {
                 Value::String(text) if text.is_empty() => {}
                 Value::String(text) => result["content"] = json!(text),
@@ -476,6 +483,53 @@ fn append_item(turns: &mut Vec<Turn>, system: &mut String, item: &Value) -> Resu
         kind => bail!("Anthropic の接続先へ送れない履歴の項目です: {kind}"),
     }
     Ok(())
+}
+
+/// Anthropic の tool の id に使えるのは英数字と `_`・`-` だけ。ほかの接続先が
+/// 作った id（`functions.search:0` など）は、使えない文字を `_` にし、
+/// 元の id のハッシュを添えて区別する。呼び出しと結果は同じ id になる。
+fn tool_id(id: &Value) -> Value {
+    let Some(id) = id.as_str() else {
+        return id.clone();
+    };
+    let valid = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if !id.is_empty() && id.chars().all(valid) {
+        return json!(id);
+    }
+    let safe: String = id.chars().map(|c| if valid(c) { c } else { '_' }).collect();
+    let hash = hex::encode(Sha256::digest(id.as_bytes()));
+    json!(format!("{safe}_{}", &hash[..8]))
+}
+
+/// tool を定義しない要求では、履歴の tool の呼び出しと結果を送れないので
+/// テキストにする。何か変えたら真。
+fn tools_as_text(messages: &mut [Value]) -> bool {
+    let mut changed = false;
+    for block in messages
+        .iter_mut()
+        .flat_map(|message| message["content"].as_array_mut().into_iter().flatten())
+    {
+        let text = match block["type"].as_str() {
+            Some("tool_use") => format!(
+                "[tool call {} {}]\n{}",
+                block["name"].as_str().unwrap_or_default(),
+                block["id"].as_str().unwrap_or_default(),
+                block["input"]
+            ),
+            Some("tool_result") => format!(
+                "[tool result {}]\n{}",
+                block["tool_use_id"].as_str().unwrap_or_default(),
+                match &block["content"] {
+                    Value::String(text) => text.clone(),
+                    content => text_of(content),
+                }
+            ),
+            _ => continue,
+        };
+        *block = json!({"type": "text", "text": text});
+        changed = true;
+    }
+    changed
 }
 
 fn push_blocks(turns: &mut Vec<Turn>, role: &'static str, blocks: Vec<Block>) {
