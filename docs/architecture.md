@@ -103,7 +103,7 @@ src/
 │   ├── mcp.rs              MCP サーバー設定と公開可否の判定
 │   ├── skill.rs            スキルの名前・説明・本文の検証
 │   ├── character.rs        キャラクターの名前・タグライン・ソウルの検証と部分的な変更
-│   ├── user_memory.rs      記憶する事実の検証と、実行に載せる範囲
+│   ├── user_memory.rs      記憶する事実の検証と、実行に載せる範囲、統合の提案の適用
 │   ├── objective.rs        長期の目標と進捗の検証・変更・要約
 │   ├── routine.rs          リマインダーと定期作業の検証
 │   ├── feed.rs             フィードの項目（提案・記事・報告）の検証
@@ -138,8 +138,9 @@ src/
 │   ├── conversation.rs     クライアントがターンごとに進める会話（ano web・ano acp で共有。開始・中断・終了）
 │   ├── approval.rs         承認モードから承認ハンドラーを作る（ApprovalFactory）
 │   ├── auto_approval.rs    判定用モデルによる自動承認（ResponsesApi を利用）
-│   ├── answer.rs           判定用モデルの応答（JSON）の読み取り（自動承認とトリアージで共有）
+│   ├── answer.rs           判定用モデルの応答（JSON）の読み取り（自動承認・トリアージ・記憶の統合で共有）
 │   ├── triage.rs           判定用モデルによる自動化のイベントの振り分け（無視・通知・作業）
+│   ├── memory_consolidation.rs  モデルの提案による記憶の統合（ano memory consolidate）
 │   ├── notify.rs           自動化で始めた作業の notify_user（拡張）
 │   └── review.rs           review_changes と git_commit_push のレビュー照合（ReviewGate）
 ├── infrastructure/
@@ -151,7 +152,7 @@ src/
 │   ├── project.rs          AGENTS.md などプロジェクト指示の読み込み
 │   ├── skills.rs           SKILL.md の読み書きと skill_read・skill_save
 │   ├── character.rs        SOUL.md の読み書きと character_update
-│   ├── user_memory.rs      MEMORY.md の読み書きと memory_save・memory_forget
+│   ├── user_memory.rs      MEMORY.md の読み書き・統合後の置き換えと memory_save・memory_forget
 │   ├── objectives.rs       objectives.json の読み書きと objective_set・objective_log・objective_read
 │   ├── routines.rs         routines.json の読み書き、routine_create・routine_delete、自動化のソース routines
 │   ├── feed.rs             feed.json の読み書きと feed_post・feed_read

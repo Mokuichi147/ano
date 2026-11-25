@@ -177,3 +177,93 @@ async fn a_disabled_memory_stays_out_of_runs() {
         .iter()
         .any(|tool| tool["name"].as_str().unwrap().starts_with("memory_")));
 }
+
+/// `ano memory consolidate` shows the merges the model proposes with
+/// `--dry-run`, and without it rewrites the memory and keeps the file as it
+/// was; a proposal that is not sound is reported and left out.
+#[tokio::test]
+async fn consolidation_merges_the_facts_the_model_names_and_keeps_a_backup() {
+    let merges = json!({"merges": [
+        {"facts": [1, 3], "into": "Prefers green tea to coffee."},
+        {"facts": [2, 9], "into": "Names a fact that does not exist."}
+    ]});
+    let (endpoint, requests) = mock_responses(vec![json!([
+        {"type": "message", "content": [{"type": "output_text", "text": merges.to_string()}]}
+    ])])
+    .await;
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("config.toml"),
+        "[memory]\nenabled = true\ndir = 'memory'\n",
+    )
+    .unwrap();
+    for fact in [
+        "Likes green tea.",
+        "Has a cat named Mochi.",
+        "Prefers green tea to coffee.",
+    ] {
+        let added = ano(directory.path())
+            .args(["memory", "add", fact])
+            .output()
+            .await
+            .unwrap();
+        assert!(added.status.success());
+    }
+    let consolidate = async |extra: &[&str]| {
+        let output = tokio::time::timeout(
+            Duration::from_secs(20),
+            ano(directory.path())
+                .env("OPENAI_BASE_URL", &endpoint)
+                .env("OPENAI_API_KEY", "test-fixture-key")
+                .args(["memory", "consolidate"])
+                .args(extra)
+                .output(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+
+    let (shown, _) = consolidate(&["--dry-run"]).await;
+    assert!(
+        shown.contains("  1. Likes green tea.\n  3. Prefers green tea to coffee.\n  -> Prefers green tea to coffee.\n")
+            && shown.contains("Would consolidate 3 facts into 2"),
+        "{shown}"
+    );
+    assert!(listed(directory.path()).await.contains("  3. Prefers"));
+
+    let (shown, warnings) = consolidate(&[]).await;
+    assert!(shown.contains("Consolidated 3 facts into 2."), "{shown}");
+    assert!(
+        warnings.contains("skipped a proposed merge of 2, 9"),
+        "{warnings}"
+    );
+    let listed = listed(directory.path()).await;
+    assert!(
+        listed.contains("  1. Has a cat named Mochi.\n  2. Prefers green tea to coffee.\n"),
+        "{listed}"
+    );
+    let backup =
+        std::fs::read_to_string(directory.path().join("memory/default/MEMORY.md.bak")).unwrap();
+    assert!(backup.contains("- Likes green tea.\n"), "{backup}");
+
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.len(), 2);
+    let facts = requests[0]["input"][0]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(
+        facts.contains("1. Likes green tea.\n2. Has a cat named Mochi.\n3. Prefers"),
+        "{facts}"
+    );
+    assert!(requests[0]["tools"].is_null());
+}

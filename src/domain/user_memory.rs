@@ -54,9 +54,175 @@ pub fn recent_facts(facts: &[String]) -> (&[String], usize) {
     (&facts[start..], start)
 }
 
+/// Facts one merge may combine. A merge of more would turn many facts into
+/// one sentence that cannot hold them.
+pub const MAX_MERGE_MEMBERS: usize = 6;
+
+/// One step of a consolidation: the facts at `members` (positions in the
+/// saved order) become the single fact `into`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merge {
+    pub members: Vec<usize>,
+    pub into: String,
+}
+
+/// What a consolidation does to the facts it was given.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Consolidation {
+    /// For each fact, in the saved order: its text afterwards, or `None`
+    /// when it went into a merged fact.
+    pub facts: Vec<Option<String>>,
+    /// The merges that were applied, with their fact normalized.
+    pub applied: Vec<Merge>,
+    /// The merges that were left out, each with the reason.
+    pub skipped: Vec<(Merge, String)>,
+}
+
+impl Consolidation {
+    /// The facts afterwards, in order.
+    pub fn remaining(&self) -> Vec<String> {
+        self.facts.iter().flatten().cloned().collect()
+    }
+}
+
+/// How many facts one consolidation may take away from `count`: a quarter,
+/// and at least two. Merging is proposed by a model, so one pass cannot
+/// rewrite most of the memory; a later pass can go on.
+pub fn merge_allowance(count: usize) -> usize {
+    count.div_ceil(4).max(2)
+}
+
+/// Apply `merges` to `facts`, leaving out every merge that is not sound.
+///
+/// A merge needs two to `MAX_MERGE_MEMBERS` different facts that no earlier
+/// merge used, and a text that is a valid fact. The merged fact takes the
+/// place of its most recent member, because the most recent facts are the
+/// ones sent with a run. Facts no merge names stay exactly as they are, and
+/// merges stop once `merge_allowance` facts are gone.
+pub fn consolidate(facts: &[String], merges: Vec<Merge>) -> Consolidation {
+    let mut result = Consolidation {
+        facts: facts.iter().cloned().map(Some).collect(),
+        ..Consolidation::default()
+    };
+    let mut used = vec![false; facts.len()];
+    let mut allowance = merge_allowance(facts.len());
+    for mut merge in merges {
+        merge.members.sort_unstable();
+        merge.members.dedup();
+        let reason = if merge.members.len() < 2 {
+            Some("it names fewer than two different facts".to_string())
+        } else if merge.members.len() > MAX_MERGE_MEMBERS {
+            Some(format!("it merges more than {MAX_MERGE_MEMBERS} facts"))
+        } else if merge.members.iter().any(|&member| member >= facts.len()) {
+            Some("it names a fact that does not exist".to_string())
+        } else if merge.members.iter().any(|&member| used[member]) {
+            Some("an earlier merge already used one of its facts".to_string())
+        } else if merge.members.len() - 1 > allowance {
+            Some("one consolidation removes only a part of the memory; run it again".to_string())
+        } else {
+            match normalize_fact(&merge.into) {
+                Ok(fact) => {
+                    merge.into = fact;
+                    None
+                }
+                Err(error) => Some(format!("its fact is not valid: {error}")),
+            }
+        };
+        if let Some(reason) = reason {
+            result.skipped.push((merge, reason));
+            continue;
+        }
+        let (last, earlier) = merge.members.split_last().expect("at least two members");
+        for &member in earlier {
+            result.facts[member] = None;
+            used[member] = true;
+        }
+        result.facts[*last] = Some(merge.into.clone());
+        used[*last] = true;
+        allowance -= earlier.len();
+        result.applied.push(merge);
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn facts(count: usize) -> Vec<String> {
+        (0..count).map(|n| format!("fact {n}")).collect()
+    }
+
+    fn merge(members: &[usize], into: &str) -> Merge {
+        Merge {
+            members: members.to_vec(),
+            into: into.into(),
+        }
+    }
+
+    #[test]
+    fn a_merged_fact_takes_the_place_of_its_most_recent_member() {
+        let result = consolidate(&facts(6), vec![merge(&[4, 1, 4], " both  1 and 4 ")]);
+        assert_eq!(
+            result.remaining(),
+            ["fact 0", "fact 2", "fact 3", "both 1 and 4", "fact 5"]
+        );
+        assert_eq!(result.facts[1], None);
+        assert_eq!(result.applied, [merge(&[1, 4], "both 1 and 4")]);
+        assert!(result.skipped.is_empty());
+    }
+
+    #[test]
+    fn unsound_merges_are_left_out_and_the_others_still_apply() {
+        let long = "x".repeat(MAX_FACT_CHARS + 1);
+        let result = consolidate(
+            &facts(12),
+            vec![
+                merge(&[0, 1], "zero and one"),
+                merge(&[2, 2], "only one fact"),
+                merge(&[1, 3], "reuses a merged fact"),
+                merge(&[4, 99], "names a missing fact"),
+                merge(&[5, 6], &long),
+                merge(&[5, 6], " \n "),
+                merge(&[2, 3, 4, 5, 6, 7, 8], "too many"),
+                merge(&[10, 11], "ten and eleven"),
+            ],
+        );
+        assert_eq!(
+            result.applied,
+            [
+                merge(&[0, 1], "zero and one"),
+                merge(&[10, 11], "ten and eleven")
+            ]
+        );
+        assert_eq!(result.skipped.len(), 6);
+        assert_eq!(result.remaining().len(), 10);
+        assert_eq!(result.facts[2].as_deref(), Some("fact 2"));
+    }
+
+    #[test]
+    fn one_consolidation_removes_only_a_part_of_the_memory() {
+        assert_eq!(
+            (merge_allowance(0), merge_allowance(3), merge_allowance(8)),
+            (2, 2, 2)
+        );
+        assert_eq!((merge_allowance(9), merge_allowance(300)), (3, 75));
+        // Twelve facts allow three to go: two merges of two, and then a
+        // merge of three is too much, but another merge of two still fits.
+        let result = consolidate(
+            &facts(12),
+            vec![
+                merge(&[0, 1], "a"),
+                merge(&[2, 3], "b"),
+                merge(&[4, 5, 6], "c"),
+                merge(&[7, 8], "d"),
+                merge(&[9, 10], "e"),
+            ],
+        );
+        assert_eq!(result.applied.len(), 3);
+        assert_eq!(result.remaining().len(), 9);
+        assert_eq!(result.skipped.len(), 2);
+    }
 
     #[test]
     fn facts_are_one_bounded_line() {
