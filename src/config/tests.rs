@@ -999,3 +999,41 @@ fn renaming_api_moves_its_connection_to_a_named_provider() {
     assert!(with_provider_renamed(&again, "subscription", "api").is_err());
     assert!(with_provider_renamed(&again, "missing", "other").is_err());
 }
+
+#[test]
+fn features_are_enabled_by_default() {
+    let config = AppConfig::parse("").unwrap();
+    // The raw history needs a chronotope server, so it stays off, and the
+    // events kept in it with it.
+    assert!(!config.history.enabled);
+    assert!(!config.events.enabled);
+    let config = AppConfig::parse("[history]\nenabled = true\n").unwrap();
+    for (name, enabled) in [
+        ("skills", config.skills.enabled),
+        ("character", config.character.enabled),
+        ("memory", config.memory.enabled),
+        ("objectives", config.objectives.enabled),
+        ("routines", config.routines.enabled),
+        ("feed", config.feed.enabled),
+        ("spaces", config.spaces.enabled),
+        ("events", config.events.enabled),
+        ("agenda", config.agenda.enabled),
+    ] {
+        assert!(enabled, "[{name}] should be enabled by default");
+    }
+}
+
+#[test]
+fn a_feature_follows_what_it_needs_off_unless_turned_on_itself() {
+    let config = AppConfig::parse("[feed]\nenabled = false\n[history]\nenabled = false\n").unwrap();
+    assert!(!config.agenda.enabled);
+    assert!(!config.events.enabled);
+    assert!(config.routines.enabled);
+
+    let error =
+        AppConfig::parse("[routines]\nenabled = false\n[agenda]\nenabled = true\n").unwrap_err();
+    assert!(format!("{error:#}").contains("[agenda]"));
+    let error =
+        AppConfig::parse("[history]\nenabled = false\n[events]\nenabled = true\n").unwrap_err();
+    assert!(format!("{error:#}").contains("[events]"));
+}

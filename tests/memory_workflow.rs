@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -33,6 +35,7 @@ async fn mock_responses(script: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) 
 
 fn ano(directory: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+    command.envs(common::isolated_env());
     command
         .current_dir(directory)
         .args(["--config", "config.toml"])
@@ -135,8 +138,8 @@ async fn runs_read_remember_and_forget_facts_about_the_user() {
     );
 }
 
-/// Without `[memory] enabled`, nothing remembered reaches the model, even
-/// when a memory file exists.
+/// With `[memory] enabled = false`, nothing remembered reaches the model,
+/// even when a memory file exists.
 #[tokio::test]
 async fn a_disabled_memory_stays_out_of_runs() {
     let (endpoint, requests) = mock_responses(vec![json!([
@@ -155,6 +158,11 @@ async fn a_disabled_memory_stays_out_of_runs() {
         .await
         .unwrap();
     assert!(added.status.success());
+    std::fs::write(
+        directory.path().join("config.toml"),
+        "[memory]\nenabled = false\ndir = 'memory'\n",
+    )
+    .unwrap();
 
     let output = tokio::time::timeout(
         Duration::from_secs(20),

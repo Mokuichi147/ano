@@ -31,10 +31,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AgendaSettings {
     pub enabled: bool,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for AgendaSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// When a plan is, read from the user's words.
@@ -321,7 +328,7 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("[feed]"), "{error}");
         assert!(
-            Agenda::from_settings(&AgendaSettings::default(), None, &registry)
+            Agenda::from_settings(&AgendaSettings { enabled: false }, None, &registry)
                 .unwrap()
                 .is_none()
         );

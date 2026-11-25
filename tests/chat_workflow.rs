@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -55,6 +57,7 @@ async fn chat_carries_history_between_turns_with_project_instructions() {
     std::fs::write(&config, "[agent]\nreasoning_summary = 'auto'\n").unwrap();
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(workspace.path())
         .env("OPENAI_BASE_URL", &endpoint)
         .env("OPENAI_API_KEY", "test-fixture-key")
@@ -175,6 +178,7 @@ async fn chat_ignores_unrelated_root_config_with_os_settings_or_defaults() {
             std::fs::remove_file(&user_config).unwrap();
         }
         let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+            .envs(common::isolated_env())
             .current_dir(workspace.path())
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", &config_home)
@@ -243,6 +247,7 @@ async fn chat_compacts_on_request_with_a_summary() {
     // The built-in defaults, never the user's config in the OS config directory.
     let config = tempfile::NamedTempFile::new().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(workspace.path())
         .arg("--config")
         .arg(config.path())
@@ -327,6 +332,7 @@ async fn chat_sets_shows_and_clears_a_goal() {
     // The built-in defaults, never the user's config in the OS config directory.
     let config = tempfile::NamedTempFile::new().unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(workspace.path())
         .arg("--config")
         .arg(config.path())

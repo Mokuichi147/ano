@@ -26,13 +26,23 @@ const MEMORY_FILE: &str = "MEMORY.md";
 const LOCK_FILE: &str = "MEMORY.md.lock";
 const HEADER: &str = "# Memory\n\nFacts about the user that ano keeps. One `- ` line per fact.\n\n";
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemorySettings {
     pub enabled: bool,
     /// Where memory is kept. Defaults to `memory` in the platform's data
     /// directory for ano.
     pub dir: Option<PathBuf>,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for MemorySettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
 }
 
 impl MemorySettings {

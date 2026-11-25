@@ -45,6 +45,8 @@ pub struct HistorySettings {
 impl Default for HistorySettings {
     fn default() -> Self {
         Self {
+            // Off unless turned on: it needs a chronotope server, and
+            // without one the raw history piles up in the data directory.
             enabled: false,
             base_url: "http://127.0.0.1:7878".into(),
             data_dir: None,

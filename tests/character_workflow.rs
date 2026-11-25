@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -33,6 +35,7 @@ async fn mock_responses(script: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) 
 
 fn ano(directory: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+    command.envs(common::isolated_env());
     command
         .current_dir(directory)
         .args(["--config", "config.toml"])
@@ -139,8 +142,8 @@ async fn runs_take_on_the_character_and_change_it_with_approval() {
     );
 }
 
-/// Without `[character] enabled`, nothing about a character reaches the
-/// model, even when a character file exists.
+/// With `[character] enabled = false`, nothing about a character reaches
+/// the model, even when a character file exists.
 #[tokio::test]
 async fn a_disabled_character_stays_out_of_runs() {
     let (endpoint, requests) = mock_responses(vec![json!([
@@ -159,6 +162,11 @@ async fn a_disabled_character_stays_out_of_runs() {
         .await
         .unwrap();
     assert!(set.status.success());
+    std::fs::write(
+        directory.path().join("config.toml"),
+        "[character]\nenabled = false\ndir = 'character'\n",
+    )
+    .unwrap();
 
     let output = tokio::time::timeout(
         Duration::from_secs(20),

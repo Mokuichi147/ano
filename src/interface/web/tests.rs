@@ -593,7 +593,7 @@ async fn ending_a_running_session_stops_its_turn_before_it_reports_the_end() {
 async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
     let start = |bind: &str, token: &str| {
         serve(
-            AppConfig::default(),
+            AppConfig::without_features(),
             Arc::new(McpPool::new(Vec::new())),
             ToolRegistry::new(),
             WebOptions {

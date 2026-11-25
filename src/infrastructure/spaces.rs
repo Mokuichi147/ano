@@ -27,13 +27,23 @@ const DATA_FILE: &str = "data.json";
 const META_FILE: &str = "space.json";
 const LOCK_FILE: &str = "spaces.lock";
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SpaceSettings {
     pub enabled: bool,
     /// Where spaces are kept. Defaults to `spaces` in the platform's data
     /// directory for ano.
     pub dir: Option<PathBuf>,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for SpaceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
 }
 
 impl SpaceSettings {

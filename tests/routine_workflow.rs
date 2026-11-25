@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -33,6 +35,7 @@ async fn mock_responses(script: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) 
 
 fn ano(directory: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+    command.envs(common::isolated_env());
     command
         .current_dir(directory)
         .args(["--config", "config.toml"])
