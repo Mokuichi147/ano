@@ -66,6 +66,7 @@ struct AgentTable {
     max_tool_output_bytes: usize,
     compact_threshold_bytes: Option<usize>,
     compaction: CompactionMethod,
+    clear_old_tool_results: bool,
     max_total_tokens: Option<u64>,
     reasoning_effort: Option<String>,
     reasoning_summary: Option<String>,
@@ -92,6 +93,7 @@ impl Default for AgentTable {
                     max_tool_output_bytes,
                     compact_threshold_bytes,
                     compaction,
+                    clear_old_tool_results,
                     max_total_tokens,
                     reasoning_effort,
                     reasoning_summary,
@@ -114,6 +116,7 @@ impl Default for AgentTable {
             max_tool_output_bytes,
             compact_threshold_bytes,
             compaction,
+            clear_old_tool_results,
             max_total_tokens,
             reasoning_effort,
             reasoning_summary,
@@ -140,6 +143,7 @@ impl From<AgentTable> for AgentConfig {
             max_tool_output_bytes,
             compact_threshold_bytes,
             compaction,
+            clear_old_tool_results,
             max_total_tokens,
             reasoning_effort,
             reasoning_summary,
@@ -162,6 +166,7 @@ impl From<AgentTable> for AgentConfig {
                 max_tool_output_bytes,
                 compact_threshold_bytes,
                 compaction,
+                clear_old_tool_results,
                 max_total_tokens,
                 reasoning_effort,
                 reasoning_summary,
@@ -269,7 +274,7 @@ mod tests {
     #[test]
     fn every_key_reaches_its_setting() {
         let config = parse(
-            "model = 'm'\ninstructions = 'i'\nmax_tool_rounds = 2\ntool_discovery_limit = 3\nmax_output_tokens = 4\nparallel_tool_calls = false\nmax_parallel_tool_calls = 5\ntool_timeout_secs = 6\nmax_tool_output_bytes = 7000\ncompact_threshold_bytes = 8000\ncompaction = 'summary'\nmax_total_tokens = 9\nreasoning_effort = 'low'\nreasoning_summary = 'concise'\nproject_instructions = []\napproval_mode = 'deny'\napproval_model = 'a'\nprovider = 'p'\n[roles]\ndefault = 'r1'\ndelegate = 'r2'\nreview = 'r3'\napproval = 'r4'\ntriage = 'r5'\n",
+            "model = 'm'\ninstructions = 'i'\nmax_tool_rounds = 2\ntool_discovery_limit = 3\nmax_output_tokens = 4\nparallel_tool_calls = false\nmax_parallel_tool_calls = 5\ntool_timeout_secs = 6\nmax_tool_output_bytes = 7000\ncompact_threshold_bytes = 8000\ncompaction = 'summary'\nclear_old_tool_results = false\nmax_total_tokens = 9\nreasoning_effort = 'low'\nreasoning_summary = 'concise'\nproject_instructions = []\napproval_mode = 'deny'\napproval_model = 'a'\nprovider = 'p'\n[roles]\ndefault = 'r1'\ndelegate = 'r2'\nreview = 'r3'\napproval = 'r4'\ntriage = 'r5'\n",
         )
         .unwrap();
         let AgentSettings {
@@ -284,6 +289,7 @@ mod tests {
             max_tool_output_bytes,
             compact_threshold_bytes,
             compaction,
+            clear_old_tool_results,
             max_total_tokens,
             reasoning_effort,
             reasoning_summary,
@@ -309,6 +315,7 @@ mod tests {
         );
         assert_eq!(compact_threshold_bytes, Some(8000));
         assert_eq!(compaction, CompactionMethod::Summary);
+        assert!(!clear_old_tool_results);
         assert_eq!(max_total_tokens, Some(9));
         assert_eq!(reasoning_effort.as_deref(), Some("low"));
         assert_eq!(reasoning_summary.as_deref(), Some("concise"));

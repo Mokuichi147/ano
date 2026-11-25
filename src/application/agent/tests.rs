@@ -2423,6 +2423,139 @@ async fn the_history_is_compacted_before_it_fills_the_context_window() {
         .contains("Loaded record_action"));
 }
 
+/// A registry whose `read_big` returns 20 kB.
+fn big_result_registry() -> ToolRegistry {
+    let registry = ToolRegistry::new();
+    registry
+        .register(
+            ToolDefinition::new(
+                "read_big",
+                "Read a big document",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            ),
+            |_arguments| async move { Ok(json!({"text": "x".repeat(20_000)})) },
+        )
+        .unwrap();
+    registry
+}
+
+fn read_big(id: &str) -> Value {
+    function_call(id, "read_big", json!({}))
+}
+
+#[tokio::test]
+async fn old_tool_results_are_cleared_before_a_summary_is_asked_for() {
+    let server = mock_responses(vec![
+        search_response("s", "read_big"),
+        read_big("a"),
+        read_big("b"),
+        read_big("c"),
+        read_big("d"),
+        with_usage(read_big("e"), 90_000),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let mut agent = agent(big_result_registry(), Vec::new()).with_context_window(Some(100_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    // No request asked for a summary.
+    assert_eq!(requests.len(), 7);
+    let last = requests[6]["input"].as_array().unwrap();
+    let output = |call_id: &str| {
+        last.iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == call_id)
+            .unwrap_or_else(|| panic!("no result of {call_id}"))["output"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // The old results are cleared in place; the recent ones and the search
+    // results, which say what is loaded, are as they were.
+    for old in ["a", "b", "c"] {
+        let cleared: Value = serde_json::from_str(&output(old)).unwrap();
+        assert_eq!(cleared["cleared"], true, "{old}");
+        assert!(cleared["original_bytes"].as_u64().unwrap() > 20_000);
+    }
+    for recent in ["d", "e"] {
+        assert!(output(recent).len() > 20_000, "{recent}");
+    }
+    assert!(output("s_search").contains("read_big"));
+    assert!(requests[6]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "read_big"));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ContextCompacted { record, .. } if record.cleared_tool_results()
+    )));
+    assert_eq!(result.usage.compactions, 0);
+}
+
+#[tokio::test]
+async fn a_history_cleared_before_is_summarized_when_it_fills_again() {
+    let server = mock_responses(vec![
+        search_response("s", "read_big"),
+        read_big("a"),
+        read_big("b"),
+        read_big("c"),
+        read_big("d"),
+        with_usage(read_big("e"), 90_000),
+        with_usage(read_big("f"), 90_000),
+        text_response("summary", "Read six documents"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let mut agent = agent(big_result_registry(), Vec::new()).with_context_window(Some(100_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 9);
+    assert!(requests[7]["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You compact the history"));
+    assert!(requests[8]["input"]
+        .to_string()
+        .contains("Read six documents"));
+    assert_eq!(result.usage.compactions, 1);
+}
+
+#[tokio::test]
+async fn old_tool_results_are_kept_when_clearing_is_turned_off() {
+    let server = mock_responses(vec![
+        search_response("s", "read_big"),
+        read_big("a"),
+        read_big("b"),
+        read_big("c"),
+        read_big("d"),
+        with_usage(read_big("e"), 90_000),
+        text_response("summary", "Read five documents"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let mut agent = agent(big_result_registry(), Vec::new()).with_context_window(Some(100_000));
+    agent.settings.clear_old_tool_results = false;
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 8);
+    assert!(requests[6]["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You compact the history"));
+}
+
 #[tokio::test]
 async fn a_request_over_the_context_is_compacted_and_sent_again() {
     let server = mock_responses(vec![

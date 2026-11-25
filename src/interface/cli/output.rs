@@ -571,7 +571,12 @@ pub(super) fn print_event(event: &AgentEvent, verbose: bool) {
     };
     match event {
         AgentEvent::ContextCompacted { record, .. } => progress!(
-            "[context compacted] {} -> {} bytes",
+            "[{}] {} -> {} bytes",
+            if record.cleared_tool_results() {
+                "old tool results cleared"
+            } else {
+                "context compacted"
+            },
             record.before_bytes,
             record.after_bytes
         ),
