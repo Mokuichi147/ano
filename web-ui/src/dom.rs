@@ -6,7 +6,7 @@ use naui::Widget;
 /// Replace the contents of `widget` with `html`, which the server rendered
 /// from Markdown with raw HTML escaped.
 pub fn set_html(widget: &dyn Widget, html: &str) {
-    widget.native_element().set_inner_html(html);
+    widget.as_backend().native_element().set_inner_html(html);
 }
 
 /// Whether the page is in a secure context (https or this computer), where
