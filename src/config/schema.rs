@@ -652,7 +652,16 @@ pub fn defaults() -> Value {
             "timeout_secs": api.timeout_secs,
             "max_retries": api.max_retries,
         },
-        "providers": {"*": {"enabled": true, "auth": api.auth, "wire_api": api.wire_api}},
+        // stream, timeout_secs, and max_retries come from [api]; the page
+        // shows the file's [api] values when it sets them.
+        "providers": {"*": {
+            "enabled": true,
+            "auth": api.auth,
+            "wire_api": api.wire_api,
+            "stream": api.stream,
+            "timeout_secs": api.timeout_secs,
+            "max_retries": api.max_retries,
+        }},
         "environments": {"*": {
             "allow_writes": false,
             "allow_exec": false,

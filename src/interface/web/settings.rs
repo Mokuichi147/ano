@@ -71,6 +71,13 @@ pub(super) async fn restart(State(state): State<Arc<WebState>>) -> Response {
     let checked =
         tokio::task::spawn_blocking(move || config::AppConfig::load_or_default(&path)).await;
     match checked {
+        // The new server is started for the same user, which must still be there.
+        Ok(Ok(config)) if !config.has_user(&state.user) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("[users] に {} がありません", state.user),
+            );
+        }
         Ok(Ok(_)) => {}
         Ok(Err(error)) => {
             return error_response(StatusCode::BAD_REQUEST, &format!("{error:#}"));

@@ -97,6 +97,8 @@ pub struct Settings {
     dirty: Cell<bool>,
     /// A save or a restart is under way.
     busy: Cell<bool>,
+    /// The labels of number fields that hold something not a number.
+    invalid: RefCell<HashSet<String>>,
 }
 
 /// Build the page from `settings`, as `/api/settings` returns it.
@@ -113,16 +115,11 @@ pub fn build(app: &Rc<App>, settings: &Value) -> naui::Result<Stack> {
     heading.add_class("home-title");
     page.append(&heading);
     let file = ui.label("")?;
+    file.set_style(TextStyle::Caption);
     file.set_color(TextColor::Secondary);
     file.set_wrap(true);
     file.set_selectable(true);
     page.append(&file);
-    let note = ui.label(
-        "保存した設定は、ano web を再起動すると反映されます。API キーなどの秘密は環境変数（設定ディレクトリの .env）に置き、ここでは変数の名前を指定します。空欄の項目は既定値（薄く表示）を使います。",
-    )?;
-    note.set_color(TextColor::Secondary);
-    note.set_wrap(true);
-    page.append(&note);
 
     let bar = ui.stack(Orientation::Horizontal)?;
     bar.set_spacing(8.0);
@@ -167,6 +164,7 @@ pub fn build(app: &Rc<App>, settings: &Value) -> naui::Result<Stack> {
         expanded: Rc::new(RefCell::new(HashSet::new())),
         dirty: Cell::new(false),
         busy: Cell::new(false),
+        invalid: RefCell::new(HashSet::new()),
     });
     this.load(settings);
     save.on_click({
@@ -202,11 +200,12 @@ impl Settings {
             .to_string();
         let path = settings["path"].as_str().unwrap_or_default();
         self.file.set_text(&if settings["exists"] == true {
-            format!("設定ファイル: {path}")
+            path.to_string()
         } else {
-            format!("設定ファイル: {path}（まだありません。保存すると作ります）")
+            format!("{path}（未作成）")
         });
         self.dirty.set(false);
+        self.invalid.borrow_mut().clear();
         self.render();
     }
 
@@ -215,17 +214,151 @@ impl Settings {
     fn render(self: &Rc<Self>) {
         let top = crate::dom::scroll_top(&self.page);
         self.body.clear();
-        let fields = self.schema.as_array().cloned().unwrap_or_default();
-        for field in &fields {
-            let path = vec![Step::Key(field["key"].as_str().unwrap_or_default().into())];
-            let built = self
-                .section(field, &path)
-                .map(|section| self.body.append(&section));
-            if let Err(error) = built {
-                web_sys::console::error_1(&error.to_string().into());
-            }
+        if let Err(error) = self.build_groups() {
+            web_sys::console::error_1(&error.to_string().into());
         }
         crate::dom::set_scroll_top(&self.page, top);
+    }
+
+    /// The tables under headings of what they are about: the features as a
+    /// row of switches, then the others folded.
+    fn build_groups(self: &Rc<Self>) -> naui::Result<()> {
+        let fields = self.schema.as_array().cloned().unwrap_or_default();
+        let find = |key: &str| fields.iter().find(|field| field["key"] == key);
+        let mut placed: HashSet<&str> = HashSet::new();
+
+        self.body.append(&self.heading("機能")?);
+        let features: Vec<&Value> = FEATURES.iter().filter_map(|key| find(key)).collect();
+        placed.extend(FEATURES);
+        self.body.append(&self.features(&features)?);
+
+        for (heading, keys) in GROUPS {
+            self.body.append(&self.heading(heading)?);
+            for key in *keys {
+                if let Some(field) = find(key) {
+                    placed.insert(key);
+                    let path = vec![Step::Key((*key).into())];
+                    self.body.append(&self.section(field, &path)?);
+                }
+            }
+        }
+        // Tables the page does not know a heading for yet.
+        for field in &fields {
+            let key = field["key"].as_str().unwrap_or_default();
+            if !placed.contains(key) {
+                let path = vec![Step::Key(key.into())];
+                self.body.append(&self.section(field, &path)?);
+            }
+        }
+        Ok(())
+    }
+
+    /// The features: a switch each, and their other settings folded below.
+    fn features(self: &Rc<Self>, features: &[&Value]) -> naui::Result<Stack> {
+        let ui = &self.app.ui;
+        let card = ui.stack(Orientation::Vertical)?;
+        card.set_spacing(8.0);
+        card.set_padding(Padding::all(10.0));
+        card.set_align(Align::Fill);
+        card.add_class("settings-section");
+        let switches = ui.flow()?;
+        switches.set_spacing(20.0, 6.0);
+        let details = ui.stack(Orientation::Vertical)?;
+        details.set_spacing(10.0);
+        details.set_padding(Padding::all(8.0));
+        details.set_align(Align::Fill);
+        for feature in features {
+            let key = feature["key"].as_str().unwrap_or_default();
+            let path = vec![Step::Key(key.into())];
+            let fields = feature["fields"].as_array().cloned().unwrap_or_default();
+            for field in &fields {
+                let name = field["key"].as_str().unwrap_or_default();
+                let inner = with(&path, Step::Key(name.into()));
+                if name == "enabled" {
+                    let toggle = self.checkbox(
+                        feature["label"].as_str().unwrap_or_default(),
+                        &inner,
+                        &inner,
+                        // Others follow it, so they are shown again.
+                        NEEDS.iter().any(|(_, needs)| needs.contains(&key)),
+                    )?;
+                    toggle.set_tooltip(field["help"].as_str());
+                    // Off while what it needs is off, whatever it says.
+                    if let Some((_, needs)) = NEEDS.iter().find(|(name, _)| *name == key) {
+                        toggle.set_enabled(needs.iter().all(|need| self.enabled(need)));
+                    }
+                    switches.append(&toggle);
+                }
+            }
+            let rest: Vec<Value> = fields
+                .into_iter()
+                .filter(|field| field["key"] != "enabled")
+                .collect();
+            if let [only] = rest.as_slice() {
+                // One key, such as the folder: a row named after the feature.
+                let mut row = only.clone();
+                row["label"] = feature["label"].clone();
+                let name = only["key"].as_str().unwrap_or_default();
+                let inner = with(&path, Step::Key(name.into()));
+                details.append(&self.field(&row, &inner, &inner)?);
+            } else if !rest.is_empty() {
+                let group = json!({
+                    "key": key,
+                    "label": feature["label"],
+                    "kind": "table",
+                    "fields": rest,
+                });
+                details.append(&self.field(&group, &path, &path)?);
+            }
+        }
+        card.append(&switches);
+        let expander = ui.expander("保存先")?;
+        expander.set_sizing(Sizing::fill_width());
+        expander.set_child(&details);
+        self.remember(&expander, &vec![Step::Key("features".into())]);
+        card.append(&expander);
+        Ok(card)
+    }
+
+    /// A checkbox for the switch at `path`, which leaves the key out of the
+    /// file while it is at its default.
+    fn checkbox(
+        self: &Rc<Self>,
+        label: &str,
+        path: &Path,
+        defaults: &Path,
+        render: bool,
+    ) -> naui::Result<naui::Checkbox> {
+        let checkbox = self.app.ui.checkbox(label)?;
+        let implied = self
+            .default(defaults)
+            .as_ref()
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        checkbox.set_checked(
+            self.value(path)
+                .as_ref()
+                .and_then(Value::as_bool)
+                .unwrap_or(implied),
+        );
+        let this = Rc::clone(self);
+        let path = path.clone();
+        checkbox.on_toggle(move |checked| {
+            this.set(&path, (checked != implied).then(|| json!(checked)));
+            if render {
+                this.render();
+            }
+        });
+        Ok(checkbox)
+    }
+
+    /// Whether the feature `key` is on, as the page sets it now.
+    fn enabled(&self, key: &str) -> bool {
+        let path = vec![Step::Key(key.into()), Step::Key("enabled".into())];
+        self.value(&path)
+            .or_else(|| self.default(&path))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
     }
 
     fn set_status(&self, text: &str, color: TextColor) {
@@ -263,7 +396,16 @@ impl Settings {
     }
 
     /// The default of the key at `defaults`, a path with `*` for entries.
+    /// A provider takes what it leaves out from `[api]`, as the page sets it.
     fn default(&self, defaults: &Path) -> Option<Value> {
+        if let [Step::Key(table), Step::Key(entry), Step::Key(name)] = defaults.as_slice() {
+            if table == "providers" && entry == "*" && INHERITED.contains(&name.as_str()) {
+                let api = vec![Step::Key("api".into()), Step::Key(name.clone())];
+                if let Some(value) = self.value(&api) {
+                    return Some(value);
+                }
+            }
+        }
         lookup(&self.defaults, defaults)
             .filter(|value| !value.is_null())
             .cloned()
@@ -277,13 +419,11 @@ impl Settings {
         wrapper.add_class("settings-section");
         let expander = ui.expander(field["label"].as_str().unwrap_or_default())?;
         expander.set_sizing(Sizing::fill_width());
+        expander.set_tooltip(field["help"].as_str());
         let inner = ui.stack(Orientation::Vertical)?;
-        inner.set_spacing(10.0);
+        inner.set_spacing(6.0);
         inner.set_padding(Padding::all(8.0));
         inner.set_align(Align::Fill);
-        if let Some(help) = field["help"].as_str() {
-            inner.append(&self.help(help)?);
-        }
         self.fill(&inner, field, path, path)?;
         expander.set_child(&inner);
         self.remember(&expander, path);
@@ -332,51 +472,45 @@ impl Settings {
         Ok(())
     }
 
-    /// One key: its input, label, and help.
+    /// One key: its name on the left and its input on the right; what it
+    /// means is in the tooltip.
     fn field(self: &Rc<Self>, field: &Value, path: &Path, defaults: &Path) -> naui::Result<Stack> {
         let ui = &self.app.ui;
-        let row = ui.stack(Orientation::Vertical)?;
-        row.set_spacing(2.0);
-        row.set_align(Align::Fill);
         let label = field["label"].as_str().unwrap_or_default();
         let help = field["help"].as_str();
         let value = self.value(path);
         let default = self.default(defaults);
         match field["kind"].as_str().unwrap_or_default() {
-            "bool" => {
-                let checkbox = ui.checkbox(label)?;
-                let implied = default.as_ref().and_then(Value::as_bool).unwrap_or(false);
-                checkbox.set_checked(value.as_ref().and_then(Value::as_bool).unwrap_or(implied));
-                let this = Rc::clone(self);
-                let path = path.clone();
-                checkbox.on_toggle(move |checked| {
-                    this.set(&path, (checked != implied).then(|| json!(checked)));
-                });
-                row.append(&checkbox);
-            }
             "table" | "named" | "list" => {
                 let group = ui.stack(Orientation::Vertical)?;
-                group.set_spacing(8.0);
+                group.set_spacing(6.0);
                 group.set_padding(Padding::all(10.0));
                 group.set_align(Align::Fill);
                 group.add_class("settings-group");
-                group.append(&self.caption(label)?);
-                if let Some(help) = help {
-                    group.append(&self.help(help)?);
-                }
+                let caption = self.caption(label)?;
+                caption.set_tooltip(help);
+                group.append(&caption);
                 self.fill(&group, field, path, defaults)?;
-                row.append(&group);
-                return Ok(row);
+                Ok(group)
             }
             kind => {
-                row.append(&self.caption(label)?);
-                self.input(&row, kind, field, path, value, default)?;
+                let row = ui.stack(Orientation::Horizontal)?;
+                row.set_spacing(12.0);
+                row.set_align(Align::Fill);
+                row.add_class("settings-row");
+                row.set_tooltip(help);
+                let name = ui.label(if kind == "bool" { "" } else { label })?;
+                name.set_color(TextColor::Secondary);
+                name.add_class("settings-name");
+                row.append(&name);
+                if kind == "bool" {
+                    row.append(&self.checkbox(label, path, defaults, false)?);
+                } else {
+                    self.input(&row, kind, field, path, value, default)?;
+                }
+                Ok(row)
             }
         }
-        if let Some(help) = help {
-            row.append(&self.help(help)?);
-        }
-        Ok(row)
     }
 
     /// The input of a key that holds a value.
@@ -495,6 +629,12 @@ impl Settings {
                 let label = field["label"].as_str().unwrap_or_default().to_string();
                 input.on_change(move |text| {
                     let text = text.trim();
+                    let number = text.parse::<i64>();
+                    if integer && !text.is_empty() && number.is_err() {
+                        this.invalid.borrow_mut().insert(label.clone());
+                    } else {
+                        this.invalid.borrow_mut().remove(&label);
+                    }
                     if text.is_empty() {
                         this.set(&path, None);
                     } else if !integer {
@@ -668,18 +808,18 @@ impl Settings {
         Ok(wrapper)
     }
 
+    /// The heading of a group of tables.
+    fn heading(&self, text: &str) -> naui::Result<Label> {
+        let label = self.app.ui.label(text)?;
+        label.set_style(TextStyle::Heading);
+        label.add_class("settings-heading");
+        Ok(label)
+    }
+
     fn caption(&self, text: &str) -> naui::Result<Label> {
         let label = self.app.ui.label(text)?;
         label.set_style(TextStyle::Heading);
         label.set_color(TextColor::Secondary);
-        Ok(label)
-    }
-
-    fn help(&self, text: &str) -> naui::Result<Label> {
-        let label = self.app.ui.label(text)?;
-        label.set_style(TextStyle::Caption);
-        label.set_color(TextColor::Secondary);
-        label.set_wrap(true);
         Ok(label)
     }
 
@@ -691,6 +831,13 @@ impl Settings {
 
     fn save(self: &Rc<Self>) {
         if self.busy.get() {
+            return;
+        }
+        if let Some(label) = self.invalid.borrow().iter().next() {
+            self.set_status(
+                &format!("「{label}」には整数を入力してください"),
+                TextColor::Danger,
+            );
             return;
         }
         self.set_busy(true);
@@ -776,6 +923,33 @@ impl Settings {
         });
     }
 }
+
+/// The features, shown as switches, in this order.
+const FEATURES: &[&str] = &[
+    "memory",
+    "objectives",
+    "routines",
+    "agenda",
+    "feed",
+    "spaces",
+    "skills",
+    "character",
+    "history",
+    "events",
+];
+
+/// Keys a provider takes from `[api]` when it leaves them out.
+const INHERITED: &[&str] = &["stream", "timeout_secs", "max_retries"];
+
+/// Features that work only while others are on.
+const NEEDS: &[(&str, &[&str])] = &[("events", &["history"]), ("agenda", &["feed", "routines"])];
+
+/// The other tables, under the heading of what they are about.
+const GROUPS: &[(&str, &[&str])] = &[
+    ("モデル", &["agent", "api", "providers", "presets"]),
+    ("実行", &["environments", "mcp_servers", "users"]),
+    ("ano serve", &["webhook", "automation"]),
+];
 
 /// `value`, a list of strings, one per line.
 fn lines(value: &Value) -> String {
