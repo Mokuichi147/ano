@@ -19,7 +19,7 @@ use crate::{
         input::{build_user_input, InputPart},
         ports::{
             ApprovalHandler, ConversationStore, HistoryBackend, McpGateway, McpServerFailure,
-            ResponsesApi,
+            ResponseDelta, ResponsesApi,
         },
         registry::ToolRegistry,
         settings::AgentSettings,
@@ -933,6 +933,11 @@ impl Agent {
                 // Nothing of the response is kept or run. A cut-off that
                 // filled the context is compacted before the next request.
                 cut_off = true;
+                // What was streamed of it stays on screen: close it, so the
+                // next response does not continue its last line.
+                if let Some(listener) = text_listener {
+                    listener(ResponseDelta::MessageDone);
+                }
                 events.push(AgentEvent::RuntimeNotice {
                     round,
                     text: "The response was cut off at the output token limit and discarded; asking again for a shorter one.".into(),
