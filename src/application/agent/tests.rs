@@ -906,7 +906,9 @@ async fn unfinished_responses_never_execute_tools_or_succeed_with_partial_text()
         for includes_tool in [false, true] {
             let mut response = text_response("unfinished", "This is only a partial answer");
             response["status"] = json!(status);
-            response["incomplete_details"] = json!({"reason": "max_output_tokens"});
+            // A response cut off at the output token limit is asked again
+            // once; see the tests of that below.
+            response["incomplete_details"] = json!({"reason": "content_filter"});
             if includes_tool {
                 response["output"]
                     .as_array_mut()
@@ -2421,6 +2423,102 @@ async fn the_history_is_compacted_before_it_fills_the_context_window() {
     assert!(requests[2]["input"]
         .to_string()
         .contains("Loaded record_action"));
+}
+
+/// A response the endpoint stopped writing at the output token limit, with
+/// a tool call that looks complete.
+fn cut_off_response(id: &str) -> Value {
+    let mut response =
+        json!({"id": id, "status": "incomplete", "output": calls(&["record_action"])});
+    response["incomplete_details"] = json!({"reason": "max_output_tokens"});
+    response
+}
+
+#[tokio::test]
+async fn a_response_cut_off_at_the_output_limit_is_discarded_and_asked_again() {
+    let server = mock_responses(vec![
+        search_response("search", "record_action"),
+        cut_off_response("cut"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new()).with_context_window(Some(1_000_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    // The call of the cut-off response did not run.
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    // The same input is sent again with the notice after it, and the
+    // cut-off response is not part of it.
+    let (cut, again) = (
+        requests[1]["input"].as_array().unwrap(),
+        requests[2]["input"].as_array().unwrap(),
+    );
+    assert_eq!(again[..cut.len()], cut[..]);
+    assert_eq!(again.len(), cut.len() + 1);
+    assert!(again[cut.len()]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("cut off at the output token limit"));
+    assert_eq!(requests[1]["instructions"], requests[2]["instructions"]);
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RuntimeNotice { text, .. } if text.contains("cut off")
+    )));
+}
+
+#[tokio::test]
+async fn a_second_cut_off_in_a_row_fails_the_run() {
+    let server = mock_responses(vec![
+        search_response("search", "record_action"),
+        cut_off_response("cut1"),
+        cut_off_response("cut2"),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let error = agent.run(request()).await.unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("incomplete response (max_output_tokens)"),
+        "{error:#}"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn the_output_limit_notice_joins_a_user_message_that_ends_the_input() {
+    use super::with_notice;
+    let text = |item: &Value, part: usize| item["content"][part]["text"].clone();
+    // After a tool result, it is a message of its own.
+    let input = with_notice(
+        json!([{"type": "function_call_output", "call_id": "c", "output": "{}"}]),
+        "notice",
+    );
+    assert_eq!(input.as_array().unwrap().len(), 2);
+    assert_eq!(input[1]["role"], "user");
+    assert_eq!(text(&input[1], 0), "notice");
+    // After the user's message, it is a part of that message.
+    let parts = json!([{"role": "user", "content": [{"type": "input_text", "text": "do it"}]}]);
+    let input = with_notice(parts, "notice");
+    assert_eq!(input.as_array().unwrap().len(), 1);
+    assert_eq!(
+        (text(&input[0], 0), text(&input[0], 1)),
+        (json!("do it"), json!("notice"))
+    );
+    let input = with_notice(json!([{"role": "user", "content": "do it"}]), "notice");
+    assert_eq!(
+        (text(&input[0], 0), text(&input[0], 1)),
+        (json!("do it"), json!("notice"))
+    );
 }
 
 #[tokio::test]
