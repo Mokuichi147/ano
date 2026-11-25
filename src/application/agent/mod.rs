@@ -33,7 +33,8 @@ use crate::{
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
-        tool::{validate_tool_name, ToolContext, TOOL_SEARCH_NAME},
+        skill::SKILL_READ_NAME,
+        tool::{validate_tool_name, ToolContext, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
         usage::{ApiOperation, StopReason, UsageSummary},
     },
 };
@@ -550,7 +551,26 @@ impl Agent {
         if split >= history.len() {
             return Ok(None);
         }
-        cleared_tool_results(history, split, &[TOOL_SEARCH_NAME])
+        let keep = self.kept_tool_results();
+        let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+        cleared_tool_results(history, split, &keep)
+    }
+
+    /// The tools whose old results are not cleared, because a read cannot
+    /// fetch them again: the tools a search loaded, the report of a
+    /// sub-agent, the procedure of a skill, and the results of the runtime
+    /// tools of extensions (such as a review).
+    fn kept_tool_results(&self) -> Vec<String> {
+        [TOOL_SEARCH_NAME, DELEGATE_TASK_NAME, SKILL_READ_NAME]
+            .into_iter()
+            .map(str::to_string)
+            .chain(
+                self.extensions
+                    .iter()
+                    .flat_map(|extension| extension.tools())
+                    .map(|definition| definition.name),
+            )
+            .collect()
     }
 
     async fn run_inner(

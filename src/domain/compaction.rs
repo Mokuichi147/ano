@@ -112,7 +112,7 @@ fn cleared_result(bytes: usize) -> String {
     json!({
         "cleared": true,
         "original_bytes": bytes,
-        "note": "Runtime notice: this old tool result was cleared to save context. Call the tool again if you need it.",
+        "note": "Runtime notice: this old tool result was cleared to save context; the call itself ran then and is not undone. If you need what it returned, read it again (a file, a search, a page). Never repeat a call that changes something, such as a command or a write, only to see its result.",
     })
     .to_string()
 }
@@ -122,8 +122,9 @@ fn cleared_result(bytes: usize) -> String {
 /// and a summary is due.
 ///
 /// The calls and their results stay in place, so every call still has its
-/// result. The results of the tools named in `keep` are left: `tool_search`
-/// results say which tools a later turn can still call. Clearing happens in
+/// result. The results of the tools named in `keep` are left: those that a
+/// later turn needs (`tool_search` results say which tools it can call) or
+/// that cannot be fetched again by a read. Clearing happens in
 /// one pass rather than a little every request, so the start of the prompt
 /// that an endpoint has cached changes once. A history cleared before has
 /// nothing long left before `split`, so it falls through to the summary.
@@ -576,7 +577,7 @@ mod tests {
             call("c2", "workspace_read"),
             result("c2", &"y".repeat(3000)),
         ];
-        // Clearing one result of a history that is mostly something else.
+        // Clearing the results of a history that is mostly something else.
         assert!(cleared_tool_results(&history, 5, &[]).unwrap().is_none());
         // Everything is recent.
         assert!(cleared_tool_results(&history, 0, &[]).unwrap().is_none());

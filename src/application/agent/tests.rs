@@ -2496,6 +2496,58 @@ async fn old_tool_results_are_cleared_before_a_summary_is_asked_for() {
     assert_eq!(result.usage.compactions, 0);
 }
 
+#[test]
+fn results_that_a_read_cannot_fetch_again_are_not_cleared() {
+    let agent = agent(ToolRegistry::new(), Vec::new())
+        .with_context_window(Some(100_000))
+        .with_extension(Arc::new(ProbeExtension::new(probe_definition("probe"))));
+    let long = "x".repeat(30_000);
+    let mut history = vec![json!({"role": "user", "content": "do it"})];
+    for (id, name) in [
+        ("search", "tool_search"),
+        ("delegate", "delegate_task"),
+        ("skill", "skill_read"),
+        ("probe", "probe"),
+        ("read", "workspace_read"),
+    ] {
+        history
+            .push(json!({"type": "function_call", "call_id": id, "name": name, "arguments": "{}"}));
+        history.push(json!({"type": "function_call_output", "call_id": id, "output": long}));
+    }
+    // The recent step that stays as it is.
+    history.push(json!({"type": "function_call", "call_id": "last", "name": "workspace_read", "arguments": "{}"}));
+    history.push(json!({"type": "function_call_output", "call_id": "last", "output": "ok"}));
+    let split = history.len() - 2;
+
+    let keep = agent.kept_tool_results();
+    let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+    // Only the read is cleared, which alone does not halve the history.
+    assert!(super::cleared_tool_results(&history, split, &keep)
+        .unwrap()
+        .is_none());
+    history.insert(1, json!({"type": "function_call", "call_id": "big", "name": "workspace_read", "arguments": "{}"}));
+    history.insert(
+        2,
+        json!({"type": "function_call_output", "call_id": "big", "output": "y".repeat(200_000)}),
+    );
+    let (cleared, _) = super::cleared_tool_results(&history, split + 2, &keep)
+        .unwrap()
+        .unwrap();
+    let output = |id: &str| {
+        cleared
+            .iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == id)
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .len()
+    };
+    for kept in ["search", "delegate", "skill", "probe"] {
+        assert_eq!(output(kept), 30_000, "{kept}");
+    }
+    assert!(output("read") < 1024 && output("big") < 1024);
+}
+
 #[tokio::test]
 async fn a_history_cleared_before_is_summarized_when_it_fills_again() {
     let server = mock_responses(vec![
