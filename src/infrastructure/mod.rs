@@ -1,8 +1,9 @@
-//! Infrastructure layer: adapters for the OpenAI HTTP API, MCP connections,
+//! Infrastructure layer: adapters for the OpenAI and Anthropic HTTP APIs, MCP connections,
 //! session files, the built-in workspace tools, and the sources, state, and
 //! notifiers of automation.
 
 pub mod agenda;
+pub mod anthropic;
 pub mod automation;
 pub mod automation_store;
 pub mod character;

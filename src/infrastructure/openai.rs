@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use reqwest::{Client, Response, StatusCode, Url};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
@@ -31,18 +31,42 @@ pub enum WireApi {
     /// `POST /chat/completions`。Responses API を持たないサーバー向けに、
     /// 要求と応答を Responses 形式との間で変換する。
     ChatCompletions,
+    /// `POST /messages`（Anthropic の Messages API）。Claude を API キーで使う。
+    /// 要求と応答を Responses 形式との間で変換する。
+    Anthropic,
 }
+
+impl WireApi {
+    /// この形式の接続先を省略したときの URL。
+    pub fn default_base_url(self) -> &'static str {
+        match self {
+            WireApi::Anthropic => ANTHROPIC_BASE_URL,
+            WireApi::Responses | WireApi::ChatCompletions => OPENAI_BASE_URL,
+        }
+    }
+
+    /// この形式の接続先を省略したときの API キーの環境変数。
+    pub fn default_api_key_env(self) -> &'static str {
+        match self {
+            WireApi::Anthropic => "ANTHROPIC_API_KEY",
+            WireApi::Responses | WireApi::ChatCompletions => "OPENAI_API_KEY",
+        }
+    }
+}
+
+const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
 const MAX_ERROR_BODY_CHARS: usize = 2000;
 
 fn default_base_url() -> String {
-    "https://api.openai.com/v1".to_string()
+    OPENAI_BASE_URL.to_string()
 }
 
 fn default_api_key_env() -> String {
-    "OPENAI_API_KEY".to_string()
+    WireApi::Responses.default_api_key_env().to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,7 +77,7 @@ pub struct ApiSettings {
     pub chatgpt_auth_file: Option<PathBuf>,
     pub base_url: String,
     pub api_key_env: String,
-    /// `/responses` と `/chat/completions` のどちらで話すか。
+    /// `/responses`・`/chat/completions`・`/messages`（Anthropic）のどれで話すか。
     pub wire_api: WireApi,
     /// Total timeout for one Responses API request.
     pub timeout_secs: u64,
@@ -108,11 +132,27 @@ impl Default for ApiSettings {
 
 impl ApiSettings {
     /// 実際に接続する URL。`use_base_url_env` なら `OPENAI_BASE_URL` を優先する。
+    /// Anthropic の接続先は OpenAI 用の環境変数に左右されない。
     pub fn effective_base_url(&self) -> String {
         std::env::var("OPENAI_BASE_URL")
             .ok()
-            .filter(|_| self.use_base_url_env)
+            .filter(|_| self.use_base_url_env && self.wire_api != WireApi::Anthropic)
             .unwrap_or_else(|| self.base_url.clone())
+    }
+
+    /// `[api]` で `wire_api = "anthropic"` としたとき、省略された接続先と
+    /// API キーの環境変数を Anthropic のものにする。`[api]` の既定値は
+    /// OpenAI のものなので、既定値のままなら省略されたとみなす。
+    pub fn apply_wire_api_defaults(&mut self) {
+        if self.wire_api != WireApi::Anthropic {
+            return;
+        }
+        if self.base_url == OPENAI_BASE_URL {
+            self.base_url = ANTHROPIC_BASE_URL.to_string();
+        }
+        if self.api_key_env == default_api_key_env() {
+            self.api_key_env = WireApi::Anthropic.default_api_key_env().to_string();
+        }
     }
 
     /// The models of this provider that may be used.
@@ -133,9 +173,9 @@ pub struct ProviderSettings {
     pub enabled: bool,
     pub auth: ApiAuth,
     pub chatgpt_auth_file: Option<PathBuf>,
-    /// 省略時は OpenAI の公式 endpoint。
+    /// 省略時は `wire_api` の公式 endpoint（OpenAI か Anthropic）。
     pub base_url: Option<String>,
-    /// 省略時は `OPENAI_API_KEY`。
+    /// 省略時は `OPENAI_API_KEY`（`wire_api = "anthropic"` なら `ANTHROPIC_API_KEY`）。
     pub api_key_env: Option<String>,
     /// 省略時は `responses`。接続先ごとの設定で、`[api]` からは引き継がない。
     pub wire_api: WireApi,
@@ -182,8 +222,14 @@ impl ProviderSettings {
         ApiSettings {
             auth: self.auth,
             chatgpt_auth_file: self.chatgpt_auth_file.clone(),
-            base_url: self.base_url.clone().unwrap_or_else(default_base_url),
-            api_key_env: self.api_key_env.clone().unwrap_or_else(default_api_key_env),
+            base_url: self
+                .base_url
+                .clone()
+                .unwrap_or_else(|| self.wire_api.default_base_url().to_string()),
+            api_key_env: self
+                .api_key_env
+                .clone()
+                .unwrap_or_else(|| self.wire_api.default_api_key_env().to_string()),
             wire_api: self.wire_api,
             timeout_secs: self.timeout_secs.unwrap_or(base.timeout_secs),
             max_retries: self.max_retries.unwrap_or(base.max_retries),
@@ -233,14 +279,42 @@ pub fn create_client(settings: &ApiSettings) -> Result<Arc<dyn ResponsesApi>> {
                 settings,
             )?),
         )),
+        (ApiAuth::ApiKey, WireApi::Anthropic) => Ok(Arc::new(
+            super::anthropic::AnthropicClient::new(OpenAiClient::from_api_settings(settings)?),
+        )),
         (ApiAuth::Chatgpt, WireApi::Responses) => Ok(Arc::new(
             super::chatgpt::ChatGptClient::from_settings(settings)?,
         )),
         (ApiAuth::Chatgpt, WireApi::ChatCompletions) => {
             bail!("auth = \"chatgpt\" は wire_api = \"chat_completions\" に対応していません")
         }
+        (ApiAuth::Chatgpt, WireApi::Anthropic) => {
+            bail!("auth = \"chatgpt\" は wire_api = \"anthropic\" に対応していません")
+        }
     }
 }
+
+/// 接続先の API の流儀。認証ヘッダーとエラーメッセージの名前が変わる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Flavor {
+    /// `Authorization: Bearer`
+    OpenAi,
+    /// `x-api-key` と `anthropic-version`
+    Anthropic,
+}
+
+impl Flavor {
+    fn label(self) -> &'static str {
+        match self {
+            Flavor::OpenAi => "OpenAI",
+            Flavor::Anthropic => "Anthropic",
+        }
+    }
+}
+
+/// Anthropic の Messages API の版。この版では `temperature`・`top_p`・
+/// `top_k` を送れない（ano は送らない）。
+const ANTHROPIC_VERSION: &str = "2026-10-21";
 
 #[derive(Clone)]
 pub struct OpenAiClient {
@@ -251,6 +325,7 @@ pub struct OpenAiClient {
     base_url: String,
     max_retries: u32,
     stream: bool,
+    flavor: Flavor,
 }
 
 impl OpenAiClient {
@@ -264,6 +339,10 @@ impl OpenAiClient {
             bail!("ChatGPT 認証には infrastructure::openai::create_client を使用してください");
         }
         let base_url = settings.effective_base_url();
+        let flavor = match settings.wire_api {
+            WireApi::Anthropic => Flavor::Anthropic,
+            WireApi::Responses | WireApi::ChatCompletions => Flavor::OpenAi,
+        };
         let api_key = resolve_api_key(
             &base_url,
             &settings.api_key_env,
@@ -280,6 +359,7 @@ impl OpenAiClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             max_retries: settings.max_retries,
             stream: settings.stream,
+            flavor,
         })
     }
 
@@ -290,7 +370,29 @@ impl OpenAiClient {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             max_retries: 0,
             stream: true,
+            flavor: Flavor::OpenAi,
         }
+    }
+
+    /// Add the authentication headers of the endpoint to `request`.
+    pub(super) fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
+        match self.flavor {
+            Flavor::OpenAi => match &self.api_key {
+                Some(api_key) => request.bearer_auth(api_key),
+                None => request,
+            },
+            Flavor::Anthropic => {
+                let request = request.header("anthropic-version", ANTHROPIC_VERSION);
+                match &self.api_key {
+                    Some(api_key) => request.header("x-api-key", api_key),
+                    None => request,
+                }
+            }
+        }
+    }
+
+    pub(super) fn http(&self) -> &Client {
+        &self.http
     }
 
     pub async fn create_response(&self, payload: &Value) -> Result<Value> {
@@ -370,11 +472,8 @@ impl OpenAiClient {
     }
 
     /// `GET url` for optional information: `None` on any failure.
-    async fn get_json(&self, url: String) -> Option<Value> {
-        let mut request = self.http.get(url);
-        if let Some(api_key) = &self.api_key {
-            request = request.bearer_auth(api_key);
-        }
+    pub(super) async fn get_json(&self, url: String) -> Option<Value> {
+        let request = self.authorize(self.http.get(url));
         let response = request.send().await.ok()?;
         if !response.status().is_success() {
             return None;
@@ -385,10 +484,7 @@ impl OpenAiClient {
     /// `GET /models`: the models the endpoint offers, sorted by name, or
     /// `None` when the endpoint has no such API (404 or 405).
     pub async fn list_models(&self) -> Result<Option<Vec<String>>> {
-        let mut request = self.http.get(format!("{}/models", self.base_url));
-        if let Some(api_key) = &self.api_key {
-            request = request.bearer_auth(api_key);
-        }
+        let request = self.authorize(self.http.get(format!("{}/models", self.base_url)));
         let response = match request.send().await {
             Ok(response) => response,
             Err(error) if error.is_connect() || error.is_timeout() => {
@@ -428,12 +524,10 @@ impl OpenAiClient {
     /// Returns a successful response; an error status becomes an error.
     pub(super) async fn send(&self, endpoint: &str, payload: &Value) -> Result<Response> {
         let url = format!("{}/{}", self.base_url, endpoint);
+        let label = self.flavor.label();
         let mut attempt = 0;
         loop {
-            let mut request = self.http.post(&url).json(payload);
-            if let Some(api_key) = &self.api_key {
-                request = request.bearer_auth(api_key);
-            }
+            let request = self.authorize(self.http.post(&url).json(payload));
             let sent = request.send().await;
             let response = match sent {
                 Ok(response) => response,
@@ -444,12 +538,12 @@ impl OpenAiClient {
                 }
                 Err(error) if error.is_connect() || error.is_timeout() => {
                     return Err(error).context(Unavailable(format!(
-                        "failed to send OpenAI {endpoint} request"
+                        "failed to send {label} {endpoint} request"
                     )))
                 }
                 Err(error) => {
                     return Err(error)
-                        .with_context(|| format!("failed to send OpenAI {endpoint} request"))
+                        .with_context(|| format!("failed to send {label} {endpoint} request"))
                 }
             };
 
@@ -471,7 +565,7 @@ impl OpenAiClient {
                     Ok(value) => error_text(&value),
                     Err(_) => truncate(&body),
                 };
-                let message = format!("OpenAI {endpoint} request failed ({status}): {message}");
+                let message = format!("{label} {endpoint} request failed ({status}): {message}");
                 if is_unavailable_status(status) {
                     return Err(Unavailable(message).into());
                 }
@@ -599,8 +693,11 @@ impl ResponsesApi for OpenAiClient {
     }
 }
 
+/// 429 and the 5xx statuses of an overloaded or restarting server, including
+/// Anthropic's 529 (overloaded).
 pub(super) fn is_retryable(status: StatusCode) -> bool {
-    status == StatusCode::TOO_MANY_REQUESTS || matches!(status.as_u16(), 500 | 502 | 503 | 504)
+    status == StatusCode::TOO_MANY_REQUESTS
+        || matches!(status.as_u16(), 500 | 502 | 503 | 504 | 529)
 }
 
 pub(super) fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
@@ -609,7 +706,8 @@ pub(super) fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
         .min(MAX_RETRY_DELAY)
 }
 
-/// The API key to send. Only the official OpenAI endpoint requires one;
+/// The API key to send. Only the official OpenAI and Anthropic endpoints
+/// require one;
 /// other endpoints (LM Studio, Ollama, vLLM, llama.cpp, and so on, whether on
 /// this machine or elsewhere on the network) are called without an
 /// `Authorization` header when no key is configured. A server that does
@@ -617,6 +715,9 @@ pub(super) fn backoff(attempt: u32, retry_after: Option<Duration>) -> Duration {
 fn resolve_api_key(base_url: &str, key_env: &str, value: Option<String>) -> Result<Option<String>> {
     match value.filter(|value| !value.trim().is_empty()) {
         Some(value) => Ok(Some(value)),
+        None if is_anthropic_endpoint(base_url) => bail!(
+            "{key_env} is not set; it is required for {base_url}. Create an API key in the Claude Console and set it in the environment or in .env, or set api_key_env to the variable that holds it"
+        ),
         None if is_openai_endpoint(base_url) => bail!(
             "{key_env} is not set; it is required for {base_url}. To use a local or self-hosted model instead, set base_url in the [api] section of config.toml (for example http://127.0.0.1:1234/v1) or the OPENAI_BASE_URL environment variable; .ano/config.toml is read from the current directory, otherwise config.toml from the OS config directory, unless --config is given"
         ),
@@ -625,11 +726,19 @@ fn resolve_api_key(base_url: &str, key_env: &str, value: Option<String>) -> Resu
 }
 
 pub(super) fn is_openai_endpoint(base_url: &str) -> bool {
+    has_host(base_url, "api.openai.com")
+}
+
+pub(super) fn is_anthropic_endpoint(base_url: &str) -> bool {
+    has_host(base_url, "api.anthropic.com")
+}
+
+fn has_host(base_url: &str, expected: &str) -> bool {
     Url::parse(base_url)
         .ok()
         .and_then(|url| {
             url.host_str()
-                .map(|host| host.eq_ignore_ascii_case("api.openai.com"))
+                .map(|host| host.eq_ignore_ascii_case(expected))
         })
         .unwrap_or(false)
 }

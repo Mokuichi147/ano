@@ -144,6 +144,10 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
     async fn list_models(&self) -> Result<Option<Vec<String>>> {
         (**self).list_models().await
     }
+
+    async fn context_window(&self, model: &str) -> Option<u64> {
+        (**self).context_window(model).await
+    }
 }
 
 /// Durable storage of one conversation. Every method that changes the

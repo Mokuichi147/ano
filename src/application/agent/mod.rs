@@ -1273,11 +1273,12 @@ fn context_tokens_of(response: &Value) -> Option<u64> {
 }
 
 /// Whether an error says that a request exceeded the model's context, in
-/// the words of OpenAI, LM Studio, llama.cpp, and Ollama.
+/// the words of OpenAI, Anthropic, LM Studio, llama.cpp, and Ollama.
 fn is_context_overflow(error: &str) -> bool {
     let text = error.to_lowercase();
     [
         "context_length_exceeded",
+        "prompt is too long",
         "context length",
         "context window",
         "context size",

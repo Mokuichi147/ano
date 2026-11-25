@@ -2390,6 +2390,8 @@ fn context_overflows_are_told_from_other_errors() {
         "This model's maximum context length is 8192 tokens",
         "Trying to keep the first 9000 tokens when context the overflows.",
         "Your input exceeds the context window of this model.",
+        "Anthropic messages request failed (400 Bad Request): prompt is too long: 213000 tokens > 200000 maximum",
+        "Anthropic messages: the model's context window was exceeded (model_context_window_exceeded)",
     ] {
         assert!(is_context_overflow(error), "{error}");
     }

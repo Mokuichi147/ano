@@ -289,7 +289,8 @@ impl AppConfig {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Self = toml::from_str(text).context("failed to parse TOML")?;
+        let mut config: Self = toml::from_str(text).context("failed to parse TOML")?;
+        config.api.apply_wire_api_defaults();
         config.validate()?;
         Ok(config)
     }

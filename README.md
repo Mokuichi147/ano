@@ -1,12 +1,12 @@
 # ano
 
-ターミナル・ブラウザ・エディタから使える AI エージェントです。依頼すると、ファイルを調べて編集し、コマンドで確かめるところまで自分で進めます。OpenAI、ChatGPT サブスクリプション、LM Studio・Ollama などのローカル AI で動き、Rust ライブラリとして組み込むこともできます。
+ターミナル・ブラウザ・エディタから使える AI エージェントです。依頼すると、ファイルを調べて編集し、コマンドで確かめるところまで自分で進めます。OpenAI、ChatGPT サブスクリプション、Anthropic（Claude）、LM Studio・Ollama などのローカル AI で動き、Rust ライブラリとして組み込むこともできます。
 
 ## 特長
 
 - **最後まで任せられる。** 作業計画を立て、ゴール（`--goal`）を満たすまで作業を続けます。サブエージェントへの分担や、別の会話での変更のレビューもできます
 - **任せる範囲を決められる。** ファイルの読み書きは作業フォルダの中だけで行い、書き込みとコマンド実行は許可した場合にだけ行います。操作ごとに確認するか、判定用モデルに任せるかを選べます
-- **好きなモデルで。** OpenAI、ChatGPT サブスクリプション、LM Studio・Ollama などのローカル AI。接続先の切り替えやフォールバックもできます
+- **好きなモデルで。** OpenAI、ChatGPT サブスクリプション、Anthropic の API キーで Claude、LM Studio・Ollama などのローカル AI。接続先の切り替えやフォールバックもできます
 - **いろいろな使い方。** ターミナル（`ano run` / `ano chat`）、ブラウザ（`ano web`）、ACP に対応したエディタ（`ano acp`）、Webhook（`ano serve`）。画像・音声の入力と JSON 出力にも対応します
 - **MCP で拡張。** GitHub などの MCP server をつないで、できることを増やせます（OAuth 対応）
 - **長い作業にも。** 会話の保存と再開、長い会話の自動圧縮、よく使う手順のスキル化。プロジェクトの `AGENTS.md` も自動で読み込みます
@@ -15,7 +15,7 @@
 
 ## クイックスタート
 
-Rust 1.89 以降と、OpenAI API キー、[ChatGPT サブスクリプション](docs/chatgpt-subscription.md)、または[ローカル AI](docs/configuration.md#ローカル-ailm-studioollama-など)（LM Studio・Ollama など。API キー不要）が必要です。
+Rust 1.89 以降と、OpenAI API キー、[ChatGPT サブスクリプション](docs/chatgpt-subscription.md)、[Anthropic API キー](docs/configuration.md#claudeanthropic-api)、または[ローカル AI](docs/configuration.md#ローカル-ailm-studioollama-など)（LM Studio・Ollama など。API キー不要）が必要です。
 
 ```sh
 cargo install --path .

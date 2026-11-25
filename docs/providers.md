@@ -18,6 +18,10 @@ model = "qwen/qwen3-coder-30b"               # この接続先へ切り替えた
 auth = "chatgpt"                             # ChatGPT サブスクリプション（base_url は指定不可）
 model = "gpt-5-codex"
 
+[providers.claude]
+wire_api = "anthropic"                       # Anthropic の API キー（ANTHROPIC_API_KEY）で Claude を使う
+model = "claude-opus-5-5"
+
 [environments.review]
 provider = "codex"                           # この環境の既定の接続先
 ```
@@ -29,7 +33,7 @@ ano chat --environment review                    # 環境の provider（codex）
 ```
 
 - `[api]` を使っていない場合（既定の接続先でもなく、environment やフォールバック先からも参照されていない場合）、一覧には `api` を表示しません。`[api]` の接続設定を名前付きの接続先に移すには `ano provider rename api NAME` を使います（下記）。
-- 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`wire_api`・`timeout_secs`・`max_retries`・`stream`・`context_window`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url`・`api_key_env`・`wire_api`・`context_window` は引き継がず、`base_url` と `api_key_env` の省略時は OpenAI の既定値になります。`context_window` はモデルが1回の要求で受け取れるトークン数で、履歴をその手前で圧縮します（LM Studio は自動で取得。[履歴の圧縮](agent-runtime.md#履歴の圧縮)）。
+- 指定できる項目は `[api]` と同じ（`auth`・`chatgpt_auth_file`・`base_url`・`api_key_env`・`wire_api`・`timeout_secs`・`max_retries`・`stream`・`context_window`）に加え、`model` と `approval_model`（`approval_mode = "auto"` の判定用モデル）です。`timeout_secs`・`max_retries`・`stream` を省略すると `[api]` の値を引き継ぎます。`base_url`・`api_key_env`・`wire_api`・`context_window` は引き継がず、`base_url` と `api_key_env` の省略時は OpenAI の既定値（`wire_api = "anthropic"` なら Anthropic の既定値。[Claude（Anthropic API）](configuration.md#claudeanthropic-api)）になります。`context_window` はモデルが1回の要求で受け取れるトークン数で、履歴をその手前で圧縮します（LM Studio は自動で取得。[履歴の圧縮](agent-runtime.md#履歴の圧縮)）。
 - モデルは「環境の指定 → `--preset`/`--provider`/`--model` → 対話中の `/preset`/`/provider`/`/model`」の順に上書きします（[プリセット](#プリセットとロール)）。接続先だけを選んだ場合は、その接続先の `model` に切り替わります。接続先に `model` がなければ、それまでのモデルをそのまま使います。
 - `[agent].model` は `[api]` のモデルで、`model` のない既定の接続先でも使います。`[agent].approval_model` は `[api]` 用です。ほかの接続先では、その接続先の `approval_model`（省略時は使用中のモデル）で審査します。
 - `ano chat` では `/provider lan` や `/model qwen3:30b` で、会話を保ったまま切り替えられます。接続先を変えると、それまでの会話が新しい接続先へ送られます。元の接続先でしか読めない暗号化された推論は履歴から除きます。OpenAI の `/responses/compact` で圧縮済みの会話は、ほかの接続先では読めないため移せません（`/clear` か新しいセッションで始めてください）。
@@ -43,6 +47,7 @@ ano chat --environment review                    # 環境の provider（codex）
 ```sh
 ano provider add lan --base-url http://192.168.1.10:1234/v1 --model qwen/qwen3-coder-30b --fallback codex
 ano provider add codex --auth chatgpt --model gpt-5-codex
+ano provider add claude --wire-api anthropic --model claude-opus-5-5
 ano provider use lan                                       # 既定の接続先にする（[agent].provider）
 ano provider set lan --timeout-secs 120 --unset fallback   # 変更と削除（api は [api] と [agent].model）
 ano provider list                                          # 既定の接続先に (default)
