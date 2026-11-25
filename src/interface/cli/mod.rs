@@ -475,7 +475,7 @@ pub async fn run() -> Result<()> {
         Command::Automation(args) => {
             automation::run(&config, &automation_kinds(&config)?, args).await
         }
-        Command::Web(args) => web(config, cli.user, args, registry).await,
+        Command::Web(args) => web(config, config_path, cli.user, args, registry).await,
         Command::Acp(args) => acp(config, cli.user, args, registry).await,
         // A failed connection's error may show the server URL, with an API
         // key expanded into its query.
@@ -533,7 +533,13 @@ async fn serve(mut config: AppConfig, args: ServeArgs, registry: ToolRegistry) -
     served
 }
 
-async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegistry) -> Result<()> {
+async fn web(
+    config: AppConfig,
+    config_path: PathBuf,
+    user: String,
+    args: WebArgs,
+    registry: ToolRegistry,
+) -> Result<()> {
     let workspace = match args.workspace {
         Some(path) => path,
         None => std::env::current_dir().context("failed to determine current directory")?,
@@ -555,12 +561,41 @@ async fn web(config: AppConfig, user: String, args: WebArgs, registry: ToolRegis
                 )?,
             })
         },
+        config_path,
     };
     let mcp: Arc<dyn McpGateway> = Arc::new(McpPool::new(config.mcp_servers.clone()));
     let served = web::serve(config, Arc::clone(&mcp), registry, options).await;
     // Close MCP connections after the sessions have stopped, even on failure.
     mcp.shutdown().await;
-    served
+    match served? {
+        web::WebExit::Stopped => Ok(()),
+        web::WebExit::Restart { token } => restart_web(token),
+    }
+}
+
+/// Start `ano web` again with the same arguments, so that it reads the
+/// settings saved from the page, keeping the token other machines hold.
+fn restart_web(token: Option<String>) -> Result<()> {
+    println!("ano web: restarting with the saved settings");
+    let mut command = std::process::Command::new(
+        std::env::current_exe().context("cannot find the ano executable to restart")?,
+    );
+    command.args(std::env::args_os().skip(1));
+    if let Some(token) = token {
+        command.env(web::TOKEN_ENV, token);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Only returns on failure.
+        let error = command.exec();
+        Err(error).context("failed to restart ano web")
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().context("failed to restart ano web")?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
 }
 
 async fn acp(config: AppConfig, user: String, args: AcpArgs, registry: ToolRegistry) -> Result<()> {

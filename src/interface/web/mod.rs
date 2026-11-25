@@ -14,6 +14,7 @@ mod events;
 mod markdown;
 mod saved;
 mod session;
+mod settings;
 #[cfg(test)]
 mod tests;
 
@@ -94,6 +95,20 @@ pub struct WebOptions {
     /// Where sessions are kept across restarts; `None` keeps them in memory
     /// only, so they end with the server.
     pub sessions_dir: Option<PathBuf>,
+    /// The config file the settings page reads and writes, whether or not
+    /// it exists yet.
+    pub config_path: PathBuf,
+}
+
+/// Why [`serve`] returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebExit {
+    /// Stopped with Ctrl+C.
+    Stopped,
+    /// The settings page asked for a restart, so that the saved settings
+    /// take effect. The new server keeps `token`, so that browsers on other
+    /// machines stay signed in.
+    Restart { token: Option<String> },
 }
 
 pub use saved::default_sessions_dir;
@@ -113,6 +128,11 @@ struct WebState {
     /// Serializes session creation, so the limit holds.
     creating: tokio::sync::Mutex<()>,
     turns: Mutex<JoinSet<()>>,
+    /// The config file the settings page edits.
+    config_path: PathBuf,
+    /// Asked by the settings page to start again with the saved settings.
+    restart: tokio::sync::Notify,
+    restarting: std::sync::atomic::AtomicBool,
 }
 
 impl WebState {
@@ -152,7 +172,7 @@ pub async fn serve(
     mcp: Arc<dyn McpGateway>,
     registry: ToolRegistry,
     options: WebOptions,
-) -> Result<()> {
+) -> Result<WebExit> {
     config.validate()?;
     let address: SocketAddr = options
         .bind
@@ -206,6 +226,9 @@ pub async fn serve(
         saved,
         creating: tokio::sync::Mutex::new(()),
         turns: Mutex::new(JoinSet::new()),
+        config_path: options.config_path,
+        restart: tokio::sync::Notify::new(),
+        restarting: std::sync::atomic::AtomicBool::new(false),
     });
     restore_sessions(&state).await;
     println!(
@@ -228,7 +251,10 @@ pub async fn serve(
         router(Arc::clone(&state)).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
-        tokio::signal::ctrl_c().await.ok();
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = shutdown_state.restart.notified() => {}
+        }
         close_sessions(&shutdown_state).await;
     })
     .await
@@ -248,7 +274,16 @@ pub async fn serve(
     {
         turns.abort_all();
     }
-    served
+    served?;
+    Ok(
+        if state.restarting.load(std::sync::atomic::Ordering::SeqCst) {
+            WebExit::Restart {
+                token: state.access.token().map(str::to_string),
+            }
+        } else {
+            WebExit::Stopped
+        },
+    )
 }
 
 /// Open the saved sessions again, most recently used first, up to the
@@ -339,6 +374,11 @@ fn router(state: Arc<WebState>) -> Router {
         .route("/feed", get(list_feed))
         .route("/spaces", get(list_spaces))
         .route("/feed/{item}", post(update_feed_item))
+        .route(
+            "/settings",
+            get(settings::read_settings).put(settings::save_settings),
+        )
+        .route("/restart", post(settings::restart))
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             require_access,

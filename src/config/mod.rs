@@ -7,13 +7,15 @@
 //! and `ano mcp` commands.
 
 mod edit;
+pub mod schema;
 mod selection;
 #[cfg(test)]
 mod tests;
 
 pub use edit::{
-    remove_preset, remove_provider, rename_provider, save_mcp_tool_filters, set_role_preset,
-    update_preset, update_provider, use_provider, SettingValue,
+    read_settings, remove_preset, remove_provider, rename_provider, save_mcp_tool_filters,
+    save_settings, set_role_preset, update_preset, update_provider, use_provider, SettingValue,
+    SettingsConflict, SettingsFile,
 };
 pub use selection::{ModelRequest, ModelSelection, PresetSettings, DEFAULT_PRESET};
 
