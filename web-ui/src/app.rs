@@ -1,7 +1,7 @@
 //! The page: a header with the session's state and controls, and below it
 //! either the form that starts a session or the session itself.
 
-use crate::{api, chat::Chat, home, setup};
+use crate::{api, chat::Chat, home, settings, setup};
 use naui::{
     web::WebWidgetExt, Align, Button, DialogButtons, DialogResponse, Label, Length, Orientation,
     Padding, ProgressBar, Sizing, Stack, Tasks, TextColor, TextStyle, Ui,
@@ -26,6 +26,8 @@ pub struct App {
     list: Button,
     /// Opens the home page.
     home: Button,
+    /// Opens the settings.
+    settings: Button,
     /// Holds the form or the session.
     content: Stack,
     /// What the server offers for new sessions, once read.
@@ -73,12 +75,15 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
     list.set_tooltip(Some("ほかのセッションを開くか、新しく始めます"));
     let home = ui.button("ホーム")?;
     home.set_tooltip(Some("フィード・目標・予定・スペース・覚えていること"));
+    let settings = ui.button("設定")?;
+    settings.set_tooltip(Some("設定ファイルの内容を変更します"));
     header.append(&brand);
     header.append(&summary);
     header.append(&status);
     header.append(&busy);
     header.append(&stop);
     header.append(&home);
+    header.append(&settings);
     header.append(&list);
     header.append(&end);
 
@@ -101,6 +106,7 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
         end: end.clone(),
         list: list.clone(),
         home: home.clone(),
+        settings: settings.clone(),
         content,
         options: RefCell::new(None),
         chat: RefCell::new(None),
@@ -132,6 +138,13 @@ pub fn build(ui: &Ui) -> naui::Result<()> {
         move || {
             let app = Rc::clone(&app);
             app.clone().spawn(async move { app.show_home().await });
+        }
+    });
+    settings.on_click({
+        let app = Rc::clone(&app);
+        move || {
+            let app = Rc::clone(&app);
+            app.clone().spawn(async move { app.show_settings().await });
         }
     });
     let started = Rc::clone(&app);
@@ -179,6 +192,31 @@ impl App {
             Ok(home) => home::build(&self, &home).map(|page| self.content.append(&page)),
             Err(error) => self.ui.label(&error).map(|label| {
                 label.set_color(TextColor::Danger);
+                self.content.append(&label);
+            }),
+        };
+        if let Err(error) = built {
+            web_sys::console::error_1(&error.to_string().into());
+        }
+    }
+
+    /// The settings of the config file, to change and put into effect.
+    pub async fn show_settings(self: Rc<Self>) {
+        let view = self.next_view();
+        let settings = api::get("/api/settings").await;
+        if self.view.get() != view {
+            return;
+        }
+        self.chat.borrow_mut().take();
+        self.show_header(None);
+        self.content.clear();
+        let built = match settings {
+            Ok(settings) => {
+                settings::build(&self, &settings).map(|page| self.content.append(&page))
+            }
+            Err(error) => self.ui.label(&error).map(|label| {
+                label.set_color(TextColor::Danger);
+                label.set_selectable(true);
                 self.content.append(&label);
             }),
         };
@@ -337,6 +375,7 @@ impl App {
                 self.set_running(status["running"].as_bool().unwrap_or(false));
                 self.list.set_visible(true);
                 self.home.set_visible(true);
+                self.settings.set_visible(true);
             }
             None => {
                 self.summary.set_text("");
@@ -347,6 +386,7 @@ impl App {
                 self.end.set_visible(false);
                 self.list.set_visible(true);
                 self.home.set_visible(true);
+                self.settings.set_visible(true);
             }
         }
     }

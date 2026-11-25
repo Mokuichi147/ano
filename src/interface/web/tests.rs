@@ -130,6 +130,7 @@ impl Server {
             config_path: workspace.path().join(".ano/config.toml"),
             restart: Notify::new(),
             restarting: std::sync::atomic::AtomicBool::new(false),
+            instance: "test".into(),
         });
         restore_sessions(&state).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

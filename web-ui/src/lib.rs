@@ -17,6 +17,7 @@ mod chat;
 mod dom;
 mod events;
 mod home;
+mod settings;
 mod setup;
 mod timeline;
 

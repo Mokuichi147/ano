@@ -59,6 +59,14 @@ body {
 /* The list of sessions: one full-width row each, the title first. */
 .sessions { max-width: 760px; width: 100%; box-sizing: border-box; margin: 0 auto; overflow-y: auto; }
 .home { max-width: 760px; width: 100%; box-sizing: border-box; margin: 0 auto; overflow-y: auto; }
+/* The settings: a long page of folded sections, the save bar kept in view. */
+.settings { max-width: 860px; width: 100%; box-sizing: border-box; margin: 0 auto; overflow-y: auto; }
+.settings > * { flex-shrink: 0; }
+.settings-bar { position: sticky; top: 0; z-index: 1; background: var(--bg); padding: 6px 0; flex-wrap: wrap; }
+.settings-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-sizing: border-box; padding: 4px 8px; }
+.settings-group, .settings-entry { border: 1px solid var(--border); border-radius: var(--radius); box-sizing: border-box; }
+.settings-entry { padding: 2px 8px; background: var(--surface-2); }
+.settings-area textarea, textarea.settings-area { min-height: 4.5em; font: inherit; resize: vertical; }
 /* The page scrolls; its rows keep their height. */
 .home > *, .sessions > * { flex-shrink: 0; }
 .home .home-title { font-size: 1.4em; }

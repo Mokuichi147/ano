@@ -133,6 +133,8 @@ struct WebState {
     /// Asked by the settings page to start again with the saved settings.
     restart: tokio::sync::Notify,
     restarting: std::sync::atomic::AtomicBool,
+    /// Differs at every start, so the page can tell that a restart is done.
+    instance: String,
 }
 
 impl WebState {
@@ -229,6 +231,7 @@ pub async fn serve(
         config_path: options.config_path,
         restart: tokio::sync::Notify::new(),
         restarting: std::sync::atomic::AtomicBool::new(false),
+        instance: uuid::Uuid::new_v4().simple().to_string(),
     });
     restore_sessions(&state).await;
     println!(
@@ -530,6 +533,7 @@ async fn options(State(state): State<Arc<WebState>>) -> Response {
         "presets": presets,
         "environments": environments,
         "max_sessions": MAX_SESSIONS,
+        "instance": state.instance,
     }))
     .into_response()
 }
