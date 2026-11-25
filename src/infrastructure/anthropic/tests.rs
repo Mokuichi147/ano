@@ -584,16 +584,23 @@ async fn a_request_whose_thinking_is_refused_is_sent_again_without_it() {
 
 #[tokio::test]
 async fn the_agent_runs_tools_through_the_messages_api() {
-    let call = json!({"id": "msg_a", "type": "message", "role": "assistant", "model": "m",
-        "content": [
-            {"type": "thinking", "thinking": "", "signature": "sig-a"},
-            {"type": "tool_use", "id": "toolu_a", "name": "tool_search", "input": {"query": "example"}},
-        ],
-        "stop_reason": "tool_use", "usage": {"input_tokens": 10, "output_tokens": 5}});
-    let answer = json!({"id": "msg_b", "type": "message", "role": "assistant", "model": "m",
+    let call = |id: &str, signature: &str, query: &str| {
+        json!({"id": format!("msg_{id}"), "type": "message", "role": "assistant", "model": "m",
+            "content": [
+                {"type": "thinking", "thinking": "", "signature": signature},
+                {"type": "tool_use", "id": format!("toolu_{id}"), "name": "tool_search", "input": {"query": query}},
+            ],
+            "stop_reason": "tool_use", "usage": {"input_tokens": 10, "output_tokens": 5}})
+    };
+    let answer = json!({"id": "msg_c", "type": "message", "role": "assistant", "model": "m",
         "content": [{"type": "text", "text": "完了"}],
         "stop_reason": "end_turn", "usage": {"input_tokens": 20, "output_tokens": 2}});
-    let server = serve(vec![json_reply(&call), json_reply(&answer)]).await;
+    let server = serve(vec![
+        json_reply(&call("a", "sig-a", "example")),
+        json_reply(&call("b", "sig-b", "other")),
+        json_reply(&answer),
+    ])
+    .await;
     let agent = Agent::new(
         client(&server.endpoint, true),
         AgentSettings::default(),
@@ -609,7 +616,7 @@ async fn the_agent_runs_tools_through_the_messages_api() {
     assert_eq!(result.text, "完了");
 
     let seen = server.requests.lock().unwrap();
-    assert_eq!(seen.len(), 2);
+    assert_eq!(seen.len(), 3);
     assert!(seen[0]["system"]
         .as_str()
         .is_some_and(|system| !system.is_empty()));
@@ -622,21 +629,27 @@ async fn the_agent_runs_tools_through_the_messages_api() {
         .unwrap()
         .iter()
         .any(|tool| tool["name"] == "tool_search"));
-    // 2 回目は履歴全体を送り、前回の呼び出しとその結果を含む。
-    let messages = seen[1]["messages"].as_array().unwrap();
-    assert_eq!(messages[0], seen[0]["messages"][0]);
-    assert_eq!(messages[1]["role"], "assistant");
-    let blocks = messages[1]["content"].as_array().unwrap();
-    assert_eq!(blocks.last().unwrap()["id"], "toolu_a");
-    // 思考は、tool の定義が変わっていなければそのまま戻る。
-    if seen[1]["tools"] == seen[0]["tools"] && seen[1]["system"] == seen[0]["system"] {
-        assert_eq!(blocks[0]["signature"], "sig-a");
-    } else {
-        assert!(blocks.iter().all(|block| block["type"] != "thinking"));
+    // 毎回履歴全体を送り、前回までの要求をそのまま前置きにする。
+    for round in 1..3 {
+        let previous = seen[round - 1]["messages"].as_array().unwrap();
+        let messages = seen[round]["messages"].as_array().unwrap();
+        assert_eq!(&messages[..previous.len()], &previous[..], "round {round}");
+        assert_eq!(seen[round]["system"], seen[0]["system"], "round {round}");
+        assert_eq!(seen[round]["tools"], seen[0]["tools"], "round {round}");
     }
-    assert_eq!(messages[2]["role"], "user");
+    // 実際のループでも、思考は呼び出しの前にそのまま戻る。
+    let messages = seen[2]["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[1]["content"],
+        json!([
+            {"type": "thinking", "thinking": "", "signature": "sig-a"},
+            {"type": "tool_use", "id": "toolu_a", "name": "tool_search", "input": {"query": "example"}},
+        ])
+    );
     assert_eq!(messages[2]["content"][0]["type"], "tool_result");
     assert_eq!(messages[2]["content"][0]["tool_use_id"], "toolu_a");
+    assert_eq!(messages[3]["content"][0]["signature"], "sig-b");
+    assert_eq!(messages[4]["content"][0]["tool_use_id"], "toolu_b");
 }
 
 #[tokio::test]
