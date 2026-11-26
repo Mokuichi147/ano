@@ -124,6 +124,10 @@ max_tool_output_bytes = 131072
 # "remote" uses /responses/compact (OpenAI); "summary" asks the model for a
 # summary and works with any endpoint; "auto" picks by base_url.
 # compaction = "auto"
+# Before a summary, the results of old tool calls are cleared when that alone
+# at least halves the history (no request needed; the model calls the tool
+# again if it needs one). Not used with "remote".
+# clear_old_tool_results = true
 # Soft per-run limit for reported input + output tokens, including compaction.
 # Checked after API responses; a response can overshoot. Missing usage stops the run.
 # max_total_tokens = 100000

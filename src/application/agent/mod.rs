@@ -26,13 +26,15 @@ use crate::{
     },
     domain::{
         compaction::{
-            compacted_history, compaction_due, recent_user_requests, summarized_history,
-            summary_split, summary_transcript, CompactionMethod, CompactionRecord,
+            cleared_tool_results, compacted_history, compaction_due, recent_user_requests,
+            summarized_history, summary_split, summary_transcript, CompactionMethod,
+            CompactionRecord,
         },
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
-        tool::{validate_tool_name, ToolContext, TOOL_SEARCH_NAME},
+        skill::SKILL_READ_NAME,
+        tool::{validate_tool_name, ToolContext, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
         usage::{ApiOperation, StopReason, UsageSummary},
     },
 };
@@ -531,6 +533,46 @@ impl Agent {
         }
     }
 
+    /// `history` with the results of old tool calls cleared, when that
+    /// frees enough to put off a summary. The recent steps a summary would
+    /// keep are left as they are. Not for histories the endpoint compacts,
+    /// whose items are opaque.
+    fn cleared_tool_results(
+        &self,
+        target: Target<'_>,
+        history: &[Value],
+    ) -> Result<Option<(Vec<Value>, CompactionRecord)>> {
+        if !self.settings.clear_old_tool_results || self.remote_compaction(target) {
+            return Ok(None);
+        }
+        // Without recent steps to keep, the latest results would go too,
+        // and the model would only fetch them again.
+        let split = self.summary_split(target, history);
+        if split >= history.len() {
+            return Ok(None);
+        }
+        let keep = self.kept_tool_results();
+        let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+        cleared_tool_results(history, split, &keep)
+    }
+
+    /// The tools whose old results are not cleared, because a read cannot
+    /// fetch them again: the tools a search loaded, the report of a
+    /// sub-agent, the procedure of a skill, and the results of the runtime
+    /// tools of extensions (such as a review).
+    fn kept_tool_results(&self) -> Vec<String> {
+        [TOOL_SEARCH_NAME, DELEGATE_TASK_NAME, SKILL_READ_NAME]
+            .into_iter()
+            .map(str::to_string)
+            .chain(
+                self.extensions
+                    .iter()
+                    .flat_map(|extension| extension.tools())
+                    .map(|definition| definition.name),
+            )
+            .collect()
+    }
+
     async fn run_inner(
         &self,
         request: RunRequest,
@@ -796,21 +838,32 @@ impl Agent {
                         previous_compact_size,
                     )?
                 {
+                    // A refused request is sent again only once, so it gets
+                    // the summary, which frees the most.
+                    let cleared = if compact_now {
+                        None
+                    } else {
+                        self.cleared_tool_results(target, history)?
+                    };
                     compact_now = false;
                     context_tokens = None;
-                    let previous = history.clone();
-                    let compacted = self.request_compaction(target, &previous).await?;
-                    observe_usage(
-                        &compacted,
-                        ApiOperation::Compaction,
-                        round,
-                        &mut usage,
-                        session.as_deref_mut(),
-                        &events,
-                        origin.usage_sink,
-                    )?;
-                    let (history, mut record) =
-                        self.compaction_result(target, &compacted, &previous)?;
+                    let (history, mut record) = match cleared {
+                        Some(cleared) => cleared,
+                        None => {
+                            let previous = history.clone();
+                            let compacted = self.request_compaction(target, &previous).await?;
+                            observe_usage(
+                                &compacted,
+                                ApiOperation::Compaction,
+                                round,
+                                &mut usage,
+                                session.as_deref_mut(),
+                                &events,
+                                origin.usage_sink,
+                            )?;
+                            self.compaction_result(target, &compacted, &previous)?
+                        }
+                    };
                     previous_compact_size = Some(record.after_bytes);
                     if let Some(session) = session.as_deref_mut().filter(|_| replay) {
                         record = session.replace_history(history, record)?;
