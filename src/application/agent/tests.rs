@@ -3249,3 +3249,39 @@ async fn endpoints_that_keep_loaded_tools_never_drop_one() {
     assert_eq!(offered(3), all);
     assert_eq!(offered(4), all);
 }
+
+#[test]
+fn search_results_mark_the_tools_offered_with_every_request() {
+    let registry = registry_with(&[("read_file", "Read a file")]);
+    registry
+        .register(
+            ToolDefinition::new(
+                "read_feed",
+                "Read the feed",
+                json!({"type": "object", "properties": {}}),
+            )
+            .always_offered(),
+            |_arguments| async move { Ok(json!({"ok": true})) },
+        )
+        .unwrap();
+    let agent = agent(registry, Vec::new());
+
+    let selection = agent
+        .search_tools(
+            &json!({"query": "read"}),
+            &McpRuntime::default(),
+            &ToolContext::default(),
+        )
+        .unwrap();
+    let marked = |name: &str| {
+        selection
+            .results
+            .iter()
+            .find(|result| result["name"] == name)
+            .unwrap()
+            .get("always_offered")
+            .cloned()
+    };
+    assert_eq!(marked("read_feed"), Some(json!(true)));
+    assert_eq!(marked("read_file"), None);
+}

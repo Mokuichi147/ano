@@ -552,8 +552,9 @@ struct Searched {
 
 /// 履歴の `tool_search` の結果を読む。エージェントは読み込んだ tool を同じ会話の
 /// 間は外さない（[`ResponsesApi::keeps_loaded_tools`]）ので、参照した tool は
-/// その後の要求の `tools` にも残る。結果を読めない検索や、`tools` にない tool は
-/// 参照しない。`tools` がすべて遅延読み込みになる場合（API が受け付けない）は
+/// その後の要求の `tools` にも残る。結果を読めない検索、`tools` にない tool、
+/// 常に送っている tool、前の検索が参照した tool は参照しない。参照する tool の
+/// ない検索の結果はテキストのまま送る。`tools` がすべて遅延読み込みになる場合（API が受け付けない）は
 /// 何も遅延させない。
 fn searched_tools(items: &[Value], tools: &[Value]) -> Searched {
     let offered: BTreeSet<&str> = tools
@@ -582,6 +583,11 @@ fn searched_tools(items: &[Value], tools: &[Value]) -> Searched {
         };
         let mut names = Vec::new();
         for result in &results {
+            // 常に送っている tool は最初から前置きにあるので、遅延させない
+            // （遅延に変えると、遅延でない tool の一覧が変わる）。
+            if result["always_offered"] == true {
+                continue;
+            }
             // 直接つなぐ MCP の tool は関数名で送られる。
             let Some(name) = result["function_name"]
                 .as_str()
@@ -590,7 +596,8 @@ fn searched_tools(items: &[Value], tools: &[Value]) -> Searched {
             else {
                 continue;
             };
-            if !names.iter().any(|known| known == name) {
+            // 前の検索が参照した tool は、もう一度参照しない。
+            if !searched.names.contains(name) && !names.iter().any(|known| known == name) {
                 names.push(name.to_string());
             }
         }

@@ -821,3 +821,40 @@ fn tools_a_search_loaded_are_deferred_and_keep_the_earlier_thinking() {
         output.to_string()
     );
 }
+
+#[test]
+fn searches_reference_each_newly_loaded_tool_once() {
+    let call = |id: &str| json!({"type": "function_call", "call_id": id, "name": "tool_search", "arguments": "{}"});
+    let result = |id: &str, tools: Value| {
+        json!({"type": "function_call_output", "call_id": id,
+            "output": json!({"tools": tools, "message": "loaded"}).to_string()})
+    };
+    let feed = json!({"type": "function", "name": "feed_read", "description": "Read the feed",
+        "parameters": {"type": "object", "properties": {}}});
+    let input = json!([
+        {"role": "user", "content": [{"type": "input_text", "text": "読んで"}]},
+        call("toolu_a"),
+        result("toolu_a", json!([
+            {"kind": "function", "name": "read", "description": "Read a file"},
+            {"kind": "function", "name": "feed_read", "description": "Read the feed", "always_offered": true},
+        ])),
+        call("toolu_b"),
+        result("toolu_b", json!([{"kind": "function", "name": "read", "description": "Read a file"}])),
+    ]);
+    let payload = json!({"model": "m", "instructions": "i",
+        "tools": [tool_search_tool(), feed, read_tool()], "input": input});
+    let body = messages_request(&payload, &LOCAL, true).unwrap().body;
+    // 常に送っている tool は、検索で見つかっても遅延にも参照にもしない。
+    let tools = body["tools"].as_array().unwrap();
+    assert!(tools[1].get("defer_loading").is_none(), "{tools:?}");
+    assert_eq!(tools[2]["defer_loading"], true);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages[2]["content"][0]["content"],
+        json!([{"type": "tool_reference", "tool_name": "read"}])
+    );
+    // 前の検索が参照した tool は、後の検索で参照し直さない（結果はテキストのまま）。
+    let second = &messages[4]["content"][0];
+    assert_eq!(second["tool_use_id"], "toolu_b");
+    assert!(second["content"].is_string(), "{second}");
+}

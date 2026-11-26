@@ -439,6 +439,7 @@ impl Agent {
                     description: definition.description,
                     score,
                     function_name: None,
+                    always_offered: definition.always_offered,
                 });
             }
         }
@@ -460,6 +461,7 @@ impl Agent {
                         description,
                         score,
                         function_name: None,
+                        always_offered: false,
                     });
                 }
             }
@@ -478,6 +480,7 @@ impl Agent {
                     description: tool.description.clone(),
                     score,
                     function_name: Some(tool.function_name.clone()),
+                    always_offered: false,
                 });
             }
         }
@@ -499,6 +502,11 @@ impl Agent {
                 "name": candidate.name,
                 "description": cut(&candidate.description, MAX_DESCRIPTION_CHARS),
             });
+            if candidate.always_offered {
+                // Offered with every request already; the search loads
+                // nothing new for it.
+                result["always_offered"] = json!(true);
+            }
             if let Some(server_label) = candidate.server_label {
                 result["server_label"] = json!(server_label.clone());
                 if let Some(function_name) = candidate.function_name {
@@ -528,6 +536,8 @@ struct SearchCandidate {
     description: String,
     score: usize,
     function_name: Option<String>,
+    /// Sent with every request, loaded or not.
+    always_offered: bool,
 }
 
 pub(super) struct ToolSearchSelection {
