@@ -13,7 +13,7 @@
 | `ano automation list` / `ano automation notify NAME [MESSAGE]` | 自動化のソース・ルール・通知先を表示し、通知先へテストを送ります（[`ano automation`](automation.md#ano-automation)） |
 | `ano history status/sync/search/get/context/conversations` | chronotope のローカル履歴キューを確認・再送し、原文を参照します（[履歴](chronotope-history.md)） |
 | `ano skills [NAME]` | 保存済みのスキルを一覧表示し、NAME を指定するとその内容を表示します（[スキル](agent-runtime.md#スキルskill_read--skill_save)） |
-| `ano memory` / `ano memory add` / `ano memory forget` | 記憶した事実を番号付きで一覧し、追加・削除します（[記憶](agent-runtime.md#記憶memory_save--memory_forget)） |
+| `ano memory` / `ano memory add` / `ano memory forget` / `ano memory consolidate` | 記憶した事実を番号付きで一覧し、追加・削除します。`consolidate` は、重なる事実をモデルの提案でまとめます（`--dry-run` で案だけを表示。[記憶](agent-runtime.md#記憶memory_save--memory_forget)） |
 | `ano objectives` / `add` / `set` / `log` / `show` / `remove` | 長期の目標を一覧し、追加・変更・進捗の記録・削除をします（[目標](agent-runtime.md#目標objective_set--objective_log--objective_read)） |
 | `ano routines` / `add` / `remove` | リマインダーと定期作業を次の時刻つきで一覧し、作成・削除します（[ルーティン](automation.md#会話から作るリマインダーと定期作業routines)） |
 | `ano feed` / `rate` / `done` | フィードの項目を一覧し、評価・済みを付けます（[フィード](agent-runtime.md#フィードfeed_post--feed_read)） |

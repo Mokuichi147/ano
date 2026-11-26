@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -33,6 +35,7 @@ async fn mock_responses(script: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) 
 
 fn ano(directory: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+    command.envs(common::isolated_env());
     command
         .current_dir(directory)
         .args(["--config", "config.toml"])
@@ -176,7 +179,7 @@ async fn runs_see_objectives_and_track_progress() {
     assert!(String::from_utf8_lossy(&listed.stdout).contains("(none)"));
 }
 
-/// Without `[objectives] enabled`, no objective reaches the model.
+/// With `[objectives] enabled = false`, no objective reaches the model.
 #[tokio::test]
 async fn disabled_objectives_stay_out_of_runs() {
     let (endpoint, requests) = mock_responses(vec![json!([
@@ -195,6 +198,11 @@ async fn disabled_objectives_stay_out_of_runs() {
         .await
         .unwrap();
     assert!(added.status.success());
+    std::fs::write(
+        directory.path().join("config.toml"),
+        "[objectives]\nenabled = false\ndir = 'objectives'\n",
+    )
+    .unwrap();
     let output = tokio::time::timeout(
         Duration::from_secs(20),
         ano(directory.path())

@@ -13,6 +13,7 @@ pub mod approval;
 pub mod auto_approval;
 pub mod conversation;
 pub mod instructions;
+pub mod memory_consolidation;
 pub mod models;
 pub mod notify;
 pub mod profile;

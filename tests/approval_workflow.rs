@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -62,6 +64,7 @@ async fn auto_mode_reviews_mcp_calls_and_denies_uncertain_ones_without_asking() 
     let output = tokio::time::timeout(
         Duration::from_secs(20),
         Command::new(env!("CARGO_BIN_EXE_ano"))
+            .envs(common::isolated_env())
             .current_dir(directory.path())
             .env("OPENAI_BASE_URL", &endpoint)
             .env("OPENAI_API_KEY", "test-fixture-key")
@@ -166,6 +169,7 @@ async fn exec_commands_run_in_the_workspace_after_approval() {
     let config = tempfile::NamedTempFile::new().unwrap();
     let run = |extra: &'static [&'static str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+        command.envs(common::isolated_env());
         command
             .current_dir(directory.path())
             .arg("--config")

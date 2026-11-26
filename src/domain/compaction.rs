@@ -6,6 +6,10 @@
 //!   transcript of the earlier history, and the summary replaces it; the
 //!   most recent steps are kept as they are, so the work in progress, such
 //!   as a file just read, need not be read again.
+//!
+//! Before a summary, the results of old tool calls are cleared when that
+//! alone frees enough: it costs no request and loses only what the model
+//! can fetch again.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -97,6 +101,93 @@ pub(crate) fn compacted_history(
         archive_file: None,
     };
     Ok((output.clone(), record))
+}
+
+/// Tool results at most this long are left as they are: clearing them
+/// frees little, and a cleared result is shorter than this.
+const CLEARABLE_RESULT_BYTES: usize = 1024;
+
+/// What replaces the output of an old tool call.
+fn cleared_result(bytes: usize) -> String {
+    json!({
+        "cleared": true,
+        "original_bytes": bytes,
+        "note": "Runtime notice: this old tool result was cleared to save context; the call itself ran then and is not undone. If you need what it returned, read it again (a file, a search, a page). Never repeat a call that changes something, such as a command or a write, only to see its result.",
+    })
+    .to_string()
+}
+
+/// `history` with the long results of the tool calls before `split` (see
+/// `summary_split`) cleared, when that at least halves it; otherwise `None`,
+/// and a summary is due.
+///
+/// The calls and their results stay in place, so every call still has its
+/// result. The results of the tools named in `keep` are left: those that a
+/// later turn needs (`tool_search` results say which tools it can call) or
+/// that cannot be fetched again by a read. Clearing happens in
+/// one pass rather than a little every request, so the start of the prompt
+/// that an endpoint has cached changes once. A history cleared before has
+/// nothing long left before `split`, so it falls through to the summary.
+pub fn cleared_tool_results(
+    history: &[Value],
+    split: usize,
+    keep: &[&str],
+) -> Result<Option<(Vec<Value>, CompactionRecord)>> {
+    let split = split.min(history.len());
+    let kept_calls: Vec<&str> = history
+        .iter()
+        .filter(|item| {
+            item["type"] == "function_call"
+                && item["name"]
+                    .as_str()
+                    .is_some_and(|name| keep.contains(&name))
+        })
+        .filter_map(|item| item["call_id"].as_str())
+        .collect();
+    let mut cleared = history.to_vec();
+    let mut changed = false;
+    for item in &mut cleared[..split] {
+        if item["type"] != "function_call_output"
+            || item["call_id"]
+                .as_str()
+                .is_some_and(|id| kept_calls.contains(&id))
+        {
+            continue;
+        }
+        let Some(bytes) = item["output"].as_str().map(str::len) else {
+            continue;
+        };
+        if bytes > CLEARABLE_RESULT_BYTES {
+            item["output"] = Value::String(cleared_result(bytes));
+            changed = true;
+        }
+    }
+    if !changed {
+        return Ok(None);
+    }
+    let (before_bytes, after_bytes) = (history_bytes(history)?, history_bytes(&cleared)?);
+    if after_bytes.saturating_mul(2) > before_bytes {
+        return Ok(None);
+    }
+    let record = CompactionRecord {
+        id: format!("{CLEARED_RECORD_PREFIX}{}", uuid::Uuid::new_v4()),
+        before_bytes,
+        after_bytes,
+        before_items: history.len(),
+        after_items: cleared.len(),
+        archive_file: None,
+    };
+    Ok(Some((cleared, record)))
+}
+
+/// Starts the id of the record of a pass that only cleared tool results.
+pub const CLEARED_RECORD_PREFIX: &str = "cleared-";
+
+impl CompactionRecord {
+    /// Whether the pass only cleared old tool results, without a summary.
+    pub fn cleared_tool_results(&self) -> bool {
+        self.id.starts_with(CLEARED_RECORD_PREFIX)
+    }
 }
 
 /// One rendered history item of a summary transcript.
@@ -431,6 +522,74 @@ mod tests {
 
     fn user(text: &str) -> Value {
         json!({"role":"user","content":[{"type":"input_text","text":text}]})
+    }
+
+    fn call(id: &str, name: &str) -> Value {
+        json!({"type":"function_call","call_id":id,"name":name,"arguments":"{}"})
+    }
+
+    fn result(id: &str, output: &str) -> Value {
+        json!({"type":"function_call_output","call_id":id,"output":output})
+    }
+
+    #[test]
+    fn old_tool_results_are_cleared_when_that_halves_the_history() {
+        let found = json!({"tools":[{"name":"workspace_read"}],"padding":"p".repeat(4000)});
+        let history = vec![
+            user("README を直して"),
+            call("s1", "tool_search"),
+            result("s1", &found.to_string()),
+            call("c1", "workspace_read"),
+            result("c1", &"古い".repeat(10_000)),
+            call("c2", "workspace_read"),
+            result("c2", "short"),
+            call("c3", "workspace_read"),
+            result("c3", &"x".repeat(8000)),
+        ];
+        let (cleared, record) = cleared_tool_results(&history, 7, &["tool_search"])
+            .unwrap()
+            .unwrap();
+        assert_eq!(cleared.len(), history.len());
+        // Search results, short results, and the recent part stay.
+        for index in [0, 1, 2, 3, 5, 6, 7, 8] {
+            assert_eq!(cleared[index], history[index], "item {index}");
+        }
+        let output: Value = serde_json::from_str(cleared[4]["output"].as_str().unwrap()).unwrap();
+        assert_eq!(cleared[4]["call_id"], "c1");
+        assert_eq!(output["cleared"], true);
+        assert_eq!(output["original_bytes"], 60_000);
+        assert!(record.cleared_tool_results());
+        assert!(record.after_bytes * 2 <= record.before_bytes);
+        assert_eq!(record.after_bytes, history_bytes(&cleared).unwrap());
+
+        // Nothing long is left before the split: a summary is due.
+        assert!(cleared_tool_results(&cleared, 7, &["tool_search"])
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn results_are_not_cleared_when_that_frees_too_little() {
+        let history = vec![
+            user(&"依頼".repeat(5000)),
+            call("c1", "workspace_read"),
+            result("c1", &"x".repeat(3000)),
+            call("c2", "workspace_read"),
+            result("c2", &"y".repeat(3000)),
+        ];
+        // Clearing the results of a history that is mostly something else.
+        assert!(cleared_tool_results(&history, 5, &[]).unwrap().is_none());
+        // Everything is recent.
+        assert!(cleared_tool_results(&history, 0, &[]).unwrap().is_none());
+        // Only the search results are long.
+        let searches = vec![
+            user("探して"),
+            call("s1", "tool_search"),
+            result("s1", &"z".repeat(9000)),
+        ];
+        assert!(cleared_tool_results(&searches, 3, &["tool_search"])
+            .unwrap()
+            .is_none());
     }
 
     #[test]

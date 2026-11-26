@@ -22,13 +22,23 @@ const LOCK_FILE: &str = "feed.json.lock";
 /// Items `feed_read` returns at most.
 const MAX_READ_ITEMS: usize = 50;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FeedSettings {
     pub enabled: bool,
     /// Where the feed is kept. Defaults to `feed` in the platform's data
     /// directory for ano.
     pub dir: Option<PathBuf>,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for FeedSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
 }
 
 impl FeedSettings {

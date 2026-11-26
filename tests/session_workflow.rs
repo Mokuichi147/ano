@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{http::StatusCode, response::IntoResponse, routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -26,6 +28,7 @@ async fn run_cli(
     restrict: bool,
 ) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+    command.envs(common::isolated_env());
     command
         .current_dir(root)
         .env("OPENAI_BASE_URL", endpoint)
@@ -162,6 +165,7 @@ async fn workflow(fail_after_check: bool) {
             .any(|event| event["type"] == "local_tool_blocked"));
     }
     let inspection = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(directory.path())
         .args([
             "--config",

@@ -21,6 +21,11 @@ pub async fn post_detailed(path: &str, body: &Value) -> Result<Value, (String, V
     request("POST", path, Some(body)).await
 }
 
+/// A `PUT`, with the body of a failed response like [`post_detailed`].
+pub async fn put_detailed(path: &str, body: &Value) -> Result<Value, (String, Value)> {
+    request("PUT", path, Some(body)).await
+}
+
 pub async fn delete(path: &str) -> Result<Value, String> {
     request("DELETE", path, None)
         .await

@@ -1,6 +1,8 @@
 //! 実際の chronotope サーバと CLI を接続する結合テスト。
 //! ANO_CHRONOTOPE_BIN にビルド済みの実行ファイルを指定して --ignored で実行する。
 
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -71,6 +73,7 @@ async fn query(endpoint: &str, user: &str, mut body: Value) -> Value {
 }
 async fn cli(root: &Path, model: &str, args: &[&str], stdin: Option<&str>) -> std::process::Output {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(root)
         .env("OPENAI_BASE_URL", model)
         .env("OPENAI_API_KEY", "fixture")

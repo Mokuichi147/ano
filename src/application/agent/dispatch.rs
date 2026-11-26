@@ -309,14 +309,7 @@ impl Agent {
 
         if let Some((server, tool)) = mcp_runtime.find_tool(name) {
             let output = self
-                .execute_direct_mcp_tool(
-                    name,
-                    server,
-                    tool,
-                    &arguments,
-                    active.direct_mcp(),
-                    scope,
-                )
+                .execute_direct_mcp_tool(name, server, tool, &arguments, active.direct_mcp(), scope)
                 .await?;
             return Ok((output, None));
         }

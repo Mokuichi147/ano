@@ -1,3 +1,5 @@
+mod common;
+
 use ano::{RunOutcome, Session, SessionStatus};
 use axum::{
     extract::{OriginalUri, State},
@@ -114,6 +116,7 @@ async fn run(directory: &Path, endpoint: &str, flags: &[&str], prompt: &str) -> 
     tokio::time::timeout(
         Duration::from_secs(20),
         Command::new(env!("CARGO_BIN_EXE_ano"))
+            .envs(common::isolated_env())
             .current_dir(directory)
             .env("OPENAI_BASE_URL", endpoint)
             .env("OPENAI_API_KEY", "fixture-key")

@@ -113,9 +113,13 @@ impl Updates {
             } => vec![SessionUpdate::AgentThoughtChunk(chunk(&paragraph(
                 &format!("[ano] MCP server '{server_label}' is unavailable: {error}"),
             )))],
-            AgentEvent::ContextCompacted { .. } => {
+            AgentEvent::ContextCompacted { record, .. } => {
                 vec![SessionUpdate::AgentThoughtChunk(chunk(&paragraph(
-                    "[ano] The conversation was compacted.",
+                    if record.cleared_tool_results() {
+                        "[ano] Old tool results were cleared to save context."
+                    } else {
+                        "[ano] The conversation was compacted."
+                    },
                 )))]
             }
             AgentEvent::PlanUpdated { plan, .. } => vec![SessionUpdate::Plan(plan_update(plan))],

@@ -163,7 +163,7 @@ async fn setup_with_harness(
         "[sources.reports]\nkind = 'webhook'\ntrust = 'trusted'\n\n[notifiers.phone]\nkind = 'webhook'\nurl = '{url}'\n\n{extra}\n\n{rules}"
     ))
     .unwrap();
-    let mut config = AppConfig::default();
+    let mut config = AppConfig::without_features();
     config
         .environments
         .insert("coding".into(), Default::default());
@@ -473,7 +473,7 @@ async fn a_full_queue_refuses_events_without_using_their_signature() {
 /// The first problem of the automation settings `text`, when they are
 /// checked and built with the built-in kinds.
 fn problem(text: &str) -> String {
-    let mut config = AppConfig::default();
+    let mut config = AppConfig::without_features();
     config.environments.insert(
         "trusted".into(),
         toml::from_str("approval_mode = 'allow'").unwrap(),
@@ -526,7 +526,7 @@ fn settings_refuse_rules_that_cannot_work_or_are_unsafe() {
     assert!(problem("[sources.'a b']\nkind = 'webhook'").contains("source names"));
 
     // Trusted sources may run in an environment that approves every call.
-    let mut config = AppConfig::default();
+    let mut config = AppConfig::without_features();
     config.environments.insert(
         "trusted".into(),
         toml::from_str("approval_mode = 'allow'").unwrap(),

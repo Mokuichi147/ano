@@ -19,20 +19,22 @@ use crate::{
         input::{build_user_input, InputPart},
         ports::{
             ApprovalHandler, ConversationStore, HistoryBackend, McpGateway, McpServerFailure,
-            ResponsesApi,
+            ResponseDelta, ResponsesApi,
         },
         registry::ToolRegistry,
         settings::AgentSettings,
     },
     domain::{
         compaction::{
-            compacted_history, compaction_due, recent_user_requests, summarized_history,
-            summary_split, summary_transcript, CompactionMethod, CompactionRecord,
+            cleared_tool_results, compacted_history, compaction_due, recent_user_requests,
+            summarized_history, summary_split, summary_transcript, CompactionMethod,
+            CompactionRecord,
         },
         plan::{RunOutcome, TaskGoal, TaskPlan, TASK_PLAN_NAME},
         policy::UserPolicy,
         session::{SessionBinding, SessionStatus},
-        tool::{validate_tool_name, ToolContext, TOOL_SEARCH_NAME},
+        skill::SKILL_READ_NAME,
+        tool::{validate_tool_name, ToolContext, DELEGATE_TASK_NAME, TOOL_SEARCH_NAME},
         usage::{ApiOperation, StopReason, UsageSummary},
     },
 };
@@ -42,7 +44,8 @@ use dispatch::RoundScope;
 use events::EventLog;
 use mcp_runtime::McpRuntime;
 use response::{
-    extract_output_text, output_items, reasoning_summary_text, validate_response_status,
+    cut_off_at_output_limit, extract_output_text, output_items, reasoning_summary_text,
+    validate_response_status,
 };
 use serde_json::{json, Value};
 use std::{
@@ -531,6 +534,46 @@ impl Agent {
         }
     }
 
+    /// `history` with the results of old tool calls cleared, when that
+    /// frees enough to put off a summary. The recent steps a summary would
+    /// keep are left as they are. Not for histories the endpoint compacts,
+    /// whose items are opaque.
+    fn cleared_tool_results(
+        &self,
+        target: Target<'_>,
+        history: &[Value],
+    ) -> Result<Option<(Vec<Value>, CompactionRecord)>> {
+        if !self.settings.clear_old_tool_results || self.remote_compaction(target) {
+            return Ok(None);
+        }
+        // Without recent steps to keep, the latest results would go too,
+        // and the model would only fetch them again.
+        let split = self.summary_split(target, history);
+        if split >= history.len() {
+            return Ok(None);
+        }
+        let keep = self.kept_tool_results();
+        let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+        cleared_tool_results(history, split, &keep)
+    }
+
+    /// The tools whose old results are not cleared, because a read cannot
+    /// fetch them again: the tools a search loaded, the report of a
+    /// sub-agent, the procedure of a skill, and the results of the runtime
+    /// tools of extensions (such as a review).
+    fn kept_tool_results(&self) -> Vec<String> {
+        [TOOL_SEARCH_NAME, DELEGATE_TASK_NAME, SKILL_READ_NAME]
+            .into_iter()
+            .map(str::to_string)
+            .chain(
+                self.extensions
+                    .iter()
+                    .flat_map(|extension| extension.tools())
+                    .map(|definition| definition.name),
+            )
+            .collect()
+    }
+
     async fn run_inner(
         &self,
         request: RunRequest,
@@ -772,6 +815,9 @@ impl Agent {
         // Notices about repeated calls went unheeded: the next response is
         // the report.
         let mut stuck = false;
+        // The last response was cut off at the output token limit and
+        // discarded: this request asks again, once.
+        let mut cut_off = false;
 
         for round in 0..self.settings.max_tool_rounds {
             if !window_asked && context_tokens.is_some() {
@@ -796,21 +842,32 @@ impl Agent {
                         previous_compact_size,
                     )?
                 {
+                    // A refused request is sent again only once, so it gets
+                    // the summary, which frees the most.
+                    let cleared = if compact_now {
+                        None
+                    } else {
+                        self.cleared_tool_results(target, history)?
+                    };
                     compact_now = false;
                     context_tokens = None;
-                    let previous = history.clone();
-                    let compacted = self.request_compaction(target, &previous).await?;
-                    observe_usage(
-                        &compacted,
-                        ApiOperation::Compaction,
-                        round,
-                        &mut usage,
-                        session.as_deref_mut(),
-                        &events,
-                        origin.usage_sink,
-                    )?;
-                    let (history, mut record) =
-                        self.compaction_result(target, &compacted, &previous)?;
+                    let (history, mut record) = match cleared {
+                        Some(cleared) => cleared,
+                        None => {
+                            let previous = history.clone();
+                            let compacted = self.request_compaction(target, &previous).await?;
+                            observe_usage(
+                                &compacted,
+                                ApiOperation::Compaction,
+                                round,
+                                &mut usage,
+                                session.as_deref_mut(),
+                                &events,
+                                origin.usage_sink,
+                            )?;
+                            self.compaction_result(target, &compacted, &previous)?
+                        }
+                    };
                     previous_compact_size = Some(record.after_bytes);
                     if let Some(session) = session.as_deref_mut().filter(|_| replay) {
                         record = session.replace_history(history, record)?;
@@ -855,6 +912,11 @@ impl Agent {
                     .as_ref()
                     .map(|history| Value::Array(history.clone()))
                     .unwrap_or_else(|| next_input.clone()),
+            };
+            let input = if cut_off {
+                with_notice(input, OUTPUT_LIMIT_NOTICE)
+            } else {
+                input
             };
             let continuation = if replay || local_history.is_some() {
                 Continuation::FullHistory
@@ -920,7 +982,33 @@ impl Agent {
             }
             // A truncated or unfinished response can contain complete-looking
             // text and tool calls. Validate it before executing any local work.
+            if cut_off_at_output_limit(&response) && !cut_off && !final_round {
+                // Nothing of the response is kept or run. A cut-off that
+                // filled the context is compacted before the next request.
+                cut_off = true;
+                // What was streamed of it stays on screen: close it, so the
+                // next response does not continue its last line.
+                if let Some(listener) = text_listener {
+                    listener(ResponseDelta::MessageDone);
+                }
+                events.push(AgentEvent::RuntimeNotice {
+                    round,
+                    text: "The response was cut off at the output token limit and discarded; asking again for a shorter one.".into(),
+                });
+                if let Some(reason) = usage.stop_reason(token_limit) {
+                    return finish_limited(
+                        reason,
+                        usage,
+                        previous_response_id.unwrap_or_default(),
+                        &plan,
+                        events,
+                        session,
+                    );
+                }
+                continue;
+            }
             validate_response_status(&response)?;
+            cut_off = false;
             let response_id = response["id"]
                 .as_str()
                 .context("Responses API response did not contain an id")?
@@ -1124,6 +1212,34 @@ enum Continuation<'a> {
     /// The input is only what is new since the response with this id, which
     /// the endpoint stored (`None` on the first request).
     Previous(Option<&'a str>),
+}
+
+/// Sent once with the request that follows a response cut off at the output
+/// token limit. It is not kept in the history.
+const OUTPUT_LIMIT_NOTICE: &str = "Runtime notice: your previous response to this request was cut off at the output token limit before it finished, so it was discarded and nothing in it ran. Respond again, shorter: keep your reasoning brief, and write long output, such as a large file, in several smaller tool calls instead of one.";
+
+/// `input` with `notice` as its last user text, for one request. The notice
+/// joins a user message that ends the input rather than following it, for
+/// chat templates that need alternating roles.
+fn with_notice(input: Value, notice: &str) -> Value {
+    let part = json!({"type": "input_text", "text": notice});
+    let mut items = match input {
+        Value::Array(items) => items,
+        other => return other,
+    };
+    match items.last_mut() {
+        Some(last) if last["role"] == "user" && last["content"].is_array() => {
+            if let Some(parts) = last["content"].as_array_mut() {
+                parts.push(part);
+            }
+        }
+        Some(last) if last["role"] == "user" && last["content"].is_string() => {
+            let own = json!({"type": "input_text", "text": last["content"].clone()});
+            last["content"] = json!([own, part]);
+        }
+        _ => items.push(json!({"role": "user", "content": [part]})),
+    }
+    Value::Array(items)
 }
 
 /// Whether an output item asks ano to run a tool or answer an approval.

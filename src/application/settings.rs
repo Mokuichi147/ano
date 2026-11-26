@@ -45,6 +45,9 @@ pub struct AgentSettings {
     /// How the history is compacted: through `/responses/compact` (remote)
     /// or by a model-written summary. `auto` picks by endpoint.
     pub compaction: CompactionMethod,
+    /// Before a summary, clear the results of old tool calls when that
+    /// alone frees enough of the history.
+    pub clear_old_tool_results: bool,
     /// Soft per-run token limit, checked after each returned API response.
     pub max_total_tokens: Option<u64>,
     /// `reasoning.effort` sent to reasoning models; omitted when unset.
@@ -75,6 +78,7 @@ impl Default for AgentSettings {
             max_tool_output_bytes: 128 * 1024,
             compact_threshold_bytes: None,
             compaction: CompactionMethod::Auto,
+            clear_old_tool_results: true,
             max_total_tokens: None,
             reasoning_effort: None,
             reasoning_summary: None,

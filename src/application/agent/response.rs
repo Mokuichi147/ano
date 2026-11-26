@@ -90,6 +90,13 @@ pub(super) fn validate_response_status(response: &Value) -> Result<()> {
     }
 }
 
+/// Whether the endpoint stopped writing `response` at the output token
+/// limit: `max_output_tokens`, or what was left of the context window.
+pub(super) fn cut_off_at_output_limit(response: &Value) -> bool {
+    response["status"] == "incomplete"
+        && response["incomplete_details"]["reason"] == "max_output_tokens"
+}
+
 pub(super) fn extract_output_text(response: &Value) -> String {
     if let Some(text) = response["output_text"].as_str() {
         if !text.trim().is_empty() {

@@ -26,13 +26,23 @@ pub use crate::infrastructure::fs::display_path;
 
 const SKILL_FILE: &str = "SKILL.md";
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SkillSettings {
     pub enabled: bool,
     /// Where skills are kept. Defaults to `skills` in the platform's data
     /// directory for ano.
     pub dir: Option<PathBuf>,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for SkillSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
 }
 
 impl SkillSettings {

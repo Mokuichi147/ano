@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -49,6 +51,7 @@ async fn unfinished_plans_continue_within_budget_and_resume_across_cli_processes
     .unwrap();
     let run = |prompt: &'static str| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+        command.envs(common::isolated_env());
         command
             .current_dir(directory.path())
             .env("OPENAI_BASE_URL", &endpoint)
@@ -154,6 +157,7 @@ async fn run_with_a_goal_reports_verified_criteria() {
     let config = tempfile::NamedTempFile::new().unwrap();
     let ano = |arguments: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+        command.envs(common::isolated_env());
         command
             .current_dir(directory.path())
             .arg("--config")

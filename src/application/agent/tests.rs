@@ -12,7 +12,9 @@ use crate::{
     application::{
         approval::{AlwaysApprove, DenyApproval},
         input::InputPart,
-        ports::{ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest},
+        ports::{
+            ApprovalDecision, ApprovalHandler, ApprovalSource, McpApprovalRequest, ResponseDelta,
+        },
         registry::ToolRegistry,
         settings::AgentSettings,
     },
@@ -906,7 +908,9 @@ async fn unfinished_responses_never_execute_tools_or_succeed_with_partial_text()
         for includes_tool in [false, true] {
             let mut response = text_response("unfinished", "This is only a partial answer");
             response["status"] = json!(status);
-            response["incomplete_details"] = json!({"reason": "max_output_tokens"});
+            // A response cut off at the output token limit is asked again
+            // once; see the tests of that below.
+            response["incomplete_details"] = json!({"reason": "content_filter"});
             if includes_tool {
                 response["output"]
                     .as_array_mut()
@@ -926,6 +930,168 @@ async fn unfinished_responses_never_execute_tools_or_succeed_with_partial_text()
             assert_eq!(server.requests.lock().unwrap().len(), 2);
         }
     }
+}
+
+/// A response the endpoint stopped writing at the output token limit, with
+/// a tool call that looks complete.
+fn cut_off_response(id: &str) -> Value {
+    let mut response =
+        json!({"id": id, "status": "incomplete", "output": calls(&["record_action"])});
+    response["incomplete_details"] = json!({"reason": "max_output_tokens"});
+    response
+}
+
+#[tokio::test]
+async fn a_response_cut_off_at_the_output_limit_is_discarded_and_asked_again() {
+    let server = mock_responses(vec![
+        search_response("search", "record_action"),
+        cut_off_response("cut"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new()).with_context_window(Some(1_000_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    // The call of the cut-off response did not run.
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    // The same input is sent again with the notice after it, and the
+    // cut-off response is not part of it.
+    let (cut, again) = (
+        requests[1]["input"].as_array().unwrap(),
+        requests[2]["input"].as_array().unwrap(),
+    );
+    assert_eq!(again[..cut.len()], cut[..]);
+    assert_eq!(again.len(), cut.len() + 1);
+    assert!(again[cut.len()]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("cut off at the output token limit"));
+    assert_eq!(requests[1]["instructions"], requests[2]["instructions"]);
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::RuntimeNotice { text, .. } if text.contains("cut off")
+    )));
+}
+
+#[tokio::test]
+async fn a_cut_off_response_and_its_notice_are_not_kept_in_the_session() {
+    let server = mock_responses(vec![
+        search_response("search", "record_action"),
+        cut_off_response("cut"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cut.json");
+    let binding = SessionBinding::new(&ToolContext::default(), &server.url).unwrap();
+    let mut session = Session::open(&path, binding, false).unwrap();
+
+    let result = agent.run_in_session(request(), &mut session).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    let saved = Session::inspect(&path).unwrap();
+    let history = serde_json::to_string(&saved.history).unwrap();
+    assert!(!history.contains("call_record_action"), "{history}");
+    assert!(!history.contains("cut off at the output token limit"));
+    assert!(history.contains("Finished"));
+    // The request after the cut-off carried the notice.
+    let requests = server.requests.lock().unwrap();
+    assert!(requests[2]["input"]
+        .to_string()
+        .contains("cut off at the output token limit"));
+    assert!(!requests[2]["input"]
+        .to_string()
+        .contains("call_record_action"));
+}
+
+#[tokio::test]
+async fn the_streamed_part_of_a_cut_off_response_is_closed() {
+    let mut cut = text_response("cut", "The first half of an ans");
+    cut["status"] = json!("incomplete");
+    cut["incomplete_details"] = json!({"reason": "max_output_tokens"});
+    let server = mock_responses(vec![cut, text_response("done", "Finished")]).await;
+    let streamed = Arc::new(Mutex::new(Vec::<String>::new()));
+    let sink = Arc::clone(&streamed);
+    let mut agent =
+        agent(ToolRegistry::new(), Vec::new()).with_text_listener(Arc::new(move |delta| {
+            sink.lock().unwrap().push(match delta {
+                ResponseDelta::Text(text) => text.to_string(),
+                ResponseDelta::MessageDone => "<done>".into(),
+                ResponseDelta::Reasoning(_) => "<reasoning>".into(),
+            })
+        }));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let streamed = streamed.lock().unwrap().join("");
+    // The cut-off text ends before the answer starts.
+    let (cut, answer) = streamed.split_once("Finished").unwrap();
+    assert!(
+        cut.contains("The first half of an ans") && cut.ends_with("<done>"),
+        "{streamed}"
+    );
+    assert!(answer.ends_with("<done>"), "{streamed}");
+}
+
+#[tokio::test]
+async fn a_second_cut_off_in_a_row_fails_the_run() {
+    let server = mock_responses(vec![
+        search_response("search", "record_action"),
+        cut_off_response("cut1"),
+        cut_off_response("cut2"),
+    ])
+    .await;
+    let (registry, count) = counting_registry();
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let error = agent.run(request()).await.unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("incomplete response (max_output_tokens)"),
+        "{error:#}"
+    );
+    assert_eq!(count.load(Ordering::SeqCst), 0);
+    assert_eq!(server.requests.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn the_output_limit_notice_joins_a_user_message_that_ends_the_input() {
+    use super::with_notice;
+    let text = |item: &Value, part: usize| item["content"][part]["text"].clone();
+    // After a tool result, it is a message of its own.
+    let input = with_notice(
+        json!([{"type": "function_call_output", "call_id": "c", "output": "{}"}]),
+        "notice",
+    );
+    assert_eq!(input.as_array().unwrap().len(), 2);
+    assert_eq!(input[1]["role"], "user");
+    assert_eq!(text(&input[1], 0), "notice");
+    // After the user's message, it is a part of that message.
+    let parts = json!([{"role": "user", "content": [{"type": "input_text", "text": "do it"}]}]);
+    let input = with_notice(parts, "notice");
+    assert_eq!(input.as_array().unwrap().len(), 1);
+    assert_eq!(
+        (text(&input[0], 0), text(&input[0], 1)),
+        (json!("do it"), json!("notice"))
+    );
+    let input = with_notice(json!([{"role": "user", "content": "do it"}]), "notice");
+    assert_eq!(
+        (text(&input[0], 0), text(&input[0], 1)),
+        (json!("do it"), json!("notice"))
+    );
 }
 
 #[tokio::test]
@@ -2423,6 +2589,191 @@ async fn the_history_is_compacted_before_it_fills_the_context_window() {
     assert!(requests[2]["input"]
         .to_string()
         .contains("Loaded record_action"));
+}
+
+/// A registry whose `read_big` returns 20 kB.
+fn big_result_registry() -> ToolRegistry {
+    let registry = ToolRegistry::new();
+    registry
+        .register(
+            ToolDefinition::new(
+                "read_big",
+                "Read a big document",
+                json!({"type": "object", "properties": {}, "additionalProperties": false}),
+            ),
+            |_arguments| async move { Ok(json!({"text": "x".repeat(20_000)})) },
+        )
+        .unwrap();
+    registry
+}
+
+fn read_big(id: &str) -> Value {
+    function_call(id, "read_big", json!({}))
+}
+
+#[tokio::test]
+async fn old_tool_results_are_cleared_before_a_summary_is_asked_for() {
+    let server = mock_responses(vec![
+        search_response("s", "read_big"),
+        read_big("a"),
+        read_big("b"),
+        read_big("c"),
+        read_big("d"),
+        with_usage(read_big("e"), 90_000),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let mut agent = agent(big_result_registry(), Vec::new()).with_context_window(Some(100_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    // No request asked for a summary.
+    assert_eq!(requests.len(), 7);
+    let last = requests[6]["input"].as_array().unwrap();
+    let output = |call_id: &str| {
+        last.iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == call_id)
+            .unwrap_or_else(|| panic!("no result of {call_id}"))["output"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    // The old results are cleared in place; the recent ones and the search
+    // results, which say what is loaded, are as they were.
+    for old in ["a", "b", "c"] {
+        let cleared: Value = serde_json::from_str(&output(old)).unwrap();
+        assert_eq!(cleared["cleared"], true, "{old}");
+        assert!(cleared["original_bytes"].as_u64().unwrap() > 20_000);
+    }
+    for recent in ["d", "e"] {
+        assert!(output(recent).len() > 20_000, "{recent}");
+    }
+    assert!(output("s_search").contains("read_big"));
+    assert!(requests[6]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool["name"] == "read_big"));
+    assert!(result.events.iter().any(|event| matches!(
+        event,
+        AgentEvent::ContextCompacted { record, .. } if record.cleared_tool_results()
+    )));
+    assert_eq!(result.usage.compactions, 0);
+}
+
+#[test]
+fn results_that_a_read_cannot_fetch_again_are_not_cleared() {
+    let agent = agent(ToolRegistry::new(), Vec::new())
+        .with_context_window(Some(100_000))
+        .with_extension(Arc::new(ProbeExtension::new(probe_definition("probe"))));
+    let long = "x".repeat(30_000);
+    let mut history = vec![json!({"role": "user", "content": "do it"})];
+    for (id, name) in [
+        ("search", "tool_search"),
+        ("delegate", "delegate_task"),
+        ("skill", "skill_read"),
+        ("probe", "probe"),
+        ("read", "workspace_read"),
+    ] {
+        history
+            .push(json!({"type": "function_call", "call_id": id, "name": name, "arguments": "{}"}));
+        history.push(json!({"type": "function_call_output", "call_id": id, "output": long}));
+    }
+    // The recent step that stays as it is.
+    history.push(json!({"type": "function_call", "call_id": "last", "name": "workspace_read", "arguments": "{}"}));
+    history.push(json!({"type": "function_call_output", "call_id": "last", "output": "ok"}));
+    let split = history.len() - 2;
+
+    let keep = agent.kept_tool_results();
+    let keep: Vec<&str> = keep.iter().map(String::as_str).collect();
+    // Only the read is cleared, which alone does not halve the history.
+    assert!(super::cleared_tool_results(&history, split, &keep)
+        .unwrap()
+        .is_none());
+    history.insert(1, json!({"type": "function_call", "call_id": "big", "name": "workspace_read", "arguments": "{}"}));
+    history.insert(
+        2,
+        json!({"type": "function_call_output", "call_id": "big", "output": "y".repeat(200_000)}),
+    );
+    let (cleared, _) = super::cleared_tool_results(&history, split + 2, &keep)
+        .unwrap()
+        .unwrap();
+    let output = |id: &str| {
+        cleared
+            .iter()
+            .find(|item| item["type"] == "function_call_output" && item["call_id"] == id)
+            .unwrap()["output"]
+            .as_str()
+            .unwrap()
+            .len()
+    };
+    for kept in ["search", "delegate", "skill", "probe"] {
+        assert_eq!(output(kept), 30_000, "{kept}");
+    }
+    assert!(output("read") < 1024 && output("big") < 1024);
+}
+
+#[tokio::test]
+async fn a_history_cleared_before_is_summarized_when_it_fills_again() {
+    let server = mock_responses(vec![
+        search_response("s", "read_big"),
+        read_big("a"),
+        read_big("b"),
+        read_big("c"),
+        read_big("d"),
+        with_usage(read_big("e"), 90_000),
+        with_usage(read_big("f"), 90_000),
+        text_response("summary", "Read six documents"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let mut agent = agent(big_result_registry(), Vec::new()).with_context_window(Some(100_000));
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 9);
+    assert!(requests[7]["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You compact the history"));
+    assert!(requests[8]["input"]
+        .to_string()
+        .contains("Read six documents"));
+    assert_eq!(result.usage.compactions, 1);
+}
+
+#[tokio::test]
+async fn old_tool_results_are_kept_when_clearing_is_turned_off() {
+    let server = mock_responses(vec![
+        search_response("s", "read_big"),
+        read_big("a"),
+        read_big("b"),
+        read_big("c"),
+        read_big("d"),
+        with_usage(read_big("e"), 90_000),
+        text_response("summary", "Read five documents"),
+        text_response("done", "Finished"),
+    ])
+    .await;
+    let mut agent = agent(big_result_registry(), Vec::new()).with_context_window(Some(100_000));
+    agent.settings.clear_old_tool_results = false;
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+
+    let result = agent.run(request()).await.unwrap();
+
+    assert_eq!(result.text, "Finished");
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 8);
+    assert!(requests[6]["instructions"]
+        .as_str()
+        .unwrap()
+        .starts_with("You compact the history"));
 }
 
 #[tokio::test]

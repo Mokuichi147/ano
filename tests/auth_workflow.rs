@@ -1,8 +1,11 @@
+mod common;
+
 use serde_json::{json, Value};
 use std::process::{Command, Output};
 
 fn run(directory: &std::path::Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(directory)
         // Keep the user's .env in the OS config directory from setting them again.
         .env("HOME", directory)

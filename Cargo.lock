@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "adler2"
+version = "2.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
+
+[[package]]
 name = "agent-client-protocol"
 version = "3.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -604,6 +610,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32fast"
+version = "1.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd9ae8fcb3ea71b0b26338b4ffb13006bb175de8fd07921089a906ce7e5e6945"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "crokey"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1057,6 +1072,17 @@ name = "fixedbitset"
 version = "0.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
+
+[[package]]
+name = "flate2"
+version = "1.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "626d4928326b646e70f65ed36fc7cf9f206bdb68a0019ee7c6b4709da4e084c4"
+dependencies = [
+ "crc32fast",
+ "miniz_oxide",
+ "zlib-rs",
+]
 
 [[package]]
 name = "fnv"
@@ -2171,6 +2197,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
+name = "miniz_oxide"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b63fbc4a50860e98e7b2aa7804ded1db5cbc3aff9193adaff57a6931bf7c4b4c"
+dependencies = [
+ "adler2",
+ "simd-adler32",
+]
+
+[[package]]
 name = "mio"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2184,9 +2220,9 @@ dependencies = [
 
 [[package]]
 name = "naui"
-version = "0.9.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcf2885a44161cefa48ac300b95f7d03f8985884365e33955699ed29afdc58d0"
+checksum = "bb503d77c00d05d2b1dbc84551bed1bfcd3b6b1456a1306880e226822e3bcee7"
 dependencies = [
  "naui-core",
  "naui-gtk",
@@ -2197,15 +2233,15 @@ dependencies = [
 
 [[package]]
 name = "naui-core"
-version = "0.9.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c397323f0f1cb9ebe5d7c9cc8bdbcdb8f67b8ced955915b0169cb4f96c64eef9"
+checksum = "c860c39178605ff1ca3904535e0781ad79cc1803147c98272c20febf6dba0ebb"
 
 [[package]]
 name = "naui-gtk"
-version = "0.9.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3d66aea263b33ce941ef58e2c053fcb328e2847dd4b2ce1594080da574b6ffd0"
+checksum = "c01f067d7c40fdb016e01cd7fb605dbd15425432ef7f882bf7c19645adfeffd3"
 dependencies = [
  "gtk4",
  "libadwaita",
@@ -2215,9 +2251,9 @@ dependencies = [
 
 [[package]]
 name = "naui-macos"
-version = "0.9.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "847fc02407be654aa32fe70de95989b13e86afae70577ed17c7c055787ee71ac"
+checksum = "428d88149ee5cc7aebda93695959a7e93530755240a18bdea7d85e3b6116d51e"
 dependencies = [
  "block2",
  "dispatch2",
@@ -2233,9 +2269,9 @@ dependencies = [
 
 [[package]]
 name = "naui-web"
-version = "0.9.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "43c611a80b5dda9f83bcb5b1cd9d8b5c0f965ceccd93be6757c848dd7adcff90"
+checksum = "9f6483dc4080e41f72c78d2c0037e7183e4ec3a2b602528337f96032f64d4aed"
 dependencies = [
  "js-sys",
  "naui-core",
@@ -2245,21 +2281,24 @@ dependencies = [
 
 [[package]]
 name = "naui-windows"
-version = "0.9.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80042c725bb0b45c2b248cdb9598c666c850102b8fbb28c3b64988b63e86f572"
+checksum = "6548b88026f869fd87ebed42948f6ecb29aebc4a2710184d567fa45696f8fb9f"
 dependencies = [
+ "flate2",
  "naui-core",
  "naui-winui3",
  "windows",
+ "windows-collections",
  "windows-core",
+ "windows-numerics",
 ]
 
 [[package]]
 name = "naui-winui3"
-version = "0.9.0"
+version = "0.20.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bf8608ad9597712fab8008397075ffbe9d4bb82d51c9f216da6eca21dccaa94"
+checksum = "fb9b363168e477d12e7eda9d1ea78eeefe5994540aaa57e1692c57f4d7bae168"
 dependencies = [
  "windows",
  "windows-collections",
@@ -3523,6 +3562,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "simd-adler32"
+version = "0.3.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+
+[[package]]
 name = "simd_cesu8"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4710,6 +4755,12 @@ dependencies = [
  "quote",
  "syn 3.0.6",
 ]
+
+[[package]]
+name = "zlib-rs"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa76918995d776d9dd34d371030be228d021137449771493d56e29f77e4148ac"
 
 [[package]]
 name = "zmij"
