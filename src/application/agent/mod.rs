@@ -805,15 +805,21 @@ impl Agent {
             });
         }
         let plan = Mutex::new(initial_plan);
+        let keep_tools = target.client.keeps_loaded_tools();
         let mut active = session
             .as_ref()
             .filter(|_| replay)
             .map(|session| {
                 // A new turn starts with one search's worth, the newest,
-                // so earlier turns' tools do not weigh on every request.
+                // so earlier turns' tools do not weigh on every request,
+                // unless the endpoint needs the tool list to stay the same.
                 ActiveTools::from_history(
                     &session.data().history,
-                    self.settings.tool_discovery_limit.max(1),
+                    if keep_tools {
+                        usize::MAX
+                    } else {
+                        self.settings.tool_discovery_limit.max(1)
+                    },
                 )
             })
             .unwrap_or_default();
@@ -1123,7 +1129,9 @@ impl Agent {
             }
             if let Some(selection) = selection {
                 active.merge(selection);
-                active.keep_newest(loaded_tools_limit(self.settings.tool_discovery_limit));
+                if !keep_tools {
+                    active.keep_newest(loaded_tools_limit(self.settings.tool_discovery_limit));
+                }
             }
 
             // Commentary is progress, including when it shares a response with

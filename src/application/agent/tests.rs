@@ -3174,3 +3174,78 @@ async fn the_recorded_original_input_leaves_out_the_local_time() {
     assert_eq!(original, sent);
     assert_eq!(runtime, json!([]));
 }
+
+/// An endpoint that needs the tool list to stay the same (like Anthropic).
+struct KeepingTools(OpenAiClient);
+
+#[async_trait]
+impl crate::application::ports::ResponsesApi for KeepingTools {
+    fn base_url(&self) -> &str {
+        self.0.base_url()
+    }
+    async fn create_response(&self, payload: &Value) -> Result<Value> {
+        self.0.create_response(payload).await
+    }
+    async fn compact_response(&self, payload: &Value) -> Result<Value> {
+        self.0.compact_response(payload).await
+    }
+    fn keeps_loaded_tools(&self) -> bool {
+        true
+    }
+}
+
+#[tokio::test]
+async fn endpoints_that_keep_loaded_tools_never_drop_one() {
+    let server = mock_responses(vec![
+        search_response("first", "record action"),
+        search_response("second", "read file"),
+        search_response("third", "send email"),
+        text_response("done", "Done"),
+        text_response("next", "Next"),
+    ])
+    .await;
+    let (registry, _count) = counting_registry();
+    for (name, description) in [
+        ("read_file", "Read a file"),
+        ("send_email", "Send an email"),
+    ] {
+        registry
+            .register(
+                ToolDefinition::new(
+                    name,
+                    description,
+                    json!({"type": "object", "properties": {}}),
+                ),
+                |_arguments| async move { Ok(json!({"ok": true})) },
+            )
+            .unwrap();
+    }
+    let mut agent = agent(registry, Vec::new());
+    agent.client = Arc::new(KeepingTools(OpenAiClient::new("test", &server.url)));
+    agent.settings.max_tool_rounds = 5;
+    agent.settings.tool_discovery_limit = 1;
+    let binding = SessionBinding::new(&ToolContext::default(), &server.url).unwrap();
+    let mut store = crate::infrastructure::memory_store::MemoryConversation::new(binding);
+
+    agent.run_in_session(request(), &mut store).await.unwrap();
+    agent.run_in_session(request(), &mut store).await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let offered = |index: usize| -> BTreeSet<String> {
+        requests[index]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| ["record_action", "read_file", "send_email"].contains(name))
+            .map(str::to_string)
+            .collect()
+    };
+    let all: BTreeSet<String> = ["record_action", "read_file", "send_email"]
+        .map(str::to_string)
+        .into_iter()
+        .collect();
+    // Past the limit of two, and in the next turn, every loaded tool stays.
+    assert_eq!(offered(3), all);
+    assert_eq!(offered(4), all);
+}

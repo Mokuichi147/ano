@@ -728,3 +728,96 @@ fn the_anthropic_wire_api_defaults_to_anthropics_endpoint_and_key() {
     settings.auth = crate::infrastructure::openai::ApiAuth::Chatgpt;
     assert!(create_client(&settings).is_err());
 }
+
+fn tool_search_tool() -> Value {
+    json!({"type": "function", "name": "tool_search", "description": "Find tools",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}})
+}
+
+fn read_tool() -> Value {
+    json!({"type": "function", "name": "read", "description": "Read a file",
+        "parameters": {"type": "object", "properties": {"path": {"type": "string"}}}})
+}
+
+#[test]
+fn tools_a_search_loaded_are_deferred_and_keep_the_earlier_thinking() {
+    let user = json!({"role": "user", "content": [{"type": "input_text", "text": "読んで"}]});
+    let first =
+        json!({"model": "m", "instructions": "i", "tools": [tool_search_tool()], "input": [user]});
+    let request = messages_request(&first, &LOCAL, true).unwrap();
+    let response = request
+        .response(json!({
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "m",
+            "content": [
+                {"type": "thinking", "thinking": "探す", "signature": "sig-search"},
+                {"type": "tool_use", "id": "toolu_s", "name": "tool_search", "input": {"query": "read"}},
+            ],
+            "stop_reason": "tool_use",
+        }))
+        .unwrap();
+    let mut input = vec![user.clone()];
+    input.extend(response["output"].as_array().unwrap().iter().cloned());
+    let output = json!({"tools": [
+        {"kind": "local", "name": "read", "description": "Read a file"},
+        {"kind": "local", "name": "gone", "description": "No longer offered"},
+    ], "message": "loaded"});
+    input.push(
+        json!({"type": "function_call_output", "call_id": "toolu_s", "output": output.to_string()}),
+    );
+
+    // 読み込んだ tool が増えても、前の思考はそのまま送れる。
+    let next = json!({"model": "m", "instructions": "i",
+        "tools": [tool_search_tool(), read_tool()], "input": input});
+    let request = messages_request(&next, &LOCAL, true).unwrap();
+    assert!(request.has_thinking);
+    let tools = request.body["tools"].as_array().unwrap();
+    assert!(tools[0].get("defer_loading").is_none());
+    assert_eq!(tools[1]["name"], "read");
+    assert_eq!(tools[1]["defer_loading"], true);
+    let messages = request.body["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["content"][0]["signature"], "sig-search");
+    // 検索の結果は、送っている tool の参照だけになる。
+    assert_eq!(
+        messages[2]["content"],
+        json!([{"type": "tool_result", "tool_use_id": "toolu_s",
+            "content": [{"type": "tool_reference", "tool_name": "read"}]}])
+    );
+
+    // 参照の後の思考は、参照した定義も前置きに数える。
+    let response = request
+        .response(json!({
+            "id": "msg_2", "type": "message", "role": "assistant", "model": "m",
+            "content": [
+                {"type": "thinking", "thinking": "読む", "signature": "sig-read"},
+                {"type": "tool_use", "id": "toolu_r", "name": "read", "input": {"path": "a"}},
+            ],
+            "stop_reason": "tool_use",
+        }))
+        .unwrap();
+    input.extend(response["output"].as_array().unwrap().iter().cloned());
+    input.push(json!({"type": "function_call_output", "call_id": "toolu_r", "output": "text"}));
+    let third = json!({"model": "m", "instructions": "i",
+        "tools": [tool_search_tool(), read_tool()], "input": input.clone()});
+    let request = messages_request(&third, &LOCAL, true).unwrap();
+    let messages = request.body["messages"].as_array().unwrap();
+    assert_eq!(messages[1]["content"][0]["signature"], "sig-search");
+    assert_eq!(messages[3]["content"][0]["signature"], "sig-read");
+    // 参照した tool の定義が変わると、その後の思考だけを外す。
+    let mut changed_read = read_tool();
+    changed_read["description"] = json!("Read a whole file");
+    let changed = json!({"model": "m", "instructions": "i",
+        "tools": [tool_search_tool(), changed_read], "input": input.clone()});
+    let messages = messages_request(&changed, &LOCAL, true).unwrap().body["messages"].clone();
+    assert_eq!(messages[1]["content"][0]["signature"], "sig-search");
+    assert_eq!(messages[3]["content"][0]["type"], "tool_use");
+
+    // すべての tool が遅延になる要求（API が受け付けない）では遅延させない。
+    let only_read =
+        json!({"model": "m", "instructions": "i", "tools": [read_tool()], "input": input});
+    let body = messages_request(&only_read, &LOCAL, true).unwrap().body;
+    assert!(body["tools"][0].get("defer_loading").is_none());
+    assert_eq!(
+        body["messages"][2]["content"][0]["content"],
+        output.to_string()
+    );
+}

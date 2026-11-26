@@ -11,9 +11,17 @@
 //! ないと、そのブロックを受け付けない（tool の追加や履歴の圧縮で変わる）。
 //! そこで作られたときの前置きのハッシュも保存し、前置きが変わったブロックは
 //! 送らない。
+//!
+//! `tool_search` で読み込んだ tool は `defer_loading` にして、その検索の結果に
+//! `tool_reference` を添える。遅延読み込みの tool は参照されるまで前置きに
+//! 含まれないので、tool を読み込んでも `tools` の前置きは変わらず、それまでの
+//! 思考ブロックとプロンプトキャッシュが使えたままになる。
 
 use super::openai::{is_anthropic_endpoint, truncate, OpenAiClient, Unavailable};
-use crate::application::ports::{replay_deltas, DeltaSink, ResponseDelta, ResponsesApi};
+use crate::{
+    application::ports::{replay_deltas, DeltaSink, ResponseDelta, ResponsesApi},
+    domain::tool::TOOL_SEARCH_NAME,
+};
 use anyhow::{anyhow, bail, Context, Result};
 use async_trait::async_trait;
 use eventsource_stream::Eventsource;
@@ -21,6 +29,7 @@ use futures::StreamExt;
 use reqwest::{Response, StatusCode};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 const ENDPOINT: &str = "messages";
 /// `max_output_tokens` がないときの出力の上限。ストリームしない要求は
@@ -160,6 +169,11 @@ impl ResponsesApi for AnthropicClient {
         true
     }
 
+    /// 読み込んだ tool を外すと `tools` が変わり、思考とキャッシュが無効になる。
+    fn keeps_loaded_tools(&self) -> bool {
+        true
+    }
+
     async fn list_models(&self) -> Result<Option<Vec<String>>> {
         self.models().await
     }
@@ -238,6 +252,27 @@ fn messages_request(payload: &Value, options: &Options, keep_thinking: bool) -> 
         .filter(|text| !text.trim().is_empty())
         .unwrap_or_default()
         .to_string();
+    let mut tools = payload
+        .get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(anthropic_tool)
+        .collect::<Result<Vec<_>>>()?;
+    let searched = match payload.get("input") {
+        Some(Value::Array(items)) => searched_tools(items, &tools),
+        _ => Searched::default(),
+    };
+    // 読み込んだ tool の定義。参照された位置で前置きに数える。
+    let mut deferred = BTreeMap::new();
+    for tool in &mut tools {
+        let name = tool["name"].as_str().unwrap_or_default();
+        if searched.names.contains(name) {
+            deferred.insert(name.to_string(), tool.clone());
+            tool["defer_loading"] = json!(true);
+        }
+    }
+
     let mut turns = Vec::new();
     match payload.get("input") {
         Some(Value::String(text)) => push_blocks(
@@ -247,24 +282,23 @@ fn messages_request(payload: &Value, options: &Options, keep_thinking: bool) -> 
         ),
         Some(Value::Array(items)) => {
             for item in items {
-                append_item(&mut turns, &mut system, item)?;
+                append_item(&mut turns, &mut system, item, &searched)?;
             }
         }
         None | Some(Value::Null) => {}
         Some(_) => bail!("input は文字列または配列で指定してください"),
     }
 
-    let tools = payload
-        .get("tools")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .map(anthropic_tool)
-        .collect::<Result<Vec<_>>>()?;
-
     let mut prefix = Sha256::new();
     feed(&mut prefix, "system", &json!(system));
-    feed(&mut prefix, "tools", &json!(tools));
+    feed(
+        &mut prefix,
+        "tools",
+        &json!(tools
+            .iter()
+            .filter(|tool| tool["defer_loading"] != true)
+            .collect::<Vec<_>>()),
+    );
     let mut has_thinking = false;
     let mut messages: Vec<Value> = Vec::new();
     for turn in turns {
@@ -286,6 +320,11 @@ fn messages_request(payload: &Value, options: &Options, keep_thinking: bool) -> 
                 }
             };
             feed(&mut prefix, "block", &block);
+            for name in references(&block) {
+                if let Some(tool) = deferred.get(name) {
+                    feed(&mut prefix, "tool", tool);
+                }
+            }
             content.push(block);
         }
         feed_marker(&mut prefix, "end");
@@ -385,7 +424,12 @@ fn messages_request(payload: &Value, options: &Options, keep_thinking: bool) -> 
 /// 履歴の 1 項目を、その役割のメッセージのブロックにする。同じ役割が続く
 /// 項目は 1 つのメッセージにまとめる（1 つの応答の思考・本文・呼び出しや、
 /// 続けて返す複数の tool の結果）。
-fn append_item(turns: &mut Vec<Turn>, system: &mut String, item: &Value) -> Result<()> {
+fn append_item(
+    turns: &mut Vec<Turn>,
+    system: &mut String,
+    item: &Value,
+    searched: &Searched,
+) -> Result<()> {
     let kind = item
         .get("type")
         .and_then(Value::as_str)
@@ -457,6 +501,18 @@ fn append_item(turns: &mut Vec<Turn>, system: &mut String, item: &Value) -> Resu
                 Value::Null => {}
                 output => result["content"] = json!(output.to_string()),
             }
+            if let Some(names) = item["call_id"]
+                .as_str()
+                .and_then(|id| searched.results.get(id))
+            {
+                // 検索が読み込んだ tool を参照し、定義をここで見せる。API は
+                // 参照とテキストを混ぜた結果を受け付けないので、参照だけにする。
+                // 結果の名前と説明は、参照した定義に含まれる。
+                result["content"] = json!(names
+                    .iter()
+                    .map(|name| json!({"type": "tool_reference", "tool_name": name}))
+                    .collect::<Vec<_>>());
+            }
             push_blocks(turns, "user", vec![Block::Plain(result)]);
         }
         "reasoning" => {
@@ -483,6 +539,80 @@ fn append_item(turns: &mut Vec<Turn>, system: &mut String, item: &Value) -> Resu
         kind => bail!("Anthropic の接続先へ送れない履歴の項目です: {kind}"),
     }
     Ok(())
+}
+
+/// 履歴の `tool_search` が読み込んだ tool のうち、この要求の `tools` にあるもの。
+#[derive(Default)]
+struct Searched {
+    /// 検索の呼び出しの id -> 読み込んだ tool の名前（結果の順）。
+    results: BTreeMap<String, Vec<String>>,
+    /// どれかの検索が読み込んだ tool の名前。
+    names: BTreeSet<String>,
+}
+
+/// 履歴の `tool_search` の結果を読む。エージェントは読み込んだ tool を同じ会話の
+/// 間は外さない（[`ResponsesApi::keeps_loaded_tools`]）ので、参照した tool は
+/// その後の要求の `tools` にも残る。結果を読めない検索や、`tools` にない tool は
+/// 参照しない。`tools` がすべて遅延読み込みになる場合（API が受け付けない）は
+/// 何も遅延させない。
+fn searched_tools(items: &[Value], tools: &[Value]) -> Searched {
+    let offered: BTreeSet<&str> = tools
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    let searches: BTreeSet<&str> = items
+        .iter()
+        .filter(|item| item["type"] == "function_call" && item["name"] == TOOL_SEARCH_NAME)
+        .filter_map(|item| item["call_id"].as_str())
+        .collect();
+    let mut searched = Searched::default();
+    for item in items {
+        let Some(id) = item["call_id"]
+            .as_str()
+            .filter(|id| item["type"] == "function_call_output" && searches.contains(id))
+        else {
+            continue;
+        };
+        let Some(results) = item["output"]
+            .as_str()
+            .and_then(|output| serde_json::from_str::<Value>(output).ok())
+            .and_then(|output| output["tools"].as_array().cloned())
+        else {
+            continue;
+        };
+        let mut names = Vec::new();
+        for result in &results {
+            // 直接つなぐ MCP の tool は関数名で送られる。
+            let Some(name) = result["function_name"]
+                .as_str()
+                .or_else(|| result["name"].as_str())
+                .filter(|name| offered.contains(name) && *name != TOOL_SEARCH_NAME)
+            else {
+                continue;
+            };
+            if !names.iter().any(|known| known == name) {
+                names.push(name.to_string());
+            }
+        }
+        if !names.is_empty() {
+            searched.names.extend(names.iter().cloned());
+            searched.results.insert(id.to_string(), names);
+        }
+    }
+    if offered.iter().all(|name| searched.names.contains(*name)) {
+        return Searched::default();
+    }
+    searched
+}
+
+/// `tool_result` が参照する tool の名前。
+fn references(block: &Value) -> impl Iterator<Item = &str> {
+    block["content"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|part| part["type"] == "tool_reference")
+        .filter_map(|part| part["tool_name"].as_str())
 }
 
 /// Anthropic の tool の id に使えるのは英数字と `_`・`-` だけ。ほかの接続先が
@@ -848,7 +978,7 @@ fn record_prefixes(output: &mut [Value], mut prefix: Sha256) -> Result<()> {
     let mut turns = Vec::new();
     let mut system = String::new();
     for item in output.iter() {
-        append_item(&mut turns, &mut system, item)?;
+        append_item(&mut turns, &mut system, item, &Searched::default())?;
     }
     let mut thinking = output.iter_mut().filter(|item| item["type"] == "reasoning");
     for turn in turns {

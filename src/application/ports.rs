@@ -66,6 +66,14 @@ pub trait ResponsesApi: Send + Sync {
         false
     }
 
+    /// Whether the tools that `tool_search` loads should stay loaded for the
+    /// rest of the conversation. Endpoints whose reasoning and prompt cache
+    /// depend on an unchanged tool list (Anthropic) need it; the others drop
+    /// the tools loaded longest ago to keep requests small.
+    fn keeps_loaded_tools(&self) -> bool {
+        false
+    }
+
     /// The models the endpoint offers (`GET /models`), sorted by name, or
     /// `None` when it does not list them (such as a ChatGPT subscription).
     async fn list_models(&self) -> Result<Option<Vec<String>>> {
@@ -139,6 +147,10 @@ impl<T: ResponsesApi + ?Sized> ResponsesApi for Arc<T> {
 
     fn requires_full_history(&self) -> bool {
         (**self).requires_full_history()
+    }
+
+    fn keeps_loaded_tools(&self) -> bool {
+        (**self).keeps_loaded_tools()
     }
 
     async fn list_models(&self) -> Result<Option<Vec<String>>> {

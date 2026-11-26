@@ -207,6 +207,13 @@ impl ResponsesApi for FallbackClient {
         true
     }
 
+    /// The same history may go to any provider, so keep what one needs.
+    fn keeps_loaded_tools(&self) -> bool {
+        self.targets
+            .iter()
+            .any(|target| target.client.keeps_loaded_tools())
+    }
+
     async fn list_models(&self) -> Result<Option<Vec<String>>> {
         self.targets[0].client.list_models().await
     }

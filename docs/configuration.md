@@ -125,7 +125,8 @@ ano model list --provider claude   # /v1/models の一覧
 
 - Messages API（`POST /v1/messages`）と Responses API の形式を相互に変換するため、tool の実行・ストリーミング表示・セッション・要約による圧縮・フォールバックはそのまま使えます。サーバーは応答を保存しないので、毎回履歴全体を送ります。公式の endpoint では、前回までの履歴をプロンプトキャッシュから読ませる指定（`cache_control`）を付けます。
 - 推論の強さ（`reasoning_effort`）は `output_config.effort` として送ります。Claude には推論しない段階がないため、`none` と `minimal` は `low`、`ultra` は `max` にします。`reasoning_summary` を指定すると思考の要約（`thinking.display = "summarized"`）を受け取り、進捗として表示します。指定しなければモデルの既定（Claude Opus 5.5 などは本文を返さない）のままです。
-- 思考のブロックは署名ごと履歴に保存し、次の要求で同じ位置に戻します。Claude は思考より前の指示・tool の定義・会話が作られたときと同じでないと思考を受け付けないため、それらが変わったとき（tool の追加、`instructions` の変更、履歴の圧縮）は、その後の思考を外して送ります。それでも拒否された場合は、思考を外して一度だけ送り直します。
+- 思考のブロックは署名ごと履歴に保存し、次の要求で同じ位置に戻します。Claude は思考より前の指示・tool の定義・会話が作られたときと同じでないと思考を受け付けないため、それらが変わったとき（`instructions` の変更、履歴の圧縮など）は、その後の思考を外して送ります。それでも拒否された場合は、思考を外して一度だけ送り直します。
+- `tool_search` で読み込んだ tool は遅延読み込み（`defer_loading`）として送り、その検索の結果を `tool_reference`（読み込んだ tool の参照）にします。遅延読み込みの tool は参照されるまで前置きに含まれないので、tool を読み込んでも、それまでの思考とプロンプトキャッシュはそのまま使えます。そのために、Claude では読み込んだ tool を同じ会話の間は外しません（`tool_discovery_limit` の2倍を超えても、次のターンでも残します）。会話で最初に遅延読み込みの tool を加えた要求だけは、キャッシュを読めません（思考は外れません）。
 - 出力の上限（`max_tokens`）は `agent.max_output_tokens`、未指定なら 64,000（ストリームしない要求は 16,000）です。古いモデルなど上限の小さいモデルでは `max_output_tokens` を指定してください。
 - コンテキストの長さは `/v1/models/{model}` の `max_input_tokens` から取得し、その手前で履歴を圧縮します。上限を超えた要求（`prompt is too long`）も圧縮して送り直します。
 - 使えるのは function tool（ano の tool と、stdio / Streamable HTTP で直接接続した MCP）だけです。Responses API 管理方式の MCP（既定の `transport`）と音声の入力は使えません。画像は使えます。
