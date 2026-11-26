@@ -48,7 +48,7 @@ fn completed(text: &str, plan: TaskPlan) -> JobOutcome {
 }
 
 fn state() -> WebhookState {
-    let mut config = AppConfig::default();
+    let mut config = AppConfig::without_features();
     config
         .environments
         .insert("default".into(), Default::default());

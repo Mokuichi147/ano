@@ -127,6 +127,10 @@ impl Server {
             saved: saved.map(|dir| Arc::new(SavedSessions::new(dir, "default").unwrap())),
             creating: tokio::sync::Mutex::new(()),
             turns: Mutex::new(JoinSet::new()),
+            config_path: workspace.path().join(".ano/config.toml"),
+            restart: Notify::new(),
+            restarting: std::sync::atomic::AtomicBool::new(false),
+            instance: "test".into(),
         });
         restore_sessions(&state).await;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -593,7 +597,7 @@ async fn ending_a_running_session_stops_its_turn_before_it_reports_the_end() {
 async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
     let start = |bind: &str, token: &str| {
         serve(
-            AppConfig::default(),
+            AppConfig::without_features(),
             Arc::new(McpPool::new(Vec::new())),
             ToolRegistry::new(),
             WebOptions {
@@ -604,6 +608,7 @@ async fn the_server_needs_a_token_fit_for_urls_and_cookies() {
                 token: Some(token.into()),
                 authenticate: true,
                 sessions_dir: None,
+                config_path: std::env::temp_dir().join("ano-missing-config.toml"),
             },
         )
     };
@@ -885,4 +890,77 @@ async fn the_home_page_gets_what_is_enabled() {
     for disabled in ["character", "objectives", "routines", "spaces"] {
         assert!(home[disabled].is_null(), "{disabled}: {home}");
     }
+}
+
+/// The settings page reads the config file, saves what it changes, refuses
+/// a save over a change made elsewhere, and restarts only with a config the
+/// server can start with.
+#[tokio::test]
+async fn settings_are_read_saved_and_put_into_effect_by_a_restart() {
+    let server = Server::start("http://127.0.0.1:9/v1").await;
+    let read = server
+        .request(reqwest::Method::GET, "/api/settings")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(read.status(), StatusCode::OK);
+    let read: Value = read.json().await.unwrap();
+    assert_eq!(read["exists"], false);
+    assert!(read["schema"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|field| field["key"] == "memory" && field["kind"] == "table"));
+    assert_eq!(read["defaults"]["memory"]["enabled"], true);
+
+    let save = |revision: Value, values: Value| {
+        server
+            .request(reqwest::Method::PUT, "/api/settings")
+            .json(&json!({"revision": revision, "values": values}))
+            .send()
+    };
+    let saved = save(
+        read["revision"].clone(),
+        json!({"memory": {"enabled": false}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(saved.status(), StatusCode::OK);
+    let saved: Value = saved.json().await.unwrap();
+    assert_eq!(saved["exists"], true);
+    assert_eq!(saved["values"]["memory"]["enabled"], false);
+    assert!(
+        !AppConfig::load(&server.state.config_path)
+            .unwrap()
+            .memory
+            .enabled
+    );
+
+    let stale = save(read["revision"].clone(), json!({})).await.unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let invalid = save(
+        saved["revision"].clone(),
+        json!({"agent": {"provider": "missing"}}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+
+    // Another site cannot save.
+    let forged = server
+        .http
+        .put(format!("{}/api/settings", server.url))
+        .header("origin", "https://attacker.example")
+        .json(&json!({"revision": saved["revision"], "values": {}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), StatusCode::FORBIDDEN);
+
+    let restart = server.post("/api/restart", json!({})).await;
+    assert_eq!(restart.status(), StatusCode::ACCEPTED);
+    assert!(server
+        .state
+        .restarting
+        .load(std::sync::atomic::Ordering::SeqCst));
 }

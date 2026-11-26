@@ -7,13 +7,15 @@
 //! and `ano mcp` commands.
 
 mod edit;
+pub mod schema;
 mod selection;
 #[cfg(test)]
 mod tests;
 
 pub use edit::{
-    remove_preset, remove_provider, rename_provider, save_mcp_tool_filters, set_role_preset,
-    update_preset, update_provider, use_provider, SettingValue,
+    read_settings, remove_preset, remove_provider, rename_provider, save_mcp_tool_filters,
+    save_settings, set_role_preset, update_preset, update_provider, use_provider, SettingValue,
+    SettingsConflict, SettingsFile,
 };
 pub use selection::{ModelRequest, ModelSelection, PresetSettings, DEFAULT_PRESET};
 
@@ -118,7 +120,7 @@ fn config_path_is_missing(path: &Path) -> bool {
     true
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppConfig {
     pub api: ApiSettings,
@@ -152,10 +154,46 @@ pub struct AppConfig {
     /// Small pages the agent builds for the user, shown in `ano web`.
     pub spaces: SpaceSettings,
     /// Plans the user mentions in passing, left in the feed as candidates
-    /// for reminders.
+    /// for reminders. On unless turned off, not as `AppConfig::default()`
+    /// settled it: whether what it needs is on is decided after parsing.
+    #[serde(default)]
     pub agenda: AgendaSettings,
-    /// Dated events from articles the user reads, kept in chronotope.
+    /// Dated events from articles the user reads, kept in chronotope. Its
+    /// default is its own, like `agenda`'s.
+    #[serde(default)]
     pub events: EventSettings,
+}
+
+/// Every feature that can run is on: one whose dependency is off by
+/// default (`[events]`, which needs `[history]`) waits for it.
+impl Default for AppConfig {
+    fn default() -> Self {
+        let mut config = Self {
+            api: Default::default(),
+            providers: Default::default(),
+            presets: Default::default(),
+            agent: Default::default(),
+            mcp_servers: Default::default(),
+            users: Default::default(),
+            environments: Default::default(),
+            webhook: Default::default(),
+            automation: Default::default(),
+            history: Default::default(),
+            skills: Default::default(),
+            character: Default::default(),
+            memory: Default::default(),
+            objectives: Default::default(),
+            routines: Default::default(),
+            feed: Default::default(),
+            spaces: Default::default(),
+            agenda: Default::default(),
+            events: Default::default(),
+        };
+        config
+            .settle_features(|_| false)
+            .expect("nothing is turned on explicitly");
+        config
+    }
 }
 
 impl AppConfig {
@@ -289,9 +327,55 @@ impl AppConfig {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        let config: Self = toml::from_str(text).context("failed to parse TOML")?;
+        let table: toml::Table = toml::from_str(text).context("failed to parse TOML")?;
+        let mut config: Self = table.clone().try_into().context("failed to parse TOML")?;
+        config.settle_features(|section| {
+            table
+                .get(section)
+                .and_then(|section| section.get("enabled"))
+                .and_then(toml::Value::as_bool)
+                == Some(true)
+        })?;
         config.validate()?;
         Ok(config)
+    }
+
+    /// Features are on unless the file turns them off, so one that needs
+    /// another follows it off: turning off `[feed]` also turns off
+    /// `[agenda]`. Only a feature that `explicit` says the file turns on
+    /// itself is an error without what it needs.
+    fn settle_features(&mut self, explicit: impl Fn(&str) -> bool) -> Result<()> {
+        if self.agenda.enabled && !(self.feed.enabled && self.routines.enabled) {
+            if explicit("agenda") {
+                bail!("[agenda] leaves candidates for reminders in the feed; set [feed] enabled = true and [routines] enabled = true");
+            }
+            self.agenda.enabled = false;
+        }
+        if self.events.enabled && !self.history.enabled {
+            if explicit("events") {
+                bail!("[events] keeps events in chronotope; set [history] enabled = true");
+            }
+            self.events.enabled = false;
+        }
+        Ok(())
+    }
+
+    /// The defaults with every optional feature off, for tests that must not
+    /// read or write the user's data directory.
+    #[cfg(test)]
+    pub(crate) fn without_features() -> Self {
+        let mut config = Self::default();
+        config.history.enabled = false;
+        config.skills.enabled = false;
+        config.character.enabled = false;
+        config.memory.enabled = false;
+        config.objectives.enabled = false;
+        config.routines.enabled = false;
+        config.feed.enabled = false;
+        config.spaces.enabled = false;
+        config.events.enabled = false;
+        config.agenda.enabled = false;
+        config
     }
 
     pub fn validate(&self) -> Result<()> {

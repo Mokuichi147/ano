@@ -450,3 +450,369 @@ fn set_string_list(entry: &mut dyn TableLike, key: &str, names: Option<&[String]
             .as_ref(),
     );
 }
+
+/// The config file as the settings page reads it.
+#[derive(Debug, Clone)]
+pub struct SettingsFile {
+    /// Whether the file exists; when it does not, saving creates it.
+    pub exists: bool,
+    /// Every key the file sets, as JSON in the shape of the file. `${VAR}`
+    /// references are left as written.
+    pub values: serde_json::Value,
+    /// Identifies the text read, so a save does not overwrite a change made
+    /// elsewhere since.
+    pub revision: String,
+}
+
+/// The file changed after the page read it.
+#[derive(Debug)]
+pub struct SettingsConflict;
+
+impl std::fmt::Display for SettingsConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("the config file was changed elsewhere; read it again")
+    }
+}
+
+impl std::error::Error for SettingsConflict {}
+
+/// Read the config file at `path` for the settings page.
+pub fn read_settings(path: &Path) -> Result<SettingsFile> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("failed to read config file {}", path.display()))
+        }
+    };
+    let values = settings_values(text.as_deref().unwrap_or_default())?;
+    Ok(SettingsFile {
+        exists: text.is_some(),
+        values,
+        revision: revision(text.as_deref()),
+    })
+}
+
+/// Make the config file at `path` set what `values` sets (in the shape
+/// [`read_settings`] returns) among the keys of [`super::schema::SCHEMA`].
+/// Only the keys that differ are written, so the rest of the file, its
+/// comments included, stays as it is. Refused with [`SettingsConflict`] when
+/// the file is no longer the one of `revision`, and like the other edits,
+/// when the result would not be a valid config.
+pub fn save_settings(path: &Path, revision_read: &str, values: &serde_json::Value) -> Result<()> {
+    edit_config_file(path, true, |text| {
+        let current = std::fs::metadata(path).is_ok().then_some(text);
+        if revision(current) != revision_read {
+            return Err(SettingsConflict.into());
+        }
+        with_settings(text, values)
+    })
+}
+
+fn revision(text: Option<&str>) -> String {
+    use sha2::{Digest, Sha256};
+    match text {
+        Some(text) => hex::encode(Sha256::digest(text.as_bytes())),
+        None => "missing".to_string(),
+    }
+}
+
+fn settings_values(text: &str) -> Result<serde_json::Value> {
+    let table: toml::Table = toml::from_str(text).context("failed to parse TOML")?;
+    serde_json::to_value(table).context("the config file holds a value JSON cannot")
+}
+
+/// Where a change goes: keys of tables and indexes of arrays of tables.
+#[derive(Debug, Clone, PartialEq)]
+enum Segment {
+    Key(String),
+    Index(usize),
+}
+
+/// Set a key (`Some`) or remove it (`None`). An empty object at an entry
+/// of a named table or an array of tables adds the entry.
+type Change = (Vec<Segment>, Option<serde_json::Value>);
+
+pub(super) fn with_settings(text: &str, values: &serde_json::Value) -> Result<String> {
+    use super::schema::SCHEMA;
+    let old = settings_values(text)?;
+    let mut changes = Vec::new();
+    diff_table(
+        old.as_object(),
+        values.as_object(),
+        SCHEMA,
+        &mut Vec::new(),
+        &mut changes,
+    );
+    let mut document: DocumentMut = text.parse().context("failed to parse TOML")?;
+    for (path, value) in &changes {
+        apply_in_table(document.as_table_mut(), SCHEMA, path, value.as_ref())
+            .with_context(|| format!("cannot change {}", describe(path)))?;
+    }
+    Ok(document.to_string())
+}
+
+fn describe(path: &[Segment]) -> String {
+    path.iter()
+        .map(|segment| match segment {
+            Segment::Key(key) => key.clone(),
+            Segment::Index(index) => index.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+type JsonMap = serde_json::Map<String, serde_json::Value>;
+
+/// The changes that make the table `old` into `new`, for the keys of `fields`.
+fn diff_table(
+    old: Option<&JsonMap>,
+    new: Option<&JsonMap>,
+    fields: &[super::schema::Field],
+    path: &mut Vec<Segment>,
+    changes: &mut Vec<Change>,
+) {
+    use super::schema::Kind;
+    for field in fields {
+        let before = old.and_then(|table| table.get(field.key));
+        let after = new.and_then(|table| table.get(field.key));
+        path.push(Segment::Key(field.key.to_string()));
+        match &field.kind {
+            Kind::Table { fields } => diff_table(
+                before.and_then(|value| value.as_object()),
+                after.and_then(|value| value.as_object()),
+                fields,
+                path,
+                changes,
+            ),
+            Kind::Named { fields } => {
+                let before = before.and_then(|value| value.as_object());
+                let after = after.and_then(|value| value.as_object());
+                for name in before.into_iter().flat_map(|entries| entries.keys()) {
+                    if !after.is_some_and(|entries| entries.contains_key(name)) {
+                        let mut entry = path.clone();
+                        entry.push(Segment::Key(name.clone()));
+                        changes.push((entry, None));
+                    }
+                }
+                for (name, entry) in after.into_iter().flatten() {
+                    path.push(Segment::Key(name.clone()));
+                    let existing = before.and_then(|entries| entries.get(name));
+                    if existing.is_none() {
+                        changes.push((path.clone(), Some(serde_json::json!({}))));
+                    }
+                    diff_table(
+                        existing.and_then(|value| value.as_object()),
+                        entry.as_object(),
+                        fields,
+                        path,
+                        changes,
+                    );
+                    path.pop();
+                }
+            }
+            Kind::List { fields, .. } => {
+                let empty = Vec::new();
+                let before = before.and_then(|value| value.as_array()).unwrap_or(&empty);
+                let after = after.and_then(|value| value.as_array()).unwrap_or(&empty);
+                for (index, item) in after.iter().enumerate() {
+                    path.push(Segment::Index(index));
+                    let existing = before.get(index);
+                    if existing.is_none() {
+                        changes.push((path.clone(), Some(serde_json::json!({}))));
+                    }
+                    diff_table(
+                        existing.and_then(|value| value.as_object()),
+                        item.as_object(),
+                        fields,
+                        path,
+                        changes,
+                    );
+                    path.pop();
+                }
+                // From the end, so the indexes stay where they were.
+                for index in (after.len()..before.len()).rev() {
+                    let mut item = path.clone();
+                    item.push(Segment::Index(index));
+                    changes.push((item, None));
+                }
+            }
+            _ => {
+                if before != after {
+                    changes.push((path.clone(), after.cloned()));
+                }
+            }
+        }
+        path.pop();
+    }
+}
+
+fn apply_in_table(
+    table: &mut dyn TableLike,
+    fields: &[super::schema::Field],
+    path: &[Segment],
+    value: Option<&serde_json::Value>,
+) -> Result<()> {
+    use super::schema::Kind;
+    let (Some(Segment::Key(key)), rest) = (path.first(), &path[1.min(path.len())..]) else {
+        bail!("expected a key");
+    };
+    let field = fields
+        .iter()
+        .find(|field| field.key == key)
+        .with_context(|| format!("unknown setting '{key}'"))?;
+    if rest.is_empty() {
+        match value {
+            None => {
+                table.remove(key);
+            }
+            Some(value) => set_json(table, key, &field.kind, value)?,
+        }
+        return Ok(());
+    }
+    let empty = match &field.kind {
+        Kind::Table { fields } => {
+            let inner = table
+                .entry(key)
+                .or_insert_with(|| Item::Table(Table::new()))
+                .as_table_like_mut()
+                .with_context(|| format!("{key} is not a table"))?;
+            apply_in_table(inner, fields, rest, value)?;
+            inner.is_empty()
+        }
+        Kind::Named { fields } => {
+            let entries = table
+                .entry(key)
+                .or_insert_with(|| {
+                    let mut table = Table::new();
+                    table.set_implicit(true);
+                    Item::Table(table)
+                })
+                .as_table_like_mut()
+                .with_context(|| format!("{key} is not a table"))?;
+            let (Segment::Key(name), rest) = (&rest[0], &rest[1..]) else {
+                bail!("expected the name of an entry of {key}");
+            };
+            if rest.is_empty() {
+                match value {
+                    None => {
+                        entries.remove(name);
+                    }
+                    Some(_) if entries.contains_key(name) => bail!("{key}.{name} already exists"),
+                    Some(_) => {
+                        entries.insert(name, Item::Table(Table::new()));
+                    }
+                }
+            } else {
+                let entry = entries
+                    .get_mut(name)
+                    .and_then(Item::as_table_like_mut)
+                    .with_context(|| format!("{key}.{name} is not a table"))?;
+                apply_in_table(entry, fields, rest, value)?;
+            }
+            entries.is_empty()
+        }
+        Kind::List { fields, .. } => {
+            let item = table
+                .entry(key)
+                .or_insert_with(|| Item::ArrayOfTables(toml_edit::ArrayOfTables::new()));
+            let Segment::Index(index) = rest[0] else {
+                bail!("expected an index of {key}");
+            };
+            let rest = &rest[1..];
+            match item {
+                Item::ArrayOfTables(items) => {
+                    if rest.is_empty() {
+                        match value {
+                            None if index < items.len() => items.remove(index),
+                            Some(_) if index == items.len() => items.push(Table::new()),
+                            _ => bail!("{key} has no item {index}"),
+                        }
+                    } else {
+                        let entry = items
+                            .get_mut(index)
+                            .with_context(|| format!("{key} has no item {index}"))?;
+                        apply_in_table(entry, fields, rest, value)?;
+                    }
+                    items.is_empty()
+                }
+                Item::Value(Value::Array(items)) => {
+                    if rest.is_empty() {
+                        match value {
+                            None if index < items.len() => {
+                                items.remove(index);
+                            }
+                            Some(_) if index == items.len() => {
+                                items.push(toml_edit::InlineTable::new())
+                            }
+                            _ => bail!("{key} has no item {index}"),
+                        }
+                    } else {
+                        let entry = items
+                            .get_mut(index)
+                            .and_then(Value::as_inline_table_mut)
+                            .with_context(|| format!("{key} has no item {index}"))?;
+                        apply_in_table(entry, fields, rest, value)?;
+                    }
+                    items.is_empty()
+                }
+                _ => bail!("{key} is not an array of tables"),
+            }
+        }
+        _ => bail!("{key} has no settings inside"),
+    };
+    // A table left with nothing in it says nothing; the entries of named
+    // tables and arrays are removed only when asked.
+    if empty {
+        table.remove(key);
+    }
+    Ok(())
+}
+
+/// Write `value` to `key` as the kind of value `kind` says. A replaced value
+/// keeps its place and surrounding comments.
+fn set_json(
+    table: &mut dyn TableLike,
+    key: &str,
+    kind: &super::schema::Kind,
+    value: &serde_json::Value,
+) -> Result<()> {
+    use super::schema::Kind;
+    use serde_json::Value as Json;
+    let strings = |value: &Json| -> Result<Array> {
+        value
+            .as_array()
+            .context("expected a list")?
+            .iter()
+            .map(|item| item.as_str().context("expected a list of strings"))
+            .collect()
+    };
+    let mut converted = match (kind, value) {
+        (Kind::Bool, Json::Bool(flag)) => Value::from(*flag),
+        (Kind::Integer, Json::Number(number)) => {
+            Value::from(number.as_i64().context("expected a whole number")?)
+        }
+        (Kind::Text | Kind::LongText, Json::String(text)) => Value::from(text.as_str()),
+        (Kind::Choice { options }, Json::String(text)) => {
+            if !options.contains(&text.as_str()) {
+                bail!("expected one of {}", options.join(", "));
+            }
+            Value::from(text.as_str())
+        }
+        (Kind::Strings, _) => Value::Array(strings(value)?),
+        (Kind::Pairs, Json::Object(pairs)) => {
+            let mut table = toml_edit::InlineTable::new();
+            for (name, value) in pairs {
+                table.insert(name, Value::from(value.as_str().context("expected text")?));
+            }
+            Value::InlineTable(table)
+        }
+        _ => bail!("{key} cannot take {value}"),
+    };
+    if let Some(Item::Value(existing)) = table.get(key) {
+        *converted.decor_mut() = existing.decor().clone();
+    }
+    table.insert(key, Item::Value(converted));
+    Ok(())
+}

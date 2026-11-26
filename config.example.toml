@@ -225,7 +225,8 @@ job_timeout_secs = 1800
 # notify_on = ["failed", "timed_out"]
 
 [history]
-# chronotope への原文履歴保存。既定は無効です。
+# chronotope への原文履歴保存。chronotope のサーバーが要るため、ほかの機能と違って既定は無効です。
+# 有効にすると [events] も動きます。
 enabled = false
 base_url = "http://127.0.0.1:7878"
 # 未送信イベントを再送するまで保持します。省略時は OS 標準のデータディレクトリの history
@@ -242,17 +243,17 @@ principal = "ano"
 timeout_secs = 5
 
 [skills]
-# 上手くいった手順をスキル（SKILL.md）として保存し、以後の実行で参照します。既定は無効です。
-enabled = false
+# 上手くいった手順をスキル（SKILL.md）として保存し、以後の実行で参照します。既定は有効です。
+enabled = true
 # 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/skills、
 # Linux は ~/.local/share/ano/skills、Windows は %APPDATA%\ano\data\skills）。
 # ユーザーごとに <dir>/<user>/<name>/SKILL.md へ保存します。
 # dir = "~/notes/ano-skills"
 
 [character]
-# エージェントが名乗る名前・タグライン・性格と口調（SOUL.md）を instructions に加えます。既定は無効です。
+# エージェントが名乗る名前・タグライン・性格と口調（SOUL.md）を instructions に加えます。既定は有効です。
 # `ano character set --name ...` か、会話で「〜と名乗って」と頼むと作れます（変更は承認が必要）。
-enabled = false
+enabled = true
 # 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/character、
 # Linux は $XDG_DATA_HOME/ano/character（既定 ~/.local/share/ano/character）、Windows は %APPDATA%\ano\data\character）。
 # ユーザーごとに <dir>/<user>/SOUL.md へ保存します。
@@ -260,17 +261,17 @@ enabled = false
 
 [memory]
 # 会話でユーザーが話した自分についての事実（好み・予定など）を MEMORY.md に記憶し、以後の実行に載せます。
-# 既定は無効です。保存は承認が必要で、`ano memory` で一覧・追加・削除できます。
-enabled = false
+# 既定は有効です。保存は承認が必要で、`ano memory` で一覧・追加・削除できます。
+enabled = true
 # 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/memory、
 # Linux は $XDG_DATA_HOME/ano/memory（既定 ~/.local/share/ano/memory）、Windows は %APPDATA%\ano\data\memory）。
 # dir = "~/notes/ano-memory"
 
 [objectives]
 # ユーザーが時間をかけて取り組む目標（習慣・貯金・学習など）と進捗を記録し、進行中のものを以後の実行に載せます。
-# 既定は無効です。作成と変更は承認が必要で、`ano objectives` で一覧・追加・記録できます。
+# 既定は有効です。作成と変更は承認が必要で、`ano objectives` で一覧・追加・記録できます。
 # 1回の実行の完了条件である --goal とは別のものです。
-enabled = false
+enabled = true
 # 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/objectives、
 # Linux は $XDG_DATA_HOME/ano/objectives（既定 ~/.local/share/ano/objectives）、Windows は %APPDATA%\ano\data\objectives）。
 # dir = "~/notes/ano-objectives"
@@ -278,8 +279,8 @@ enabled = false
 [routines]
 # 会話で頼んだリマインダーや定期作業（「毎週金曜17時に振り返りをして」）を routines.json に保存します。
 # 実行するのは [automation.sources.<name>] kind = "routines" を置いた ano serve です（docs/automation.md）。
-# 既定は無効です。作成と削除は承認が必要で、`ano routines` で一覧・作成・削除できます。
-enabled = false
+# 既定は有効です。作成と削除は承認が必要で、`ano routines` で一覧・作成・削除できます。
+enabled = true
 # 省略時は OS 標準のデータディレクトリ（macOS は ~/Library/Application Support/ano/routines、
 # Linux は $XDG_DATA_HOME/ano/routines（既定 ~/.local/share/ano/routines）、Windows は %APPDATA%\ano\data\routines）。
 # dir = "~/notes/ano-routines"
@@ -287,25 +288,29 @@ enabled = false
 [feed]
 # エージェントが残す提案（idea）・記事（article）・報告（report）の置き場。ano web のホームと `ano feed` で読みます。
 # 定期実行（docs/automation.md）から「記憶と目標から提案を feed_post で残す」作業を動かすと、先回りの提案になります。
-enabled = false
+# 既定は有効です。
+enabled = true
 # dir = "~/notes/ano-feed"
 
 [spaces]
 # 頼まれてエージェントが作る小さなページ（トラッカー・プランナーなど）。ano web の /spaces/<name> で、
 # ほかから切り離して（通信できない状態で）表示します。データは定期実行の作業で更新できます。
-enabled = false
+# 既定は有効です。
+enabled = true
 # dir = "~/notes/ano-spaces"
 
 [events]
 # 共有した記事や「後で読む」記事が告げる日付の決まった出来事（イベント・セールなど）を、記事を出典として
-# chronotope に保存し、「来週末」のような言い方の期間で探せるようにします。[history] も有効にしてください。
-enabled = false
+# chronotope に保存し、「来週末」のような言い方の期間で探せるようにします。既定は有効ですが、
+# [history] が無効の間は一緒に無効になります（そのまま enabled = true と書くと設定の誤り）。
+# enabled = false
 # dir = "~/notes/ano-events"
 
 [agenda]
 # 会話でふと話した予定（「来週の金曜15時に歯医者」）を、リマインダーの候補としてフィードに残します。
-# 時刻は chronotope の時間表現の解析で、話した時刻を基準に読みます。[feed] と [routines] も有効にしてください。
-enabled = false
+# 時刻は chronotope の時間表現の解析で、話した時刻を基準に読みます。既定は有効ですが、
+# [feed] か [routines] が無効の間は一緒に無効になります（そのまま enabled = true と書くと設定の誤り）。
+# enabled = false
 
 # Webhook callers and `ano run --environment NAME` select names declared here.
 # Relative workspace paths and MCP cwd paths resolve from this config directory;

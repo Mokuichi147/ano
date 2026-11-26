@@ -1,6 +1,8 @@
 //! `ano acp` speaks the Agent Client Protocol on stdin and stdout, as an
 //! editor starts it.
 
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -52,6 +54,7 @@ impl Editor {
         )
         .unwrap();
         let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+        command.envs(common::isolated_env());
         command
             .current_dir(directory)
             .env("OPENAI_BASE_URL", endpoint)

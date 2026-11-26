@@ -999,3 +999,233 @@ fn renaming_api_moves_its_connection_to_a_named_provider() {
     assert!(with_provider_renamed(&again, "subscription", "api").is_err());
     assert!(with_provider_renamed(&again, "missing", "other").is_err());
 }
+
+#[test]
+fn features_are_enabled_by_default() {
+    let config = AppConfig::parse("").unwrap();
+    // The raw history needs a chronotope server, so it stays off, and the
+    // events kept in it with it.
+    assert!(!config.history.enabled);
+    assert!(!config.events.enabled);
+    let config = AppConfig::parse("[history]\nenabled = true\n").unwrap();
+    for (name, enabled) in [
+        ("skills", config.skills.enabled),
+        ("character", config.character.enabled),
+        ("memory", config.memory.enabled),
+        ("objectives", config.objectives.enabled),
+        ("routines", config.routines.enabled),
+        ("feed", config.feed.enabled),
+        ("spaces", config.spaces.enabled),
+        ("events", config.events.enabled),
+        ("agenda", config.agenda.enabled),
+    ] {
+        assert!(enabled, "[{name}] should be enabled by default");
+    }
+}
+
+#[test]
+fn a_feature_follows_what_it_needs_off_unless_turned_on_itself() {
+    let config = AppConfig::parse("[feed]\nenabled = false\n[history]\nenabled = false\n").unwrap();
+    assert!(!config.agenda.enabled);
+    assert!(!config.events.enabled);
+    assert!(config.routines.enabled);
+
+    let error =
+        AppConfig::parse("[routines]\nenabled = false\n[agenda]\nenabled = true\n").unwrap_err();
+    assert!(format!("{error:#}").contains("[agenda]"));
+    let error =
+        AppConfig::parse("[history]\nenabled = false\n[events]\nenabled = true\n").unwrap_err();
+    assert!(format!("{error:#}").contains("[events]"));
+}
+
+/// The keys serde accepts in the table that `prefix` opens, read from the
+/// error for an unknown key; `None` when the table takes any key.
+fn accepted_keys(prefix: &str) -> Option<std::collections::BTreeSet<String>> {
+    let error = format!(
+        "{:#}",
+        AppConfig::parse(&format!("{prefix}__probe = 1\n")).unwrap_err()
+    );
+    let expected = error.split("unknown field `__probe`").nth(1)?;
+    let expected = expected.lines().next().unwrap_or_default();
+    Some(
+        expected
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// Every key of every table the settings page edits is in the schema, and
+/// the schema names no key the config does not take.
+#[test]
+fn the_settings_schema_names_every_key() {
+    use super::schema::{Field, Kind, SCHEMA};
+    fn check(fields: &[Field], header: &str, prefix: &str, checked: &mut Vec<String>) {
+        if let Some(accepted) = accepted_keys(prefix) {
+            let named: std::collections::BTreeSet<String> =
+                fields.iter().map(|field| field.key.to_string()).collect();
+            assert_eq!(named, accepted, "the keys of [{header}]");
+            checked.push(header.to_string());
+        }
+        for field in fields {
+            let path = if header.is_empty() {
+                field.key.to_string()
+            } else {
+                format!("{header}.{}", field.key)
+            };
+            match &field.kind {
+                Kind::Table { fields } => {
+                    check(fields, &path, &format!("{prefix}[{path}]\n"), checked)
+                }
+                Kind::Named { fields } => {
+                    let path = format!("{path}.entry");
+                    check(fields, &path, &format!("{prefix}[{path}]\n"), checked)
+                }
+                Kind::List { fields, title } => {
+                    let start = format!("{prefix}[[{path}]]\n");
+                    check(fields, &path, &start, checked);
+                    // Items of arrays inside need one whose required keys are set.
+                    for field in fields.iter() {
+                        if let Kind::List { fields: inner, .. } = &field.kind {
+                            let inner_path = format!("{path}.{}", field.key);
+                            check(
+                                inner,
+                                &inner_path,
+                                &format!("{start}{title} = 'x'\n[[{inner_path}]]\n"),
+                                checked,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut checked = Vec::new();
+    check(SCHEMA, "", "", &mut checked);
+    // The kinds of automation take keys of their own, so their tables are
+    // not checked here; every other table is.
+    for table in [
+        "",
+        "agent",
+        "agent.roles",
+        "api",
+        "providers.entry",
+        "mcp_servers",
+        "mcp_servers.tool_catalog",
+        "environments.entry.checks.entry",
+        "automation.rules",
+        "agenda",
+    ] {
+        assert!(
+            checked.iter().any(|name| name == table),
+            "[{table}] was not checked: {checked:?}"
+        );
+    }
+}
+
+#[test]
+fn settings_are_saved_without_touching_the_rest_of_the_file() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("config.toml");
+    std::fs::write(
+        &path,
+        "# my settings\n[agent]\nmodel = \"local\" # the LAN model\nmax_tool_rounds = 50\n\n[providers.lan]\nbase_url = \"http://192.168.1.10:1234/v1\"\n\n[[mcp_servers]]\nlabel = \"docs\"\nurl = \"${DOCS_URL}/mcp\"\n",
+    )
+    .unwrap();
+    let read = super::read_settings(&path).unwrap();
+    assert!(read.exists);
+    // `${VAR}` stays as written.
+    assert_eq!(read.values["mcp_servers"][0]["url"], "${DOCS_URL}/mcp");
+
+    let mut values = read.values.clone();
+    values["agent"]["model"] = serde_json::json!("other");
+    values["agent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("max_tool_rounds");
+    values["memory"] = serde_json::json!({"enabled": false});
+    values["providers"]
+        .as_object_mut()
+        .unwrap()
+        .insert("cloud".into(), serde_json::json!({"model": "gpt-x"}));
+    values["mcp_servers"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({"label": "local", "transport": "stdio", "command": "node", "env_vars": {"TOKEN": "MY_TOKEN"}}));
+    super::save_settings(&path, &read.revision, &values).unwrap();
+
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.starts_with("# my settings\n"), "{text}");
+    assert!(text.contains("model = \"other\" # the LAN model"), "{text}");
+    assert!(!text.contains("max_tool_rounds"), "{text}");
+    let config = AppConfig::parse(&text).unwrap();
+    assert!(!config.memory.enabled);
+    assert_eq!(config.providers["cloud"].model.as_deref(), Some("gpt-x"));
+    assert_eq!(config.mcp_servers.len(), 2);
+    assert_eq!(config.mcp_servers[1].env_vars["TOKEN"], "MY_TOKEN");
+
+    // Removing an entry and an item, and emptying a table.
+    let read = super::read_settings(&path).unwrap();
+    let mut values = read.values.clone();
+    values["providers"].as_object_mut().unwrap().remove("lan");
+    values["mcp_servers"].as_array_mut().unwrap().remove(0);
+    values.as_object_mut().unwrap().remove("memory");
+    super::save_settings(&path, &read.revision, &values).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    let config = AppConfig::parse(&text).unwrap();
+    assert!(!config.providers.contains_key("lan"));
+    assert_eq!(config.mcp_servers.len(), 1);
+    assert_eq!(config.mcp_servers[0].label, "local");
+    assert!(!text.contains("[memory]"), "{text}");
+}
+
+#[test]
+fn settings_are_not_saved_over_a_change_made_elsewhere_or_when_invalid() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ano/config.toml");
+    // A missing file is created.
+    let read = super::read_settings(&path).unwrap();
+    assert!(!read.exists);
+    super::save_settings(
+        &path,
+        &read.revision,
+        &serde_json::json!({"feed": {"enabled": false}}),
+    )
+    .unwrap();
+    assert!(!AppConfig::load(&path).unwrap().feed.enabled);
+
+    let stale = read.revision;
+    let error = super::save_settings(&path, &stale, &serde_json::json!({})).unwrap_err();
+    assert!(error.downcast_ref::<super::SettingsConflict>().is_some());
+
+    let read = super::read_settings(&path).unwrap();
+    let invalid = serde_json::json!({"agent": {"provider": "missing"}});
+    assert!(super::save_settings(&path, &read.revision, &invalid).is_err());
+    let unknown = serde_json::json!({"agent": {"approval_mode": "sometimes"}});
+    assert!(super::save_settings(&path, &read.revision, &unknown).is_err());
+    assert!(!AppConfig::load(&path).unwrap().feed.enabled);
+}
+
+#[test]
+fn every_setting_with_a_default_is_in_the_schema() {
+    use super::schema::{defaults, Field, Kind, SCHEMA};
+    fn check(defaults: &serde_json::Value, fields: &[Field], path: &str) {
+        for (key, value) in defaults.as_object().unwrap() {
+            let field = fields
+                .iter()
+                .find(|field| field.key == key)
+                .unwrap_or_else(|| panic!("{path}.{key} has a default but no field"));
+            match &field.kind {
+                Kind::Table { fields } => check(value, fields, &format!("{path}.{key}")),
+                Kind::Named { fields } | Kind::List { fields, .. } => {
+                    check(&value["*"], fields, &format!("{path}.{key}.*"))
+                }
+                _ => {}
+            }
+        }
+    }
+    check(&defaults(), SCHEMA, "");
+}

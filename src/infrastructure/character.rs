@@ -25,13 +25,23 @@ use std::{fs::File, io::ErrorKind, path::PathBuf, sync::Arc};
 const SOUL_FILE: &str = "SOUL.md";
 const LOCK_FILE: &str = "SOUL.md.lock";
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CharacterSettings {
     pub enabled: bool,
     /// Where characters are kept. Defaults to `character` in the platform's
     /// data directory for ano.
     pub dir: Option<PathBuf>,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for CharacterSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
 }
 
 impl CharacterSettings {

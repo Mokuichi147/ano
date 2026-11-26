@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::sync::{Arc, Mutex};
@@ -49,6 +51,7 @@ async fn cli_runs_profile_reads_workspace_and_emits_json() {
     let output = tokio::time::timeout(
         Duration::from_secs(20),
         Command::new(env!("CARGO_BIN_EXE_ano"))
+            .envs(common::isolated_env())
             .current_dir(working_directory.path())
             .env("OPENAI_BASE_URL", endpoint)
             .env("OPENAI_API_KEY", "test-fixture-key")
@@ -110,6 +113,7 @@ async fn cli_explicit_config_overrides_discovery_and_remains_strict() {
     )
     .unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(directory.path())
         .args(["--config", "config.toml", "preset", "list"])
         .output()
@@ -136,6 +140,7 @@ async fn cli_explicit_config_overrides_discovery_and_remains_strict() {
         )
         .unwrap();
         let output = Command::new(env!("CARGO_BIN_EXE_ano"))
+            .envs(common::isolated_env())
             .current_dir(directory.path())
             .args(["--config", path, "preset", "list"])
             .output()
@@ -156,6 +161,7 @@ async fn cli_config_edits_target_namespaced_project_config() {
     std::fs::create_dir(project.parent().unwrap()).unwrap();
     std::fs::write(&project, "# project settings\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(directory.path())
         .args(["preset", "add", "project", "--model", "project-model"])
         .output()
@@ -181,6 +187,7 @@ async fn cli_rejects_unknown_user_before_connecting() {
     let config = directory.path().join("config.toml");
     std::fs::write(&config, "").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(directory.path())
         .arg("--config")
         .arg(config)
@@ -222,6 +229,7 @@ async fn runs_continue_without_mcp_servers_that_fail_to_connect() {
     let output = tokio::time::timeout(
         Duration::from_secs(15),
         Command::new(env!("CARGO_BIN_EXE_ano"))
+            .envs(common::isolated_env())
             .current_dir(directory.path())
             .env("OPENAI_BASE_URL", &endpoint)
             .env("OPENAI_API_KEY", "mock-key")

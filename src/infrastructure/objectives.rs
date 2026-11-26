@@ -24,13 +24,23 @@ use std::{fs::File, io::ErrorKind, path::PathBuf, sync::Arc};
 const OBJECTIVES_FILE: &str = "objectives.json";
 const LOCK_FILE: &str = "objectives.json.lock";
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ObjectiveSettings {
     pub enabled: bool,
     /// Where objectives are kept. Defaults to `objectives` in the
     /// platform's data directory for ano.
     pub dir: Option<PathBuf>,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for ObjectiveSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
 }
 
 impl ObjectiveSettings {

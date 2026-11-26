@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -141,6 +143,7 @@ async fn pushes_need_a_review_of_the_files_as_they_are() {
     .unwrap();
 
     let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+    command.envs(common::isolated_env());
     command
         .current_dir(root)
         .env("OPENAI_BASE_URL", &endpoint)

@@ -49,13 +49,23 @@ const SEARCH_LIMIT: usize = 500;
 /// Events `event_search` returns at most.
 const MAX_RESULTS: usize = 30;
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct EventSettings {
     pub enabled: bool,
     /// Where the saved events of each user are listed. Defaults to `events`
     /// in the platform's data directory for ano.
     pub dir: Option<PathBuf>,
+}
+
+/// Enabled unless the config file turns it off.
+impl Default for EventSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            dir: None,
+        }
+    }
 }
 
 impl EventSettings {

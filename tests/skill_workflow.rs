@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -81,6 +83,7 @@ async fn runs_read_listed_skills_and_save_approved_improvements() {
     let output = tokio::time::timeout(
         Duration::from_secs(20),
         Command::new(env!("CARGO_BIN_EXE_ano"))
+            .envs(common::isolated_env())
             .current_dir(directory.path())
             .env("OPENAI_BASE_URL", &endpoint)
             .env("OPENAI_API_KEY", "test-fixture-key")
@@ -149,6 +152,7 @@ async fn runs_read_listed_skills_and_save_approved_improvements() {
     );
 
     let listed = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(directory.path())
         .args(["--config", "config.toml", "skills"])
         .output()
@@ -176,6 +180,7 @@ async fn chat_skill_command_asks_the_model_to_save_what_worked() {
     )
     .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_ano"))
+        .envs(common::isolated_env())
         .current_dir(directory.path())
         .env("OPENAI_BASE_URL", &endpoint)
         .env("OPENAI_API_KEY", "test-fixture-key")

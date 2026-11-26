@@ -37,7 +37,7 @@ ano run --environment default "README とソースを読み、実装の概要を
 | --- | --- |
 | `ano run [PROMPT]` | 依頼を 1 回実行します。PROMPT を省略すると stdin から読みます |
 | `ano chat` | 対話しながら作業を続けます（`/model`・`/goal`・`/compact` などのコマンドあり） |
-| `ano web` | ブラウザで使う画面を起動します（[docs/web.md](docs/web.md)） |
+| `ano web` | ブラウザで使う画面を起動します。設定もすべてここから変更できます（[docs/web.md](docs/web.md)） |
 | `ano acp` | ACP に対応したエディタから使います（[docs/acp.md](docs/acp.md)） |
 | `ano serve` | Webhook を受けて作業や通知をするサーバーを起動します（[docs/webhook.md](docs/webhook.md)、[docs/automation.md](docs/automation.md)） |
 | `ano tools` | 使える tool と MCP server を表示します |

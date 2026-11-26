@@ -1,3 +1,5 @@
+mod common;
+
 use axum::{routing::post, Json, Router};
 use serde_json::{json, Value};
 use std::{
@@ -33,6 +35,7 @@ async fn mock_responses(script: Vec<Value>) -> (String, Arc<Mutex<Vec<Value>>>) 
 
 fn ano(directory: &std::path::Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_ano"));
+    command.envs(common::isolated_env());
     command
         .current_dir(directory)
         .args(["--config", "config.toml"])
@@ -107,14 +110,14 @@ async fn runs_leave_mentioned_plans_as_candidates_in_the_feed() {
     );
 }
 
-/// `[agenda]` leaves candidates for reminders in the feed, so it needs
-/// `[feed]` and `[routines]`.
+/// `[agenda]` leaves candidates for reminders in the feed, so turning it on
+/// with `[feed]` off is an error.
 #[tokio::test]
 async fn the_agenda_without_the_feed_is_a_config_error() {
     let directory = tempfile::tempdir().unwrap();
     std::fs::write(
         directory.path().join("config.toml"),
-        "[agenda]\nenabled = true\n",
+        "[feed]\nenabled = false\n[agenda]\nenabled = true\n",
     )
     .unwrap();
     let output = ano(directory.path())

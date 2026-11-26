@@ -460,7 +460,7 @@ mod tests {
 
     #[test]
     fn invalid_environment_and_workspace_fail_before_api_call() {
-        let config = AppConfig::default();
+        let config = AppConfig::without_features();
         let args = run_args(&["run", "--environment", "missing", "hello"]);
         assert!(resolve_run_context(&config, "default", &args.agent).is_err());
         let directory = tempfile::tempdir().unwrap();
