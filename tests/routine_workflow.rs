@@ -80,9 +80,15 @@ async fn runs_set_up_routines_that_later_runs_see() {
         let requests = requests.lock().unwrap();
         let instructions = requests[0]["instructions"].as_str().unwrap();
         assert!(
-            instructions.contains("# Routines\nThis conversation started at ")
+            instructions.contains("# Routines\nEach of the user's messages ends with ")
                 && instructions.contains("\n\nNo routine is set up."),
             "{instructions}"
+        );
+        // The time goes with the user's message, not the instructions.
+        let input = requests[0]["input"].to_string();
+        assert!(
+            input.contains("Runtime notice: the local time is 20"),
+            "{input}"
         );
     }
     let result: Value = serde_json::from_slice(&output.stdout).unwrap();

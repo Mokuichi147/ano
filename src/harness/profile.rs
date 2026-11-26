@@ -312,13 +312,11 @@ impl ExecutionProfile {
             .collect();
         append_routines(
             &mut self.settings.instructions,
-            &chrono::Local::now()
-                .format("%Y-%m-%d %H:%M %:z (%A)")
-                .to_string(),
             &upcoming,
             available(ROUTINE_CREATE_NAME),
             available(ROUTINE_DELETE_NAME),
         );
+        self.settings.local_time = Some(local_now);
         Ok(())
     }
 
@@ -387,6 +385,13 @@ impl ExecutionProfile {
     pub fn append_project_instructions(&mut self, sources: &[(String, String)]) {
         append_project_instructions(&mut self.settings.instructions, sources);
     }
+}
+
+/// The local time with the weekday, such as `2026-11-27 09:30 +09:00 (Friday)`.
+fn local_now() -> String {
+    chrono::Local::now()
+        .format("%Y-%m-%d %H:%M %:z (%A)")
+        .to_string()
 }
 
 #[cfg(test)]
@@ -660,9 +665,17 @@ mod tests {
         empty.append_routines(&book).unwrap();
         let added = &empty.settings.instructions[base.len()..];
         assert!(
-            added.starts_with("\n\n# Routines\nThis conversation started at 20"),
+            added.starts_with("\n\n# Routines\nEach of the user's messages ends with"),
             "{added}"
         );
+        assert!(
+            !added.contains(" 20"),
+            "the instructions carry no time: {added}"
+        );
+        assert!(empty
+            .settings
+            .local_time
+            .is_some_and(|now| now().starts_with("20")));
         assert!(added.contains(ROUTINE_CREATE_NAME) && added.ends_with("No routine is set up."));
 
         book.create(

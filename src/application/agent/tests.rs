@@ -8,6 +8,7 @@ use super::{
     Agent, AgentExtension, ExtensionCall, ModelTarget, RunInfo, RunOrigin, RunRequest,
     SubagentModels, SubagentSpec, DELEGATE_ROLE,
 };
+use super::{local_time_notice, source_input};
 use crate::{
     application::{
         approval::{AlwaysApprove, DenyApproval},
@@ -3085,4 +3086,91 @@ fn tool_selection_is_restored_from_the_searches_in_the_history() {
     assert_eq!(active.local().clone(), ["old_tool".to_string()].into());
     assert!(active.direct_mcp().is_empty());
     assert_eq!(active.responses_mcp()["remote"], ["list"]);
+}
+
+/// A clock that moves on a minute each time it is read.
+fn ticking_clock() -> String {
+    static MINUTE: AtomicUsize = AtomicUsize::new(0);
+    let minute = MINUTE.fetch_add(1, Ordering::SeqCst);
+    format!("2026-11-27 09:{minute:02} +09:00 (Friday)")
+}
+
+/// The text of the input part that ends the user message of `input`.
+fn last_user_text(input: &Value) -> String {
+    let message = input
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|item| item["role"] == "user")
+        .unwrap();
+    message["content"].as_array().unwrap().last().unwrap()["text"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[tokio::test]
+async fn the_local_time_goes_into_each_turn_and_the_instructions_stay_the_same() {
+    use crate::{application::ports::ConversationStore, domain::compaction::recent_user_requests};
+    let server = mock_responses(vec![
+        text_response("first", "One."),
+        text_response("second", "Two."),
+    ])
+    .await;
+    let mut agent = agent(ToolRegistry::default(), Vec::new());
+    agent.client = Arc::new(OpenAiClient::new("test", &server.url));
+    agent.settings.local_time = Some(ticking_clock);
+    let binding = SessionBinding::new(&ToolContext::default(), &server.url).unwrap();
+    let mut store = crate::infrastructure::memory_store::MemoryConversation::new(binding);
+
+    agent.run_in_session(request(), &mut store).await.unwrap();
+    agent.run_in_session(request(), &mut store).await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests[0]["instructions"], requests[1]["instructions"]);
+    let first = last_user_text(&requests[0]["input"]);
+    let second = last_user_text(&requests[1]["input"]);
+    assert!(
+        first.starts_with("Runtime notice: the local time is 2026-11-27 09:"),
+        "{first}"
+    );
+    assert!(
+        second.starts_with("Runtime notice: the local time is 2026-11-27 09:"),
+        "{second}"
+    );
+    assert_ne!(first, second, "each turn reads the clock");
+    // The first turn's time stays in the history as it was sent.
+    let history = serde_json::to_string(&store.data().history).unwrap();
+    assert!(
+        history.contains(&first) && history.contains(&second),
+        "{history}"
+    );
+    // The user's own request does not include the time.
+    assert!(recent_user_requests(&store.data().history, 2, 200)
+        .iter()
+        .all(|request| request == "Do the requested work"));
+}
+
+#[tokio::test]
+async fn the_recorded_original_input_leaves_out_the_local_time() {
+    use crate::application::input::build_user_input;
+    let notice = local_time_notice("2026-11-27 09:00 +09:00 (Friday)");
+    let request = request();
+    let sent = build_user_input(&[
+        InputPart::Text("Do the requested work".into()),
+        InputPart::Text(notice.clone()),
+    ])
+    .await
+    .unwrap();
+    let (original, runtime) = source_input(&request, None, Some(&notice), &sent)
+        .await
+        .unwrap();
+    assert!(!original.to_string().contains("local time"), "{original}");
+    assert!(original.to_string().contains("Do the requested work"));
+    assert!(runtime.to_string().contains(&notice), "{runtime}");
+    // Without a notice the input is recorded as sent.
+    let (original, runtime) = source_input(&request, None, None, &sent).await.unwrap();
+    assert_eq!(original, sent);
+    assert_eq!(runtime, json!([]));
 }
