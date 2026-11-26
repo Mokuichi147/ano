@@ -1,14 +1,19 @@
-//! `ano memory`: list, add, and forget the facts kept about the user,
-//! without the model.
+//! `ano memory`: list, add, and forget the facts kept about the user
+//! without the model, and consolidate them with it.
 
 use crate::{
     config::AppConfig,
+    domain::user_memory::recent_facts,
+    harness::{
+        memory_consolidation::MemoryConsolidator,
+        models::{Connections, RunModels},
+    },
     infrastructure::{
         fs::display_path,
         user_memory::{MemoryBook, Saved},
     },
 };
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use clap::{Args, Subcommand};
 
 #[derive(Debug, Args)]
@@ -31,9 +36,16 @@ enum MemoryCommand {
         #[arg(required = true)]
         numbers: Vec<usize>,
     },
+    /// Merge facts that repeat or belong to each other, as the model
+    /// proposes. The file as it was is kept as MEMORY.md.bak.
+    Consolidate {
+        /// Show the merges without changing the memory.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
-pub(super) fn run(config: &AppConfig, user: &str, args: MemoryArgs) -> Result<()> {
+pub(super) async fn run(config: &AppConfig, user: &str, args: MemoryArgs) -> Result<()> {
     let book = MemoryBook::new(config.memory.directory()?);
     let path = book.path(user)?;
     match args.command.unwrap_or(MemoryCommand::List) {
@@ -48,6 +60,10 @@ pub(super) fn run(config: &AppConfig, user: &str, args: MemoryArgs) -> Result<()
             }
             for (number, fact) in facts.iter().enumerate() {
                 println!("  {}. {fact}", number + 1);
+            }
+            let (_, omitted) = recent_facts(&facts);
+            if omitted > 0 {
+                println!("The {omitted} oldest facts are not sent with runs; `ano memory consolidate` merges facts that repeat or belong to each other.");
             }
         }
         MemoryCommand::Add { fact } => match book.save(user, &fact)? {
@@ -68,6 +84,52 @@ pub(super) fn run(config: &AppConfig, user: &str, args: MemoryArgs) -> Result<()
             }
             let missing = book.forget(user, &chosen)?;
             println!("Forgot {} facts.", chosen.len() - missing.len());
+        }
+        MemoryCommand::Consolidate { dry_run } => {
+            let selection = config.select_model(&[])?;
+            let models = RunModels::resolve(config, &[], &selection, &mut Connections::default())
+                .context("failed to connect the provider of the model")?;
+            let report = MemoryConsolidator::new(models.main)
+                .run(&book, user, !dry_run)
+                .await?;
+            for merge in &report.outcome.applied {
+                println!("Merge:");
+                for &member in &merge.members {
+                    println!("  {}. {}", member + 1, report.before[member]);
+                }
+                println!("  -> {}", merge.into);
+            }
+            for (merge, reason) in &report.outcome.skipped {
+                let numbers: Vec<String> = merge
+                    .members
+                    .iter()
+                    .map(|member| match member.checked_add(1) {
+                        Some(number) => number.to_string(),
+                        None => "0".into(),
+                    })
+                    .collect();
+                eprintln!(
+                    "skipped a proposed merge of {}: {reason}",
+                    numbers.join(", ")
+                );
+            }
+            if report.not_shown > 0 {
+                println!(
+                    "The {} newest facts were not looked at: the memory is too long to show the model at once.",
+                    report.not_shown
+                );
+            }
+            let (before, after) = (report.before.len(), report.outcome.remaining().len());
+            match (&report.backup, report.outcome.applied.is_empty()) {
+                (_, true) => println!("Nothing to merge in {before} facts."),
+                (Some(backup), _) => println!(
+                    "Consolidated {before} facts into {after}. The memory as it was: {}",
+                    display_path(backup)
+                ),
+                (None, _) => println!(
+                    "Would consolidate {before} facts into {after} (dry run; nothing was changed)."
+                ),
+            }
         }
     }
     Ok(())

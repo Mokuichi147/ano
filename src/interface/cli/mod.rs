@@ -488,7 +488,7 @@ pub async fn run() -> Result<()> {
         Command::History(args) => history::run(&config, &cli.user, args).await,
         Command::Skills(args) => skills::run(&config, &cli.user, args),
         Command::Character(args) => character::run(&config, &cli.user, args),
-        Command::Memory(args) => memory::run(&config, &cli.user, args),
+        Command::Memory(args) => memory::run(&config, &cli.user, args).await,
         Command::Objectives(args) => objectives::run(&config, &cli.user, args),
         Command::Routines(args) => routines::run(&config, &cli.user, args),
         Command::Feed(args) => feed::run(&config, &cli.user, args),

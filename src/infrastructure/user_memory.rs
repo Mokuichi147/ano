@@ -24,6 +24,8 @@ use std::{fs::File, io::ErrorKind, path::PathBuf, sync::Arc};
 
 const MEMORY_FILE: &str = "MEMORY.md";
 const LOCK_FILE: &str = "MEMORY.md.lock";
+/// The file as it was before the last consolidation.
+const BACKUP_FILE: &str = "MEMORY.md.bak";
 const HEADER: &str = "# Memory\n\nFacts about the user that ano keeps. One `- ` line per fact.\n\n";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,6 +161,58 @@ impl MemoryBook {
             .filter(|(_, found)| !found)
             .map(|(fact, _)| fact)
             .collect())
+    }
+
+    /// Replace `user`'s facts with the outcome of a consolidation: `facts`
+    /// gives, for each of `expected` in order, its text afterwards or `None`
+    /// to remove it. Fails without a change when the facts are no longer
+    /// `expected`, as when a conversation saved one meanwhile. The file as
+    /// it was is kept beside it, and its path returned. Lines that are not
+    /// facts, and the lines of unchanged facts, stay as they are.
+    pub fn replace(
+        &self,
+        user: &str,
+        expected: &[String],
+        facts: &[Option<String>],
+    ) -> Result<PathBuf> {
+        if expected.len() != facts.len() {
+            bail!("a replacement must cover every fact");
+        }
+        let facts = facts
+            .iter()
+            .map(|fact| fact.as_deref().map(normalize_fact).transpose())
+            .collect::<Result<Vec<_>>>()?;
+        let _lock = self.lock(user)?;
+        let text = self.read_text(user)?;
+        if parse_facts(&text) != expected {
+            bail!("the memory changed in the meantime; nothing was replaced");
+        }
+        let (mark, body) = match text.strip_prefix('\u{feff}') {
+            Some(body) => ("\u{feff}", body),
+            None => ("", text.as_str()),
+        };
+        let mut replaced = String::with_capacity(text.len());
+        replaced.push_str(mark);
+        let mut next = facts.iter().zip(expected);
+        for line in body.split_inclusive('\n') {
+            if fact_of(line).is_none() {
+                replaced.push_str(line);
+                continue;
+            }
+            match next.next() {
+                Some((Some(fact), before)) if fact == before => replaced.push_str(line),
+                Some((Some(fact), _)) => {
+                    let ending = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+                    replaced.push_str(&format!("- {fact}{ending}"));
+                }
+                Some((None, _)) => {}
+                None => bail!("the memory changed in the meantime; nothing was replaced"),
+            }
+        }
+        let backup = self.path(user)?.with_file_name(BACKUP_FILE);
+        atomic_write(&backup, text.as_bytes(), None)?;
+        self.write_text(user, &replaced)?;
+        Ok(backup)
     }
 
     fn read_text(&self, user: &str) -> Result<String> {
@@ -363,6 +417,59 @@ mod tests {
         let missing = book.forget("default", &[facts[1].clone()]).unwrap();
         assert!(missing.is_empty());
         assert_eq!(book.facts("default").unwrap(), ["Short."]);
+    }
+
+    #[test]
+    fn replacing_keeps_other_lines_and_the_file_as_it_was() {
+        let root = tempfile::tempdir().unwrap();
+        let book = MemoryBook::new(root.path());
+        let path = book.path("default").unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let before = "\u{feff}# My notes\n- Likes tea\nFree text.\n  - Likes  green tea\n- Has a cat\n- Early riser";
+        std::fs::write(&path, before).unwrap();
+        let expected = book.facts("default").unwrap();
+        assert_eq!(expected.len(), 4);
+
+        let backup = book
+            .replace(
+                "default",
+                &expected,
+                &[
+                    None,
+                    Some("Likes tea, green tea most".into()),
+                    Some("Has a cat".into()),
+                    Some("Early riser".into()),
+                ],
+            )
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&backup).unwrap(), before);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}# My notes\nFree text.\n- Likes tea, green tea most\n- Has a cat\n- Early riser"
+        );
+        assert_eq!(
+            book.facts("default").unwrap(),
+            ["Likes tea, green tea most", "Has a cat", "Early riser"]
+        );
+    }
+
+    #[test]
+    fn replacing_fails_when_the_memory_changed_meanwhile() {
+        let root = tempfile::tempdir().unwrap();
+        let book = MemoryBook::new(root.path());
+        book.save("default", "Likes tea.").unwrap();
+        book.save("default", "Likes green tea.").unwrap();
+        let expected = book.facts("default").unwrap();
+        book.save("default", "Has a cat.").unwrap();
+        let merged = [None, Some("Likes tea, green tea most.".into())];
+        assert!(book.replace("default", &expected, &merged).is_err());
+        assert_eq!(book.facts("default").unwrap().len(), 3);
+        // A replacement must cover every fact and hold valid facts.
+        let now = book.facts("default").unwrap();
+        assert!(book.replace("default", &now, &merged).is_err());
+        let invalid = [None, None, Some("x".repeat(MAX_FACT_CHARS + 1))];
+        assert!(book.replace("default", &now, &invalid).is_err());
+        assert_eq!(book.facts("default").unwrap(), now);
     }
 
     #[test]
