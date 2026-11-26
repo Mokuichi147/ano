@@ -19,7 +19,7 @@ use crate::{
         input::{build_user_input, InputPart},
         ports::{
             ApprovalHandler, ConversationStore, HistoryBackend, McpGateway, McpServerFailure,
-            ResponsesApi,
+            ResponseDelta, ResponsesApi,
         },
         registry::ToolRegistry,
         settings::AgentSettings,
@@ -44,7 +44,8 @@ use dispatch::RoundScope;
 use events::EventLog;
 use mcp_runtime::McpRuntime;
 use response::{
-    extract_output_text, output_items, reasoning_summary_text, validate_response_status,
+    cut_off_at_output_limit, extract_output_text, output_items, reasoning_summary_text,
+    validate_response_status,
 };
 use serde_json::{json, Value};
 use std::{
@@ -814,6 +815,9 @@ impl Agent {
         // Notices about repeated calls went unheeded: the next response is
         // the report.
         let mut stuck = false;
+        // The last response was cut off at the output token limit and
+        // discarded: this request asks again, once.
+        let mut cut_off = false;
 
         for round in 0..self.settings.max_tool_rounds {
             if !window_asked && context_tokens.is_some() {
@@ -909,6 +913,11 @@ impl Agent {
                     .map(|history| Value::Array(history.clone()))
                     .unwrap_or_else(|| next_input.clone()),
             };
+            let input = if cut_off {
+                with_notice(input, OUTPUT_LIMIT_NOTICE)
+            } else {
+                input
+            };
             let continuation = if replay || local_history.is_some() {
                 Continuation::FullHistory
             } else {
@@ -973,7 +982,33 @@ impl Agent {
             }
             // A truncated or unfinished response can contain complete-looking
             // text and tool calls. Validate it before executing any local work.
+            if cut_off_at_output_limit(&response) && !cut_off && !final_round {
+                // Nothing of the response is kept or run. A cut-off that
+                // filled the context is compacted before the next request.
+                cut_off = true;
+                // What was streamed of it stays on screen: close it, so the
+                // next response does not continue its last line.
+                if let Some(listener) = text_listener {
+                    listener(ResponseDelta::MessageDone);
+                }
+                events.push(AgentEvent::RuntimeNotice {
+                    round,
+                    text: "The response was cut off at the output token limit and discarded; asking again for a shorter one.".into(),
+                });
+                if let Some(reason) = usage.stop_reason(token_limit) {
+                    return finish_limited(
+                        reason,
+                        usage,
+                        previous_response_id.unwrap_or_default(),
+                        &plan,
+                        events,
+                        session,
+                    );
+                }
+                continue;
+            }
             validate_response_status(&response)?;
+            cut_off = false;
             let response_id = response["id"]
                 .as_str()
                 .context("Responses API response did not contain an id")?
@@ -1177,6 +1212,34 @@ enum Continuation<'a> {
     /// The input is only what is new since the response with this id, which
     /// the endpoint stored (`None` on the first request).
     Previous(Option<&'a str>),
+}
+
+/// Sent once with the request that follows a response cut off at the output
+/// token limit. It is not kept in the history.
+const OUTPUT_LIMIT_NOTICE: &str = "Runtime notice: your previous response to this request was cut off at the output token limit before it finished, so it was discarded and nothing in it ran. Respond again, shorter: keep your reasoning brief, and write long output, such as a large file, in several smaller tool calls instead of one.";
+
+/// `input` with `notice` as its last user text, for one request. The notice
+/// joins a user message that ends the input rather than following it, for
+/// chat templates that need alternating roles.
+fn with_notice(input: Value, notice: &str) -> Value {
+    let part = json!({"type": "input_text", "text": notice});
+    let mut items = match input {
+        Value::Array(items) => items,
+        other => return other,
+    };
+    match items.last_mut() {
+        Some(last) if last["role"] == "user" && last["content"].is_array() => {
+            if let Some(parts) = last["content"].as_array_mut() {
+                parts.push(part);
+            }
+        }
+        Some(last) if last["role"] == "user" && last["content"].is_string() => {
+            let own = json!({"type": "input_text", "text": last["content"].clone()});
+            last["content"] = json!([own, part]);
+        }
+        _ => items.push(json!({"role": "user", "content": [part]})),
+    }
+    Value::Array(items)
 }
 
 /// Whether an output item asks ano to run a tool or answer an approval.
