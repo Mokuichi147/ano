@@ -681,7 +681,21 @@ impl Agent {
         if let Some(goal) = &goal {
             input.push(InputPart::Text(goal_notice(goal)));
         }
-        let user_input = build_user_input(&input).await?;
+        // Made once for the turn and kept in the history, so every request
+        // of this turn and the turns after it sends the same prefix.
+        let time_notice = self
+            .settings
+            .local_time
+            .filter(|_| origin.depth == 0)
+            .map(|now| local_time_notice(&now()));
+        let user_input = match &time_notice {
+            Some(notice) => {
+                let mut sent = input.clone();
+                sent.push(InputPart::Text(notice.clone()));
+                build_user_input(&sent).await?
+            }
+            None => build_user_input(&input).await?,
+        };
         // Shown to approval handlers to judge whether a call fits the request.
         let user_request = origin
             .user_request
@@ -713,7 +727,8 @@ impl Agent {
         // Usage of sub-agents started during the current round.
         let delegated_usage = Mutex::new(UsageSummary::default());
         if let Some(session) = session.as_deref_mut() {
-            let (original, runtime) = source_input(&request, goal.as_ref(), &user_input).await?;
+            let (original, runtime) =
+                source_input(&request, goal.as_ref(), time_notice.as_deref(), &user_input).await?;
             session.begin_turn_with_source(
                 &user_input,
                 &original,
@@ -790,15 +805,21 @@ impl Agent {
             });
         }
         let plan = Mutex::new(initial_plan);
+        let keep_tools = target.client.keeps_loaded_tools();
         let mut active = session
             .as_ref()
             .filter(|_| replay)
             .map(|session| {
                 // A new turn starts with one search's worth, the newest,
-                // so earlier turns' tools do not weigh on every request.
+                // so earlier turns' tools do not weigh on every request,
+                // unless the endpoint needs the tool list to stay the same.
                 ActiveTools::from_history(
                     &session.data().history,
-                    self.settings.tool_discovery_limit.max(1),
+                    if keep_tools {
+                        usize::MAX
+                    } else {
+                        self.settings.tool_discovery_limit.max(1)
+                    },
                 )
             })
             .unwrap_or_default();
@@ -1108,7 +1129,9 @@ impl Agent {
             }
             if let Some(selection) = selection {
                 active.merge(selection);
-                active.keep_newest(loaded_tools_limit(self.settings.tool_discovery_limit));
+                if !keep_tools {
+                    active.keep_newest(loaded_tools_limit(self.settings.tool_discovery_limit));
+                }
             }
 
             // Commentary is progress, including when it shares a response with
@@ -1275,15 +1298,24 @@ fn report_progress(items: &[Value], round: usize, streamed: bool, events: &Event
 async fn source_input(
     request: &RunRequest,
     goal: Option<&TaskGoal>,
+    time_notice: Option<&str>,
     user_input: &Value,
 ) -> Result<(Value, Value)> {
-    let runtime = match goal {
-        Some(goal) => build_user_input(&[InputPart::Text(goal_notice(goal))]).await?,
-        None => json!([]),
+    let notices: Vec<InputPart> = goal
+        .map(goal_notice)
+        .into_iter()
+        .chain(time_notice.map(str::to_string))
+        .map(InputPart::Text)
+        .collect();
+    let runtime = if notices.is_empty() {
+        json!([])
+    } else {
+        build_user_input(&notices).await?
     };
     let original = match (&request.raw_input, goal) {
         (Some(parts), _) if !parts.is_empty() => build_user_input(parts).await?,
-        (_, None) => user_input.clone(),
+        (_, None) if time_notice.is_none() => user_input.clone(),
+        (_, None) => build_user_input(&request.input).await?,
         (_, Some(goal)) => {
             let mut parts = request.input.clone();
             if goal.by_user {
@@ -1297,6 +1329,12 @@ async fn source_input(
         }
     };
     Ok((original, runtime))
+}
+
+/// The local time that ends the user's message of a turn. It starts as a
+/// runtime notice so that it is not taken for the user's own words.
+fn local_time_notice(now: &str) -> String {
+    format!("Runtime notice: the local time is {now}.")
 }
 
 /// Tell the model about a goal the user set for this run.
@@ -1389,11 +1427,12 @@ fn context_tokens_of(response: &Value) -> Option<u64> {
 }
 
 /// Whether an error says that a request exceeded the model's context, in
-/// the words of OpenAI, LM Studio, llama.cpp, and Ollama.
+/// the words of OpenAI, Anthropic, LM Studio, llama.cpp, and Ollama.
 fn is_context_overflow(error: &str) -> bool {
     let text = error.to_lowercase();
     [
         "context_length_exceeded",
+        "prompt is too long",
         "context length",
         "context window",
         "context size",

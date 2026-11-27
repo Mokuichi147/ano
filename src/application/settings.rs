@@ -54,6 +54,14 @@ pub struct AgentSettings {
     pub reasoning_effort: Option<String>,
     /// `reasoning.summary`; summaries are reported as progress events.
     pub reasoning_summary: Option<String>,
+    /// Gives the local time that the user's message of each turn ends with,
+    /// for runs whose instructions refer to the time (routines). The time
+    /// goes into the message, not the instructions, so that the instructions
+    /// stay the same from turn to turn: a changed prefix invalidates the
+    /// prompt cache and the reasoning kept from earlier turns. Set by the
+    /// harness, not the config file.
+    #[serde(skip)]
+    pub local_time: Option<fn() -> String>,
 }
 
 /// Check a `reasoning_effort` value; `field` names it in the error.
@@ -82,6 +90,7 @@ impl Default for AgentSettings {
             max_total_tokens: None,
             reasoning_effort: None,
             reasoning_summary: None,
+            local_time: None,
         }
     }
 }

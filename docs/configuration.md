@@ -73,7 +73,7 @@ project_instructions = ["AGENTS.md", "docs/agent-rules.md"]   # 既定は ["AGEN
 
 `environments.*.workspace` と MCP の `cwd` の相対パスは、設定ファイルのあるディレクトリを基準に解決します。OS 標準の設定ディレクトリに置いた設定では、絶対パスか `~/...` で指定してください。先頭の `~`（`~` と `~/...`）はホームディレクトリに展開します（MCP の `command` も同様）。CLI の `--workspace` は起動ディレクトリを基準にします。
 
-API キーは設定ファイルに保存せず、`api_key_env` で指定した環境変数から読み込みます。環境変数は `.env` にも書けます。起動時にカレントディレクトリ（無ければ親ディレクトリ）の `.env`、続いて OS 標準の設定ディレクトリの `.env`（`config.toml` の隣）を読みます。すでに設定されている変数は上書きしないため、優先順はシェルの環境変数、カレントの `.env`、設定ディレクトリの `.env` の順です。設定ディレクトリの `.env` は、どのディレクトリから起動しても使う API キー（MCP の `url` が参照する変数を含む）の置き場所に向いています。秘密情報を含むので、所有者だけが読めるようにしてください（`chmod 600`）。`OPENAI_BASE_URL` を設定すると、設定ファイルの `[api]` の `base_url` より優先して endpoint を変更できます（モックサーバーなど）。`[providers]` の接続先は `OPENAI_BASE_URL` の影響を受けません。
+API キーは設定ファイルに保存せず、`api_key_env` で指定した環境変数から読み込みます。環境変数は `.env` にも書けます。起動時にカレントディレクトリ（無ければ親ディレクトリ）の `.env`、続いて OS 標準の設定ディレクトリの `.env`（`config.toml` の隣）を読みます。すでに設定されている変数は上書きしないため、優先順はシェルの環境変数、カレントの `.env`、設定ディレクトリの `.env` の順です。設定ディレクトリの `.env` は、どのディレクトリから起動しても使う API キー（MCP の `url` が参照する変数を含む）の置き場所に向いています。秘密情報を含むので、所有者だけが読めるようにしてください（`chmod 600`）。`OPENAI_BASE_URL` を設定すると、設定ファイルの `[api]` の `base_url` より優先して endpoint を変更できます（モックサーバーなど）。`[providers]` の接続先と `wire_api = "anthropic"` の `[api]` は `OPENAI_BASE_URL` の影響を受けません。
 
 ## ローカル AI（LM Studio・Ollama など）
 
@@ -105,5 +105,31 @@ model = "ロードしたモデル名"
 - 要求と応答を Responses API の形式との間で変換するため、tool の実行・ストリーミング表示・セッション・要約による圧縮はそのまま使えます。サーバーは応答を保存しないので、毎回履歴全体を送ります。
 - 推論（`reasoning_content` または `reasoning`）は進捗として表示し、次の要求で assistant メッセージの `reasoning_content` として返します。推論の強さは `reasoning_effort` として送ります。
 - 使えるのは function tool（ano の tool と、stdio / Streamable HTTP で直接接続した MCP）だけです。Responses API 管理方式の MCP（既定の `transport`）は使えません。
+
+## Claude（Anthropic API）
+
+Anthropic の API キーで Claude を使うには、`wire_api = "anthropic"` を指定します。`base_url` と `api_key_env` を省略すると、`https://api.anthropic.com/v1` と `ANTHROPIC_API_KEY` を使います（`[api]` でも名前付きの接続先でも同じです）。
+
+```toml
+[providers.claude]
+wire_api = "anthropic"
+model = "claude-opus-5-5"
+```
+
+```sh
+export ANTHROPIC_API_KEY="..."     # または OS 標準の設定ディレクトリの .env に書く
+ano provider add claude --wire-api anthropic --model claude-opus-5-5
+ano provider use claude            # 既定の接続先にする
+ano model list --provider claude   # /v1/models の一覧
+```
+
+- Messages API（`POST /v1/messages`）と Responses API の形式を相互に変換するため、tool の実行・ストリーミング表示・セッション・要約による圧縮・フォールバックはそのまま使えます。サーバーは応答を保存しないので、毎回履歴全体を送ります。公式の endpoint では、前回までの履歴をプロンプトキャッシュから読ませる指定（`cache_control`）を付けます。
+- 推論の強さ（`reasoning_effort`）は `output_config.effort` として送ります。Claude には推論しない段階がないため、`none` と `minimal` は `low`、`ultra` は `max` にします。`reasoning_summary` を指定すると思考の要約（`thinking.display = "summarized"`）を受け取り、進捗として表示します。指定しなければモデルの既定（Claude Opus 5.5 などは本文を返さない）のままです。
+- 思考のブロックは署名ごと履歴に保存し、次の要求で同じ位置に戻します。Claude は思考より前の指示・tool の定義・会話が作られたときと同じでないと思考を受け付けないため、それらが変わったとき（`instructions` の変更、履歴の圧縮など）は、その後の思考を外して送ります。それでも拒否された場合は、思考を外して一度だけ送り直します。
+- `tool_search` で読み込んだ tool は遅延読み込み（`defer_loading`）として送り、その検索の結果を `tool_reference`（読み込んだ tool の参照）にします。常に送っている tool と、前の検索で読み込み済みの tool は参照しません（参照するものがない検索の結果は、テキストのまま送ります）。遅延読み込みの tool は参照されるまで前置きに含まれないので、tool を読み込んでも、それまでの思考とプロンプトキャッシュはそのまま使えます。そのために、Claude では読み込んだ tool を同じ会話の間は外しません（`tool_discovery_limit` の2倍を超えても、次のターンでも残します）。会話で最初に遅延読み込みの tool を加えた要求だけは、キャッシュを読めません（思考は外れません）。
+- 出力の上限（`max_tokens`）は `agent.max_output_tokens`、未指定なら 64,000（ストリームしない要求は 16,000）です。古いモデルなど上限の小さいモデルでは `max_output_tokens` を指定してください。
+- コンテキストの長さは `/v1/models/{model}` の `max_input_tokens` から取得し、その手前で履歴を圧縮します。上限を超えた要求（`prompt is too long`）も圧縮して送り直します。
+- 使えるのは function tool（ano の tool と、stdio / Streamable HTTP で直接接続した MCP）だけです。Responses API 管理方式の MCP（既定の `transport`）と音声の入力は使えません。画像は使えます。
+- `auth = "chatgpt"` とは組み合わせられません。Anthropic 互換の `/v1/messages` を提供するほかのサーバーにも、`base_url` を指定すれば接続できます（キーは任意）。
 
 ロードしたモデル名は `agent.model` または `--model` で指定します。tool calling の品質はモデルの tool use 対応に依存します（native tool use 対応モデルを推奨）。URL 形式の MCP は `url` で登録できますが、Secure MCP Tunnel（`tunnel_id`）は OpenAI Responses API の機能で、LM Studio では使えません。

@@ -214,6 +214,12 @@ const AGENT: &[Field] = &[
         Kind::Integer,
     ),
     field(
+        "clear_old_tool_results",
+        "古い tool 結果を消す",
+        "要約で圧縮する前に、古い tool の結果を消して履歴を空けます",
+        Kind::Bool,
+    ),
+    field(
         "roles",
         "役割ごとのプリセット",
         "",
@@ -226,11 +232,11 @@ macro_rules! connection_fields {
     ($($extra:expr),* $(,)?) => {
         &[
             $($extra,)*
-            field("base_url", "URL", "Responses API（または Chat Completions）のエンドポイント。LM Studio なら http://127.0.0.1:1234/v1", Kind::Text),
+            field("base_url", "URL", "Responses API（または Chat Completions・Anthropic Messages）のエンドポイント。LM Studio なら http://127.0.0.1:1234/v1。anthropic は省略すると https://api.anthropic.com/v1", Kind::Text),
             field("api_key_env", "API キーの環境変数", "API キーを入れた環境変数の名前（キーそのものは書きません）", Kind::Text),
             field("auth", "認証", "chatgpt は ChatGPT のサブスクリプション（先に ano auth login）", Kind::Choice { options: &["api_key", "chatgpt"] }),
             field("chatgpt_auth_file", "ChatGPT の認証情報の保存先", "", Kind::Text),
-            field("wire_api", "API の種類", "Responses API の無いサーバーには chat_completions", Kind::Choice { options: &["responses", "chat_completions"] }),
+            field("wire_api", "API の種類", "Responses API の無いサーバーには chat_completions、Claude には anthropic", Kind::Choice { options: &["responses", "chat_completions", "anthropic"] }),
             field("stream", "ストリーミング", "生成中の回答を表示します", Kind::Bool),
             field("timeout_secs", "タイムアウト（秒）", "", Kind::Integer),
             field("max_retries", "再試行の回数", "接続の失敗と 429・5xx の再試行", Kind::Integer),
@@ -642,6 +648,7 @@ pub fn defaults() -> Value {
             "tool_timeout_secs": agent.settings.tool_timeout_secs,
             "max_tool_output_bytes": agent.settings.max_tool_output_bytes,
             "compaction": agent.settings.compaction,
+            "clear_old_tool_results": agent.settings.clear_old_tool_results,
         },
         "api": {
             "base_url": api.base_url,

@@ -60,9 +60,11 @@ struct ProviderOptions {
     base_url: Option<String>,
     #[arg(long, value_enum)]
     auth: Option<AuthArg>,
-    /// API the endpoint speaks: `responses` (POST /responses, the default)
-    /// or `chat-completions` (POST /chat/completions) for servers without
-    /// the Responses API.
+    /// API the endpoint speaks: `responses` (POST /responses, the default),
+    /// `chat-completions` (POST /chat/completions) for servers without
+    /// the Responses API, or `anthropic` (POST /messages) for Claude through
+    /// Anthropic's API, which defaults to https://api.anthropic.com/v1 and
+    /// ANTHROPIC_API_KEY.
     #[arg(long, value_enum, value_name = "API")]
     wire_api: Option<WireApiArg>,
     /// Environment variable that holds the API key.
@@ -103,6 +105,7 @@ enum AuthArg {
 enum WireApiArg {
     Responses,
     ChatCompletions,
+    Anthropic,
 }
 
 /// A setting that `--unset` removes.
@@ -175,6 +178,7 @@ impl ProviderOptions {
                     match api {
                         WireApiArg::Responses => "responses",
                         WireApiArg::ChatCompletions => "chat_completions",
+                        WireApiArg::Anthropic => "anthropic",
                     }
                     .into(),
                 )
@@ -409,6 +413,7 @@ pub(super) fn endpoint(settings: &ApiSettings) -> String {
             WireApi::ChatCompletions => {
                 format!("{} (chat completions)", settings.effective_base_url())
             }
+            WireApi::Anthropic => format!("{} (anthropic)", settings.effective_base_url()),
         },
     }
 }

@@ -23,6 +23,10 @@ api_key_env = "OPENAI_API_KEY"
 # "chat_completions" (POST /chat/completions) for a server without the
 # Responses API. Chat completions carry function tools only: MCP servers must
 # be connected by ano (transport = "stdio" or "streamable_http").
+# "anthropic" speaks Anthropic's Messages API (POST /messages) to use Claude
+# with an Anthropic API key; base_url and api_key_env then default to
+# https://api.anthropic.com/v1 and ANTHROPIC_API_KEY. It also carries
+# function tools only.
 # wire_api = "responses"
 # Per-request timeout, and retries for connection failures and 429 / 5xx.
 timeout_secs = 600
@@ -45,7 +49,8 @@ stream = true
 # choose another with --provider NAME,
 # `provider = "NAME"` in an environment, or /provider NAME in `ano chat`.
 # timeout_secs, max_retries, and stream default to the [api] values;
-# base_url, api_key_env, and wire_api do not (they default to OpenAI's).
+# base_url, api_key_env, and wire_api do not (they default to OpenAI's, or
+# Anthropic's with wire_api = "anthropic").
 # OPENAI_BASE_URL only overrides [api], never a named provider.
 # [providers.lan]
 # base_url = "http://192.168.1.10:1234/v1"
@@ -76,6 +81,11 @@ stream = true
 # [providers.chat]
 # base_url = "http://192.168.1.10:8080/v1"
 # wire_api = "chat_completions"
+#
+# Claude through Anthropic's API, with the key in ANTHROPIC_API_KEY.
+# [providers.claude]
+# wire_api = "anthropic"
+# model = "claude-opus-5-5"
 
 # Presets: a provider, a model, and a reasoning effort switched together
 # (`ano preset add/set/remove` edits them). Choose one with --preset NAME,

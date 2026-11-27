@@ -336,6 +336,7 @@ impl AppConfig {
                 .and_then(toml::Value::as_bool)
                 == Some(true)
         })?;
+        config.api.apply_wire_api_defaults();
         config.validate()?;
         Ok(config)
     }

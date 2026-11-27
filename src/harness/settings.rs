@@ -97,6 +97,7 @@ impl Default for AgentTable {
                     max_total_tokens,
                     reasoning_effort,
                     reasoning_summary,
+                    local_time: _,
                 },
             project_instructions,
             approval_mode,
@@ -170,6 +171,7 @@ impl From<AgentTable> for AgentConfig {
                 max_total_tokens,
                 reasoning_effort,
                 reasoning_summary,
+                local_time: None,
             },
             project_instructions,
             approval_mode,
@@ -293,6 +295,7 @@ mod tests {
             max_total_tokens,
             reasoning_effort,
             reasoning_summary,
+            local_time,
         } = config.settings;
         assert_eq!(
             (
@@ -319,6 +322,10 @@ mod tests {
         assert_eq!(max_total_tokens, Some(9));
         assert_eq!(reasoning_effort.as_deref(), Some("low"));
         assert_eq!(reasoning_summary.as_deref(), Some("concise"));
+        assert!(
+            local_time.is_none(),
+            "the config file does not set the clock"
+        );
         assert!(config.project_instructions.is_empty());
         assert_eq!(config.approval_mode, ApprovalMode::Deny);
         assert_eq!(config.approval_model.as_deref(), Some("a"));

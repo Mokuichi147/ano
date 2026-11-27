@@ -209,9 +209,15 @@ async fn run_with_a_goal_reports_verified_criteria() {
     let requests = requests.lock().unwrap();
     let input = requests[0]["input"].as_array().unwrap();
     assert_eq!(input.len(), 1);
-    assert_eq!(input[0]["content"].as_array().unwrap().len(), 1);
-    assert!(input[0]["content"][0]["text"]
+    // The goal, then the local time that routines add to each turn.
+    let parts = input[0]["content"].as_array().unwrap();
+    assert_eq!(parts.len(), 2, "{parts:?}");
+    assert!(parts[0]["text"]
         .as_str()
         .unwrap()
         .contains("Objective: Docs are updated\n"));
+    assert!(parts[1]["text"]
+        .as_str()
+        .unwrap()
+        .starts_with("Runtime notice: the local time is "));
 }
